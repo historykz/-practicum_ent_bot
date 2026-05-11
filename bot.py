@@ -1,9 +1,4 @@
-“””
-practicum_ent_bot – Production-ready Telegram бот для тестирования абитуриентов
-Версия: 2.0
-python-telegram-bot == 22.7
-Деплой: Railway.com + GitHub
-“””
+# practicum_ent_bot v2.0
 
 # =========================================
 
@@ -3745,7 +3740,7 @@ topic = conn.execute("SELECT name FROM topics WHERE topic_id=?", (topic_id,)).fe
 conn.close()
 
 await query.edit_message_text(
-    f"✅ Сохранено {saved} вопросов в тему «{topic['name'] if topic else '--'}»!",
+    f'Сохранено {saved} вопросов в тему {topic["name"] if topic else "--"}!',
     reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ Назад в импорт", callback_data="adm:import")],
         [InlineKeyboardButton("🏠 Главное меню",    callback_data="adm:back")],
