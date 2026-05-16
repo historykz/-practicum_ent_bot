@@ -1,4 +1,4 @@
-“”“Хендлеры конспектов.”””
+"""Хендлеры конспектов."""
 import logging
 
 from aiogram import Router, F, Bot
@@ -15,7 +15,7 @@ from services import notes_service, subscription_service
 router = Router(name=“notes”)
 log = logging.getLogger(**name**)
 
-@router.callback_query(F.data == “m:notes”)
+@router.callback_query(F.data == "m:notes")
 async def cb_notes_menu(call: CallbackQuery, user: dict):
 lang = user.get(‘language’) or ‘ru’
 notes = notes_service.list_active_notes(lang)
