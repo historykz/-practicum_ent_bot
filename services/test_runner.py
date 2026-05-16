@@ -1,0 +1,523 @@
+"""
+Сервис прохождения теста.
+
+Реализует:
+- Создание попытки.
+- Перемешивание вопросов и вариантов на уровне попытки.
+- Отдельный таймер на каждый вопрос (asyncio task).
+- Защиту от повторного ответа.
+- Пауза при последовательных пропусках.
+- Подсчёт результата + слабые темы.
+
+Architecture note:
+Активные таймеры хранятся в памяти процесса. При перезапуске бот восстанавливает
+паузу (active=False) и предложит пользователю продолжить вручную.
+"""
+import asyncio
+import json
+import logging
+import random
+import time
+from typing import Optional
+
+from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+
+import database as db
+from config import (
+    DEFAULT_TIME_PER_QUESTION,
+    MAX_PAUSE_MISS_COUNT,
+    PROTECT_CONTENT,
+)
+from keyboards import options_kb, pause_personal_kb
+from locales import t
+from utils import (
+    build_question_text,
+    escape_html,
+    get_user_by_id,
+    now_iso,
+    percent_to_level,
+)
+
+logger = logging.getLogger(__name__)
+
+# Активные таймеры: attempt_id -> asyncio.Task
+_timers: dict[int, asyncio.Task] = {}
+# Активные сообщения с вопросом: attempt_id -> (chat_id, message_id)
+_active_messages: dict[int, tuple[int, int]] = {}
+
+
+def cancel_timer(attempt_id: int) -> None:
+    """Отменить таймер вопроса."""
+    task = _timers.pop(attempt_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+def get_test(test_id: int) -> Optional[dict]:
+    row = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+    return dict(row) if row else None
+
+
+def get_test_questions(test_id: int) -> list[dict]:
+    rows = db.fetchall(
+        "SELECT * FROM questions WHERE test_id=? ORDER BY order_num, id",
+        (test_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+def get_question(question_id: int) -> Optional[dict]:
+    row = db.fetchone("SELECT * FROM questions WHERE id=?", (question_id,))
+    return dict(row) if row else None
+
+
+def get_question_options(question_id: int) -> list[dict]:
+    rows = db.fetchall(
+        "SELECT * FROM question_options WHERE question_id=? ORDER BY order_num, id",
+        (question_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+def get_attempt(attempt_id: int) -> Optional[dict]:
+    row = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (attempt_id,))
+    return dict(row) if row else None
+
+
+def count_user_attempts(user_id: int, test_id: int) -> int:
+    row = db.fetchone(
+        "SELECT COUNT(*) AS c FROM test_attempts WHERE user_id=? AND test_id=? AND status IN ('finished','aborted')",
+        (user_id, test_id),
+    )
+    return row["c"] if row else 0
+
+
+def create_attempt(user_id: int, test_id: int, language: str,
+                   group_id: Optional[int] = None,
+                   started_by_user_id: Optional[int] = None) -> Optional[int]:
+    """Создаёт попытку прохождения теста. Возвращает attempt_id или None."""
+    test = get_test(test_id)
+    if not test:
+        return None
+    questions = get_test_questions(test_id)
+    if not questions:
+        return None
+
+    # Перемешать порядок вопросов
+    qids = [q["id"] for q in questions]
+    if test["shuffle_questions"]:
+        random.shuffle(qids)
+
+    # Перемешать варианты для каждого вопроса
+    options_order: dict[str, list[int]] = {}
+    if test["shuffle_options"]:
+        for qid in qids:
+            opts = get_question_options(qid)
+            ids = [o["id"] for o in opts]
+            random.shuffle(ids)
+            options_order[str(qid)] = ids
+
+    # Определяем номер попытки и засчитывается ли
+    finished_count = count_user_attempts(user_id, test_id)
+    attempt_num = finished_count + 1
+    is_first = (finished_count == 0)
+    is_counted = 1
+    if test["first_attempt_only"] and not is_first:
+        is_counted = 0
+
+    db.execute(
+        """INSERT INTO test_attempts
+        (user_id, test_id, current_question_index, question_order, options_order,
+         start_time, status, language, attempt_num, is_first_attempt, is_counted,
+         group_id, started_by_user_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            user_id, test_id, 0,
+            json.dumps(qids),
+            json.dumps(options_order),
+            now_iso(),
+            "in_progress",
+            language,
+            attempt_num,
+            1 if is_first else 0,
+            is_counted,
+            group_id,
+            started_by_user_id,
+        ),
+    )
+    row = db.fetchone("SELECT last_insert_rowid() AS id")
+    return row["id"] if row else None
+
+
+def _get_ordered_options(question_id: int, attempt: dict) -> list[dict]:
+    """Возвращает варианты в нужном для пользователя порядке."""
+    opts = get_question_options(question_id)
+    try:
+        options_order = json.loads(attempt["options_order"] or "{}")
+    except (ValueError, TypeError):
+        options_order = {}
+    order = options_order.get(str(question_id))
+    if not order:
+        return opts
+    by_id = {o["id"]: o for o in opts}
+    return [by_id[oid] for oid in order if oid in by_id]
+
+
+async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None:
+    """Отправляет в чат текущий вопрос. Запускает таймер."""
+    attempt = get_attempt(attempt_id)
+    if not attempt or attempt["status"] != "in_progress":
+        return
+    test = get_test(attempt["test_id"])
+    if not test:
+        return
+    try:
+        qids: list[int] = json.loads(attempt["question_order"] or "[]")
+    except (ValueError, TypeError):
+        qids = []
+    idx = attempt["current_question_index"]
+    if idx >= len(qids):
+        # Все вопросы пройдены - финализируем
+        await finalize_attempt(bot, attempt_id, chat_id)
+        return
+    qid = qids[idx]
+    q = get_question(qid)
+    if not q:
+        # Пропуск битого вопроса
+        db.execute(
+            "UPDATE test_attempts SET current_question_index=current_question_index+1 WHERE id=?",
+            (attempt_id,),
+        )
+        await send_current_question(bot, attempt_id, chat_id)
+        return
+    options = _get_ordered_options(qid, attempt)
+    time_per_q = test["time_per_question"] or DEFAULT_TIME_PER_QUESTION
+    lang = attempt["language"] or "ru"
+
+    text = build_question_text(idx + 1, len(qids), q["text"], time_per_q, lang)
+    try:
+        if q.get("image_file_id"):
+            msg = await bot.send_photo(
+                chat_id=chat_id,
+                photo=q["image_file_id"],
+                caption=text,
+                reply_markup=options_kb(attempt_id, qid, options),
+                parse_mode="HTML",
+                protect_content=PROTECT_CONTENT,
+            )
+        else:
+            msg = await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=options_kb(attempt_id, qid, options),
+                parse_mode="HTML",
+                protect_content=PROTECT_CONTENT,
+            )
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.warning("Не удалось отправить вопрос: %s", e)
+        return
+
+    _active_messages[attempt_id] = (chat_id, msg.message_id)
+    # Запускаем таймер
+    cancel_timer(attempt_id)
+    _timers[attempt_id] = asyncio.create_task(
+        _question_timeout(bot, attempt_id, qid, chat_id, time_per_q)
+    )
+
+
+async def _question_timeout(bot: Bot, attempt_id: int, question_id: int,
+                            chat_id: int, seconds: int) -> None:
+    """Таймер на вопрос. По истечении - пропуск."""
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError:
+        return
+    # Проверяем что попытка ещё активна и на этом же вопросе
+    attempt = get_attempt(attempt_id)
+    if not attempt or attempt["status"] != "in_progress":
+        return
+    try:
+        qids: list[int] = json.loads(attempt["question_order"] or "[]")
+    except (ValueError, TypeError):
+        qids = []
+    idx = attempt["current_question_index"]
+    if idx >= len(qids) or qids[idx] != question_id:
+        return
+    # Проверяем, не отвечал ли пользователь
+    answered = db.fetchone(
+        "SELECT id FROM attempt_answers WHERE attempt_id=? AND question_id=?",
+        (attempt_id, question_id),
+    )
+    if answered:
+        return
+    # Засчитываем пропуск
+    db.execute(
+        "INSERT INTO attempt_answers (attempt_id, question_id, skipped) VALUES (?,?,1)",
+        (attempt_id, question_id),
+    )
+    db.execute(
+        "UPDATE test_attempts SET skipped_answers=skipped_answers+1, "
+        "missed_questions_counter=missed_questions_counter+1, "
+        "current_question_index=current_question_index+1 WHERE id=?",
+        (attempt_id,),
+    )
+
+    # Сообщение о таймауте
+    lang = attempt["language"] or "ru"
+    try:
+        await bot.send_message(chat_id=chat_id, text=t("question_skipped", lang),
+                               protect_content=PROTECT_CONTENT)
+    except Exception:
+        pass
+
+    # Проверяем пауза или дальше
+    attempt2 = get_attempt(attempt_id)
+    if attempt2 and attempt2["missed_questions_counter"] >= MAX_PAUSE_MISS_COUNT:
+        await pause_attempt(bot, attempt_id, chat_id)
+        return
+    await send_current_question(bot, attempt_id, chat_id)
+
+
+async def process_answer(bot: Bot, attempt_id: int, question_id: int,
+                        option_id: int, chat_id: int) -> str:
+    """
+    Обрабатывает ответ пользователя.
+    Возвращает короткий код: 'ok', 'already', 'invalid', 'old'.
+    """
+    attempt = get_attempt(attempt_id)
+    if not attempt:
+        return "old"
+    if attempt["status"] != "in_progress":
+        return "old"
+
+    try:
+        qids: list[int] = json.loads(attempt["question_order"] or "[]")
+    except (ValueError, TypeError):
+        qids = []
+    idx = attempt["current_question_index"]
+    if idx >= len(qids):
+        return "old"
+    # Только текущий вопрос
+    if qids[idx] != question_id:
+        return "old"
+
+    existing = db.fetchone(
+        "SELECT id FROM attempt_answers WHERE attempt_id=? AND question_id=?",
+        (attempt_id, question_id),
+    )
+    if existing:
+        return "already"
+
+    # Проверяем правильность
+    opt = db.fetchone(
+        "SELECT * FROM question_options WHERE id=? AND question_id=?",
+        (option_id, question_id),
+    )
+    if not opt:
+        return "invalid"
+    is_correct = bool(opt["is_correct"])
+
+    db.execute(
+        "INSERT INTO attempt_answers (attempt_id, question_id, selected_option_id, is_correct) VALUES (?,?,?,?)",
+        (attempt_id, question_id, option_id, 1 if is_correct else 0),
+    )
+    if is_correct:
+        db.execute(
+            "UPDATE test_attempts SET correct_answers=correct_answers+1, "
+            "missed_questions_counter=0, current_question_index=current_question_index+1 WHERE id=?",
+            (attempt_id,),
+        )
+    else:
+        db.execute(
+            "UPDATE test_attempts SET wrong_answers=wrong_answers+1, "
+            "missed_questions_counter=0, current_question_index=current_question_index+1 WHERE id=?",
+            (attempt_id,),
+        )
+
+    cancel_timer(attempt_id)
+    # Следующий вопрос или финал
+    attempt2 = get_attempt(attempt_id)
+    if attempt2 and attempt2["current_question_index"] >= len(qids):
+        await finalize_attempt(bot, attempt_id, chat_id)
+    else:
+        await send_current_question(bot, attempt_id, chat_id)
+    return "ok"
+
+
+async def pause_attempt(bot: Bot, attempt_id: int, chat_id: int) -> None:
+    """Ставит тест на паузу."""
+    db.execute(
+        "UPDATE test_attempts SET status='paused', pause_time=? WHERE id=?",
+        (now_iso(), attempt_id),
+    )
+    cancel_timer(attempt_id)
+    attempt = get_attempt(attempt_id)
+    if not attempt:
+        return
+    lang = attempt["language"] or "ru"
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=t("paused_personal", lang),
+            reply_markup=pause_personal_kb(attempt_id, lang),
+            protect_content=PROTECT_CONTENT,
+        )
+    except Exception:
+        pass
+
+
+async def resume_attempt(bot: Bot, attempt_id: int, chat_id: int) -> None:
+    db.execute(
+        "UPDATE test_attempts SET status='in_progress', pause_time=NULL, "
+        "missed_questions_counter=0 WHERE id=?",
+        (attempt_id,),
+    )
+    await send_current_question(bot, attempt_id, chat_id)
+
+
+async def abort_attempt(bot: Bot, attempt_id: int, chat_id: int) -> None:
+    """Завершить досрочно."""
+    cancel_timer(attempt_id)
+    db.execute(
+        "UPDATE test_attempts SET status='aborted', end_time=? WHERE id=?",
+        (now_iso(), attempt_id),
+    )
+    await finalize_attempt(bot, attempt_id, chat_id, aborted=True)
+
+
+async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
+                           aborted: bool = False) -> None:
+    """Подсчёт и отправка результатов."""
+    cancel_timer(attempt_id)
+    attempt = get_attempt(attempt_id)
+    if not attempt:
+        return
+    test = get_test(attempt["test_id"])
+    if not test:
+        return
+    try:
+        qids: list[int] = json.loads(attempt["question_order"] or "[]")
+    except (ValueError, TypeError):
+        qids = []
+    total = len(qids)
+    correct = attempt["correct_answers"]
+    wrong = attempt["wrong_answers"]
+    skipped = attempt["skipped_answers"]
+    # Всё что не отвечено - в skipped (если abort посередине)
+    answered_total = correct + wrong + skipped
+    if answered_total < total:
+        extra_skipped = total - answered_total
+        skipped += extra_skipped
+        db.execute(
+            "UPDATE test_attempts SET skipped_answers=? WHERE id=?",
+            (skipped, attempt_id),
+        )
+
+    percent = round((correct / total) * 100, 1) if total else 0.0
+    score = correct  # 1 балл за вопрос для простоты; можно домножить на question.score
+
+    status = "aborted" if aborted else "finished"
+    db.execute(
+        "UPDATE test_attempts SET status=?, end_time=?, score=? WHERE id=?",
+        (status, now_iso(), score, attempt_id),
+    )
+
+    lang = attempt["language"] or "ru"
+
+    # Слабые темы
+    weak = compute_weak_topics(attempt_id)
+    if weak:
+        weak_text = "\n".join(f"• {escape_html(w)}" for w in weak)
+    else:
+        weak_text = t("no_weak_topics", lang)
+
+    level = percent_to_level(percent, lang)
+    counted_label = t("attempt_counted", lang) if attempt["is_counted"] else t("attempt_not_counted", lang)
+    result_text = t(
+        "test_results", lang,
+        correct=correct, wrong=wrong, skipped=skipped,
+        score=correct, total=total, percent=percent,
+        attempt_num=attempt["attempt_num"], counted=counted_label,
+        level=level,
+    )
+    result_text += f"\n\n<b>{t('weak_topics_label', lang)}:</b>\n{weak_text}"
+
+    try:
+        await bot.send_message(chat_id=chat_id, text=result_text, parse_mode="HTML",
+                               protect_content=PROTECT_CONTENT)
+    except Exception:
+        pass
+
+    # Опционально: показать правильные ответы и объяснения
+    if test["show_correct"] or test["show_explanation"]:
+        await _send_answer_review(bot, chat_id, attempt_id, test, lang)
+
+    # Обновляем стрик для daily, если это был daily-тест
+    if test["test_type"] == "daily" and not aborted:
+        try:
+            from services.daily_service import update_streak_after_daily
+            update_streak_after_daily(attempt["user_id"], percent)
+        except Exception as e:
+            logger.exception("update_streak error: %s", e)
+
+
+def compute_weak_topics(attempt_id: int) -> list[str]:
+    """Возвращает темы, по которым процент правильных ниже 60%."""
+    rows = db.fetchall(
+        """SELECT q.topic, AVG(aa.is_correct) AS acc, COUNT(*) AS cnt
+           FROM attempt_answers aa
+           JOIN questions q ON aa.question_id = q.id
+           WHERE aa.attempt_id=? AND q.topic <> ''
+           GROUP BY q.topic
+           HAVING cnt >= 2 AND acc < 0.6
+           ORDER BY acc ASC""",
+        (attempt_id,),
+    )
+    return [r["topic"] for r in rows]
+
+
+async def _send_answer_review(bot: Bot, chat_id: int, attempt_id: int,
+                              test: dict, lang: str) -> None:
+    """Отправляет разбор по каждому вопросу (по одному сообщению на 5 вопросов)."""
+    rows = db.fetchall(
+        """SELECT q.id AS qid, q.text AS qtext, q.explanation,
+                  qo.text AS user_opt, qo.is_correct AS user_correct,
+                  (SELECT text FROM question_options WHERE question_id=q.id AND is_correct=1 LIMIT 1) AS correct_opt,
+                  aa.skipped
+           FROM attempt_answers aa
+           JOIN questions q ON aa.question_id = q.id
+           LEFT JOIN question_options qo ON aa.selected_option_id = qo.id
+           WHERE aa.attempt_id=?
+           ORDER BY aa.id""",
+        (attempt_id,),
+    )
+    chunk: list[str] = []
+    counter = 0
+    for r in rows:
+        counter += 1
+        if r["skipped"]:
+            mark = "⏱"
+        elif r["user_correct"]:
+            mark = "✅"
+        else:
+            mark = "❌"
+        block = f"{mark} <b>{counter}.</b> {escape_html(r['qtext'])}"
+        if test["show_correct"] and r["correct_opt"]:
+            block += f"\n<b>{t('correct_answer_label', lang)}:</b> {escape_html(r['correct_opt'])}"
+        if test["show_explanation"] and r["explanation"]:
+            block += f"\n<i>{t('explanation', lang)}: {escape_html(r['explanation'])}</i>"
+        chunk.append(block)
+        if len(chunk) >= 5:
+            try:
+                await bot.send_message(chat_id=chat_id, text="\n\n".join(chunk),
+                                       parse_mode="HTML", protect_content=PROTECT_CONTENT)
+            except Exception:
+                pass
+            chunk = []
+    if chunk:
+        try:
+            await bot.send_message(chat_id=chat_id, text="\n\n".join(chunk),
+                                   parse_mode="HTML", protect_content=PROTECT_CONTENT)
+        except Exception:
+            pass
