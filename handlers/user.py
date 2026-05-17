@@ -176,9 +176,12 @@ async def cb_run_test(call: CallbackQuery, state: FSMContext, user: dict):
 
     # Проверка доступа
     if test['is_paid'] and not utils.has_paid_access(user['id'], test_id=test['id']):
-        await call.answer(t("noaccess_test", lang, manager=config.MANAGER_USERNAME),
-                          show_alert=True)
-        return
+        # Возможно, открыл доступ через 10 приглашений
+        from services import referral_service as _rs
+        if not _rs.user_can_unlock_paid_test(user['id']):
+            await call.answer(t("noaccess_test", lang, manager=config.MANAGER_USERNAME),
+                              show_alert=True)
+            return
 
     # Лимит попыток
     if test['attempts_limit']:
@@ -277,37 +280,58 @@ async def cb_share(call: CallbackQuery, user: dict):
     if not tests:
         await call.answer(t("no_tests", lang), show_alert=True)
         return
-    # Выбор теста
     from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
     kb = InlineKeyboardBuilder()
+    # Быстрая кнопка: открыть нативный пикер чатов (выдаст список всех наших тестов)
+    kb.row(InlineKeyboardButton(
+        text="🚀 Открыть выбор чата (все тесты)",
+        switch_inline_query="",
+    ))
     for tst in tests[:20]:
-        kb.button(text=tst['title'][:60], callback_data=f"sharetest:{tst['id']}")
+        kb.button(text=f"📋 {tst['title'][:50]}", callback_data=f"sharetest:{tst['id']}")
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
     try:
-        await call.message.edit_text(t("share_choose_test", lang),
-                                     reply_markup=kb.as_markup())
+        await call.message.edit_text(
+            "📨 <b>Поделиться тестом</b>\n\n"
+            "Выберите тест — получите карточку как у @QuizBot, "
+            "с кнопками <b>«Пройти тест»</b>, <b>«Отправить в группу»</b>, "
+            "<b>«Поделиться»</b>.\n\n"
+            "Либо нажмите «Открыть выбор чата» — Telegram сразу покажет "
+            "список ваших чатов для отправки.",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
     except Exception:
-        await call.message.answer(t("share_choose_test", lang),
-                                  reply_markup=kb.as_markup())
+        await call.message.answer(
+            "📨 <b>Поделиться тестом</b>\n\nВыберите тест:",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("sharetest:"))
 async def cb_share_test(call: CallbackQuery, user: dict):
+    """Показываем QuizBot-стиль карточку теста с тремя кнопками."""
     lang = _resolve_lang(user)
     try:
         test_id = int(call.data.split(":")[1])
     except (ValueError, IndexError):
         await call.answer()
         return
-    link = share_service.build_test_deep_link(test_id)
-    text = t("share_link_msg", lang, link=link)
+    test = test_runner.get_test(test_id)
+    if not test:
+        await call.answer(t("test_not_found", lang), show_alert=True)
+        return
+    text, kb = share_service.build_test_card(test)
     try:
-        await call.message.edit_text(text, reply_markup=back_kb(lang, "m:menu"),
-                                     disable_web_page_preview=True)
+        await call.message.delete()
     except Exception:
-        await call.message.answer(text, reply_markup=back_kb(lang, "m:menu"))
+        pass
+    await call.message.answer(text, reply_markup=kb, parse_mode="HTML",
+                               disable_web_page_preview=True)
     await call.answer()
 
 
