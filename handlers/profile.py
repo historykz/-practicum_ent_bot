@@ -32,11 +32,12 @@ def _build_profile_text(user: dict, lang: str) -> str:
     refs = referral_service.count_referrals(user['id'])
 
     premium_info = utils.get_premium_info(user['id'])
-    if premium_info['is_premium']:
-        if premium_info['expires_at'] is None:
+    if premium_info:
+        expires_at = premium_info.get('expires_at')
+        if expires_at is None or expires_at == '':
             prem_line = f"{t('profile_premium_on', lang)} ({t('profile_premium_forever', lang)})"
         else:
-            prem_line = f"{t('profile_premium_on', lang)} {t('profile_premium_until', lang)} {premium_info['expires_at'][:10]}"
+            prem_line = f"{t('profile_premium_on', lang)} {t('profile_premium_until', lang)} {str(expires_at)[:10]}"
     else:
         prem_line = t('profile_premium_off', lang)
 
