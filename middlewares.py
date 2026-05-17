@@ -33,6 +33,15 @@ class AntiSpamMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         if not user:
             return await handler(event, data)
+
+        # Пропускаем без проверки: Poll-сообщения и пересланные (массовый импорт админом).
+        if isinstance(event, Message):
+            if event.poll is not None:
+                return await handler(event, data)
+            if event.forward_origin is not None or event.forward_from is not None \
+                    or event.forward_from_chat is not None:
+                return await handler(event, data)
+
         now = time.monotonic()
         last = self._last.get(user.id, 0)
         if now - last < ANTISPAM_COOLDOWN_SECONDS:
