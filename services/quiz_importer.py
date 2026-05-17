@@ -101,6 +101,62 @@ def save_poll_as_question(test_id: int, poll: Poll, imported_by: int) -> tuple[s
     return "draft", drow["id"]
 
 
+def save_poll_dict_as_question(test_id: int, p: dict, imported_by: int) -> str:
+    """
+    Сохраняет poll (приходящий как dict из FSM-буфера).
+    Возвращает 'ok' | 'draft' | 'err'.
+    """
+    question_text = (p.get("question") or "").strip()
+    options_texts = p.get("options") or []
+    if not question_text or len(options_texts) < 2:
+        return "err"
+    correct_option_id = p.get("correct_option_id")
+    explanation = p.get("explanation") or ""
+    poll_id = p.get("id") or ""
+
+    try:
+        db.execute(
+            """INSERT INTO imported_polls (test_id, poll_id, question_text, raw_data,
+                                          correct_option_id, needs_manual_correct_answer, imported_by)
+               VALUES (?,?,?,?,?,?,?)""",
+            (test_id, poll_id, question_text, json.dumps(p, ensure_ascii=False),
+             correct_option_id,
+             0 if correct_option_id is not None else 1,
+             imported_by),
+        )
+    except Exception as e:
+        logger.warning("imported_polls insert: %s", e)
+
+    if correct_option_id is not None:
+        row = db.fetchone(
+            "SELECT COALESCE(MAX(order_num), 0) AS m FROM questions WHERE test_id=?",
+            (test_id,),
+        )
+        cur_order = (row["m"] if row else 0) + 1
+        db.execute(
+            """INSERT INTO questions (test_id, text, explanation, source_type,
+                                      poll_id, order_num)
+               VALUES (?,?,?,?,?,?)""",
+            (test_id, question_text, explanation, "poll_import", poll_id, cur_order),
+        )
+        qid = db.fetchone("SELECT last_insert_rowid() AS id")["id"]
+        for i, opt_text in enumerate(options_texts):
+            db.execute(
+                "INSERT INTO question_options (question_id, text, is_correct, order_num) VALUES (?,?,?,?)",
+                (qid, opt_text, 1 if i == correct_option_id else 0, i),
+            )
+        return "ok"
+
+    db.execute(
+        """INSERT INTO question_drafts (test_id, source_type, question_text, raw_options,
+                                        status, created_by)
+           VALUES (?,?,?,?,?,?)""",
+        (test_id, "poll_forwarded", question_text,
+         json.dumps(options_texts, ensure_ascii=False), "pending", imported_by),
+    )
+    return "draft"
+
+
 def list_drafts(test_id: int) -> list[dict]:
     rows = db.fetchall(
         "SELECT * FROM question_drafts WHERE test_id=? AND status='pending' ORDER BY id",
