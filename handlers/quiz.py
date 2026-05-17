@@ -6,7 +6,7 @@ import random
 
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, PollAnswer
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 
@@ -477,3 +477,22 @@ async def _finalize_group(bot: Bot, gqid: int, chat_id: int):
         await bot.send_message(chat_id, t("group_results", lang, results=results_text))
     except Exception:
         pass
+
+
+@router.poll_answer()
+async def on_poll_answer(poll_answer: PollAnswer):
+    """Ответ из Quiz Poll — личный тест."""
+    try:
+        # У PollAnswer есть bot из контекста, но безопаснее взять из Router
+        from aiogram import Bot
+        bot = poll_answer.bot
+        if bot is None:
+            return
+        await test_runner.process_poll_answer(
+            bot,
+            poll_answer.poll_id,
+            poll_answer.option_ids,
+            poll_answer.user.id,
+        )
+    except Exception as e:
+        log.warning("poll_answer handler error: %s", e)
