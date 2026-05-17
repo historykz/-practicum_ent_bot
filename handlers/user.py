@@ -75,45 +75,39 @@ async def cb_tests_page(call: CallbackQuery, user: dict):
 
 
 async def show_test_card(bot: Bot, chat_id: int, user_tg_id: int, test_id: int, lang: str):
-    """Показать карточку теста — используется и из callback, и из deep-link."""
+    """Показать карточку теста — QuizBot-стиль (как при шеринге)."""
     test = test_runner.get_test(test_id)
     if not test or test['status'] != 'active':
         await bot.send_message(chat_id, t("test_not_found", lang),
                                reply_markup=back_kb(lang, "m:tests"))
         return
 
-    qcount = db.fetchone(
-        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test['id'],))['c']
     user = utils.get_user_by_tg(user_tg_id)
     has_access = utils.has_paid_access(user['id'], test_id=test['id']) if user else False
 
-    text = t("test_card", lang,
-             title=utils.escape_html(test['title']),
-             description=utils.escape_html(test['description'] or ""),
-             subject=utils.escape_html(test['subject'] or "—"),
-             grade=test['grade'] or "—",
-             category=utils.escape_html(test['category'] or "—"),
-             langlabel=lang.upper(),
-             ttype=_ttype_label(test['test_type'], lang),
-             qcount=qcount,
-             time_per_q=test['time_per_question'],
-             attempts_limit=test['attempts_limit'] or "∞",
-             access=_access_label(test, lang))
-
+    # Платный тест без доступа — показываем покупку
     if test['is_paid'] and not has_access:
-        await bot.send_message(chat_id, text)
-        await bot.send_message(
-            chat_id,
-            t("paid_test_card", lang, price=test['price'], manager=config.MANAGER_USERNAME),
-            reply_markup=paid_test_kb(test['id'], lang, config.MANAGER_USERNAME),
-        )
-        return
+        from services import referral_service as _rs
+        if not _rs.user_can_unlock_paid_test(user['id']):
+            qcount = db.fetchone(
+                "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test['id'],))['c']
+            short_card = (
+                f"💰 <b>{utils.escape_html(test['title'])}</b>\n"
+                f"📚 {qcount} вопросов · ⏱ {test['time_per_question']} сек\n\n"
+                f"<i>Это платный тест.</i>"
+            )
+            await bot.send_message(chat_id, short_card)
+            await bot.send_message(
+                chat_id,
+                t("paid_test_card", lang, price=test['price'], manager=config.MANAGER_USERNAME),
+                reply_markup=paid_test_kb(test['id'], lang, config.MANAGER_USERNAME),
+            )
+            return
 
-    await bot.send_message(
-        chat_id, text,
-        reply_markup=test_card_kb(test['id'], lang,
-                                   allow_group=bool(test['allow_in_group'])),
-    )
+    # Бесплатный или есть доступ — QuizBot-style карточка
+    card_text, card_kb = share_service.build_test_card(dict(test), in_bot=True)
+    await bot.send_message(chat_id, card_text, reply_markup=card_kb,
+                            parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.callback_query(F.data.startswith("test:"))
