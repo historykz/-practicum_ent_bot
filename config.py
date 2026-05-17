@@ -25,6 +25,14 @@ ADMIN_IDS: list[int] = [
 # Username менеджера (без @) для платных тестов и поддержки
 MANAGER_USERNAME: str = os.getenv("MANAGER_USERNAME", "historyentk_bot")
 
+# Канал обязательной подписки (с @ или без; пустая строка = выключено).
+# По умолчанию — @historykazakhkz. Можно переопределить через Railway Variables.
+REQUIRED_CHANNEL: str = os.getenv("REQUIRED_CHANNEL", "@historykazakhkz").strip()
+
+# Подпись «автор» в карточках теста при шеринге.
+# Не зависит от того, кто реально создал тест — это просто витрина бренда.
+SHARE_AUTHOR_LABEL: str = os.getenv("SHARE_AUTHOR_LABEL", "@historykazakhkz")
+
 # === База данных ===
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH: str = os.getenv("DB_PATH", str(BASE_DIR / "ent_bot.db"))
@@ -66,3 +74,4 @@ PROTECT_CONTENT: bool = True
 INLINE_CACHE_TIME: int = 5
 
 # === Имя бота для deep link (без @). Заполнится автоматически при запуске. ===
+BOT_USERNAME: str = ""
