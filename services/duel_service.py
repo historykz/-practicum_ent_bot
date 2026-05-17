@@ -60,17 +60,19 @@ async def leave_queue(user_id: int) -> bool:
 
 
 def _pick_questions(count: int) -> list[int]:
-    """Случайные вопросы из активных тестов с allow_duel=1, иначе из любых активных."""
+    """Случайные вопросы ТОЛЬКО из бесплатных активных тестов.
+    Платные тесты не должны утекать через дуэли."""
     rows = db.fetchall("""
         SELECT q.id FROM questions q
         JOIN tests t ON t.id = q.test_id
-        WHERE t.status='active' AND t.allow_duel=1
+        WHERE t.status='active' AND t.is_paid=0 AND t.allow_duel=1
     """)
     if len(rows) < count:
+        # Расширяем выборку — но всё равно только бесплатные
         rows = db.fetchall("""
             SELECT q.id FROM questions q
             JOIN tests t ON t.id = q.test_id
-            WHERE t.status='active'
+            WHERE t.status='active' AND t.is_paid=0
         """)
     qids = [r['id'] for r in rows]
     if len(qids) < count:
