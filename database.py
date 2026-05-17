@@ -381,6 +381,8 @@ def init_db() -> None:
             inviter_id INTEGER NOT NULL,
             invited_id INTEGER UNIQUE NOT NULL,
             bonus_granted TEXT DEFAULT '',
+            verified INTEGER DEFAULT 0,
+            verified_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
