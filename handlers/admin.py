@@ -396,6 +396,7 @@ async def cb_import_text_root(call: CallbackQuery, user: dict):
 
 @router.message(TextImportStates.waiting_questions, IsAdmin())
 async def msg_import_text(message: Message, state: FSMContext, user: dict):
+    """Накапливает текст. Сохранение — по кнопке «Сохранить»."""
     lang = user.get('language') or 'ru'
     data = await state.get_data()
     tid = data.get('import_test_id')
@@ -404,18 +405,48 @@ async def msg_import_text(message: Message, state: FSMContext, user: dict):
         await message.answer(t("error_generic", lang))
         return
     raw = message.text or message.caption or ""
-    added, errors = text_import_service.import_text_questions(tid, raw)
-    err_text = "\n".join(errors[:10]) if errors else "—"
+    if not raw.strip():
+        return
+    buf = data.get('text_buffer', '')
+    if buf:
+        buf += "\n\n" + raw
+    else:
+        buf = raw
+    await state.update_data(text_buffer=buf)
+    # Считаем приблизительно вопросы (по пустым строкам)
+    chunks = [c for c in buf.split("\n\n") if c.strip()]
     await message.answer(
+        f"📥 В буфере: <b>{len(chunks)}</b> вопросов.\n"
+        f"Можете слать ещё. Когда закончите — нажмите «✅ Сохранить».",
+        reply_markup=import_done_kb(lang)
+    )
+
+
+@router.callback_query(F.data == "import:done", TextImportStates.waiting_questions, IsAdmin())
+async def cb_import_text_done(call: CallbackQuery, state: FSMContext, user: dict):
+    """Финальное сохранение текстового импорта."""
+    lang = user.get('language') or 'ru'
+    data = await state.get_data()
+    tid = data.get('import_test_id')
+    buf = data.get('text_buffer', '')
+    if not tid or not buf.strip():
+        await state.clear()
+        await call.message.answer("Нечего сохранять.", reply_markup=admin_menu_kb(lang))
+        await call.answer()
+        return
+    added, errors = text_import_service.import_text_questions(tid, buf)
+    err_text = "\n".join(errors[:10]) if errors else "—"
+    await call.message.answer(
         t("import_report", lang, added=added, errors=err_text)
     )
-    if added > 0:
-        await state.clear()
-        await message.answer(t("admin_menu", lang), reply_markup=admin_menu_kb(lang))
+    await state.clear()
+    await call.message.answer(t("admin_menu", lang), reply_markup=admin_menu_kb(lang))
+    await call.answer()
 
 
 @router.callback_query(F.data == "import:done", IsAdmin())
 async def cb_import_done(call: CallbackQuery, state: FSMContext, user: dict):
+    """Общий fallback — если нажали кнопку без активного импорта."""
     lang = user.get('language') or 'ru'
     await state.clear()
     await call.message.answer(t("admin_menu", lang), reply_markup=admin_menu_kb(lang))
@@ -459,32 +490,98 @@ async def cb_import_poll_root(call: CallbackQuery, user: dict):
     await call.answer()
 
 
-@router.message(PollImportStates.waiting_polls, F.poll, IsAdmin())
+@router.message(PollImportStates.waiting_polls, IsAdmin())
 async def msg_import_poll(message: Message, state: FSMContext, user: dict):
+    """Принимаем любые сообщения в этом state и проверяем poll внутри —
+    так ловим пересылки из ВСЕХ типов чатов (личка, каналы, группы)."""
     lang = user.get('language') or 'ru'
     data = await state.get_data()
     tid = data.get('import_poll_test_id')
     if not tid:
         await state.clear()
         return
-    if not quiz_importer.is_quiz_poll(message.poll):
-        await message.answer(t("poll_not_quiz", lang))
+
+    # Если не poll — подсказка
+    if message.poll is None:
+        cnt = len(data.get('poll_buffer') or [])
+        await message.answer(
+            f"📥 В буфере: <b>{cnt}</b> опросов.\n\n"
+            f"Пересылайте сюда Quiz Poll из любого чата или канала. "
+            f"Когда закончите — нажмите «✅ Сохранить».",
+            reply_markup=import_done_kb(lang)
+        )
         return
-    result, ref_id = quiz_importer.save_poll_as_question(tid, message.poll, user['id'])
-    if result == 'ok':
-        await message.answer(t("poll_saved", lang))
-    elif result == 'draft':
-        await message.answer(t("poll_needs_manual", lang))
-    else:
-        await message.answer(t("error_generic", lang))
+
+    poll = message.poll
+    # Принимаем ВСЕ типы polls (quiz/regular) — Telegram при пересылке
+    # часто меняет тип на 'regular' и не передаёт правильный ответ.
+    # Такие вопросы пойдут в 📋 Черновики на ручную проверку.
+
+    buf = data.get('poll_buffer') or []
+    # Защита от случайных дубликатов
+    if any(p.get('id') == poll.id for p in buf):
+        await message.answer(
+            f"⚠️ Этот опрос уже в буфере. Всего: <b>{len(buf)}</b>",
+            reply_markup=import_done_kb(lang)
+        )
+        return
+
+    buf.append({
+        'id': poll.id,
+        'question': poll.question,
+        'options': [opt.text for opt in poll.options],
+        'correct_option_id': getattr(poll, 'correct_option_id', None),
+        'explanation': getattr(poll, 'explanation', None) or "",
+    })
+    await state.update_data(poll_buffer=buf)
+
+    indicator = ""
+    if poll.correct_option_id is None:
+        indicator = " ⚠️ (правильный ответ не виден — пойдёт в черновики)"
+
+    await message.answer(
+        f"📥 В буфере: <b>{len(buf)}</b> опросов{indicator}.\n"
+        f"Шлите ещё или нажмите «✅ Сохранить».",
+        reply_markup=import_done_kb(lang)
+    )
 
 
-# Также принимаем forward-сообщения с poll
-@router.message(PollImportStates.waiting_polls, IsAdmin())
-async def msg_import_poll_text(message: Message, state: FSMContext, user: dict):
+@router.callback_query(F.data == "import:done", PollImportStates.waiting_polls, IsAdmin())
+async def cb_import_poll_done(call: CallbackQuery, state: FSMContext, user: dict):
+    """Сохраняем все буферизованные polls."""
     lang = user.get('language') or 'ru'
-    if message.text and not message.poll:
-        await message.answer(t("import_poll_instruction", lang))
+    data = await state.get_data()
+    tid = data.get('import_poll_test_id')
+    buf = data.get('poll_buffer') or []
+    if not tid or not buf:
+        await state.clear()
+        await call.message.answer("В буфере пусто.", reply_markup=admin_menu_kb(lang))
+        await call.answer()
+        return
+
+    saved = 0
+    drafts = 0
+    errors = 0
+    for p in buf:
+        try:
+            ok = quiz_importer.save_poll_dict_as_question(tid, p, user['id'])
+            if ok == 'ok':
+                saved += 1
+            elif ok == 'draft':
+                drafts += 1
+            else:
+                errors += 1
+        except Exception:
+            errors += 1
+
+    await call.message.answer(
+        f"✅ Сохранено вопросов: <b>{saved}</b>\n"
+        f"📋 В черновиках (нужен ручной правильный ответ): <b>{drafts}</b>\n"
+        f"❌ Ошибок: <b>{errors}</b>"
+    )
+    await state.clear()
+    await call.message.answer(t("admin_menu", lang), reply_markup=admin_menu_kb(lang))
+    await call.answer()
 
 
 # =================================
@@ -719,7 +816,7 @@ async def cb_channels(call: CallbackQuery, state: FSMContext, user: dict):
     if rows:
         lines = [t("channels_list", lang)]
         for r in rows:
-            lines.append(f"• {r['username']}")
+            lines.append(f"• {r['channel_username']}")
         text = "\n".join(lines)
     else:
         text = t("channels_empty", lang)
@@ -727,7 +824,7 @@ async def cb_channels(call: CallbackQuery, state: FSMContext, user: dict):
     kb.button(text="➕ Добавить", callback_data="adm:channel_add")
     if rows:
         for r in rows:
-            kb.button(text=f"🗑 {r['username']}", callback_data=f"chdel:{r['id']}")
+            kb.button(text=f"🗑 {r['channel_username']}", callback_data=f"chdel:{r['id']}")
     kb.button(text=t("btn_back", lang), callback_data="m:admin")
     kb.adjust(1)
     await call.message.answer(text, reply_markup=kb.as_markup())
@@ -752,7 +849,7 @@ async def s_channel(message: Message, state: FSMContext, user: dict):
     if not ch.startswith("@"):
         ch = "@" + ch.lstrip("@")
     db.execute(
-        """INSERT INTO required_channels (username, is_global, created_at)
+        """INSERT INTO required_channels (channel_username, is_global, created_at)
            VALUES (?, 1, ?)""", (ch, utils.now_iso()))
     await state.clear()
     await message.answer(t("channel_added", lang), reply_markup=admin_menu_kb(lang))
