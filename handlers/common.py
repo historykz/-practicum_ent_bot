@@ -82,17 +82,20 @@ async def _apply_pending_and_show_menu(message: Message, state: FSMContext, user
     # Реферал
     inviter_tg = pending.get('inviter_tg_id')
     if inviter_tg and inviter_tg != message.from_user.id:
-        bonus = referral_service.register_referral(inviter_tg, message.from_user.id)
-        # Уведомим пригласившего, если бонус есть
-        if bonus:
-            try:
+        referral_service.register_referral(inviter_tg, message.from_user.id)
+        try:
+            # Проверим, подписан ли приглашённый на обязательный канал
+            verified = await referral_service.verify_referral(message.bot, message.from_user.id)
+            if verified:
                 inviter = utils.get_user_by_tg(inviter_tg)
                 if inviter:
                     inv_lang = inviter.get('language') or 'ru'
+                    cnt = referral_service.count_verified_referrals(inviter['id'])
                     await message.bot.send_message(
-                        inviter_tg, t("ref_bonus_granted", inv_lang, bonus=bonus))
-            except Exception:
-                pass
+                        inviter_tg,
+                        f"🎁 У вас новое подтверждённое приглашение! Всего: <b>{cnt}/10</b>")
+        except Exception:
+            pass
 
     # Открыть тест
     open_test_id = pending.get('open_test_id')
@@ -139,16 +142,18 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext, user: dict):
         # Применяем
         inviter_tg = pending.get('inviter_tg_id')
         if inviter_tg and inviter_tg != call.from_user.id:
-            bonus = referral_service.register_referral(inviter_tg, call.from_user.id)
-            if bonus:
-                try:
+            referral_service.register_referral(inviter_tg, call.from_user.id)
+            try:
+                verified = await referral_service.verify_referral(call.bot, call.from_user.id)
+                if verified:
                     inviter = utils.get_user_by_tg(inviter_tg)
                     if inviter:
-                        inv_lang = inviter.get('language') or 'ru'
+                        cnt = referral_service.count_verified_referrals(inviter['id'])
                         await call.bot.send_message(
-                            inviter_tg, t("ref_bonus_granted", inv_lang, bonus=bonus))
-                except Exception:
-                    pass
+                            inviter_tg,
+                            f"🎁 У вас новое подтверждённое приглашение! Всего: <b>{cnt}/10</b>")
+            except Exception:
+                pass
 
         open_test_id = pending.get('open_test_id')
         if open_test_id:
@@ -259,13 +264,26 @@ async def cb_support(call: CallbackQuery, user: dict):
 async def cb_invite(call: CallbackQuery, user: dict):
     lang = _resolve_lang(user)
     link = share_service.build_ref_link(call.from_user.id)
-    count = referral_service.count_referrals(user['id'])
+    verified = referral_service.count_verified_referrals(user['id'])
+    total = referral_service.count_referrals(user['id'])
+    text = (
+        f"🎁 <b>Пригласи друзей — получи доступ к платным тестам!</b>\n\n"
+        f"Условия:\n"
+        f"• Друг должен открыть бота по твоей ссылке\n"
+        f"• Подписаться на обязательный канал\n\n"
+        f"Когда наберёшь <b>10 подтверждённых</b> приглашений — получишь доступ.\n\n"
+        f"📊 Твой прогресс: <b>{verified}/10</b>\n"
+        f"(всего перешло по ссылке: {total})\n\n"
+        f"Твоя ссылка:\n{link}"
+    )
     try:
         await call.message.edit_text(
-            t("ref_invite_text", lang, link=link, count=count),
+            text,
             reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+            disable_web_page_preview=True,
         )
     except Exception:
-        await call.message.answer(
-            t("ref_invite_text", lang, link=link, count=count))
+        await call.message.answer(text,
+            reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+            disable_web_page_preview=True)
     await call.answer()
