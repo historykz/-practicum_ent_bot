@@ -21,8 +21,8 @@ from aiogram.types import BotCommand
 import config
 import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
-from handlers import (common, profile, user, quiz, daily, duel,
-                       notes, homework, rating, inline, admin)
+from handlers import (common, profile, user, quiz, duel,
+                       homework, rating, inline, admin)
 
 
 def setup_logging() -> None:
@@ -79,6 +79,23 @@ async def main() -> None:
     database.init_db()
     log.info("База данных инициализирована: %s", config.DB_PATH)
 
+    # Обязательный канал — прописываем в required_channels, если задан
+    if config.REQUIRED_CHANNEL:
+        ch = config.REQUIRED_CHANNEL.strip()
+        if not ch.startswith("@") and not ch.lstrip("-").isdigit():
+            ch = "@" + ch.lstrip("@")
+        import database as _db
+        existing = _db.fetchone(
+            "SELECT id FROM required_channels WHERE channel_username=? AND is_global=1",
+            (ch,))
+        if not existing:
+            _db.execute(
+                """INSERT INTO required_channels (channel_username, is_global, created_at)
+                   VALUES (?, 1, datetime('now'))""", (ch,))
+            log.info("Зарегистрирован обязательный канал: %s", ch)
+        else:
+            log.info("Обязательный канал уже зарегистрирован: %s", ch)
+
     bot = Bot(
         token=config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -108,9 +125,7 @@ async def main() -> None:
     dp.include_router(profile.router)
     dp.include_router(user.router)
     dp.include_router(quiz.router)
-    dp.include_router(daily.router)
     dp.include_router(duel.router)
-    dp.include_router(notes.router)
     dp.include_router(homework.router)
     dp.include_router(rating.router)
     dp.include_router(inline.router)
