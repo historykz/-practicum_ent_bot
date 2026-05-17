@@ -24,8 +24,6 @@ def main_menu_kb(lang: str, is_admin: bool = False) -> InlineKeyboardMarkup:
     """Главное меню пользователя."""
     kb = InlineKeyboardBuilder()
     kb.button(text=t("btn_tests", lang), callback_data="m:tests")
-    kb.button(text=t("btn_notes", lang), callback_data="m:notes")
-    kb.button(text=t("btn_daily", lang), callback_data="m:daily")
     kb.button(text=t("btn_duel", lang), callback_data="m:duel")
     kb.button(text=t("btn_rating", lang), callback_data="m:rating")
     kb.button(text=t("btn_my_results", lang), callback_data="m:results")
@@ -151,6 +149,8 @@ def options_kb(attempt_id: int, question_id: int, options: list[dict]) -> Inline
             text=f"{chr(ord('A') + i)}) {opt['text'][:60]}",
             callback_data=f"ans:{attempt_id}:{question_id}:{opt['id']}",
         )
+    # Кнопка СТОП — отдельной строкой
+    kb.button(text="🛑 СТОП", callback_data=f"abort:{attempt_id}")
     kb.adjust(1)
     return kb.as_markup()
 
