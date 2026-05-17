@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 _timers: dict[int, asyncio.Task] = {}
 # Активные сообщения с вопросом: attempt_id -> (chat_id, message_id)
 _active_messages: dict[int, tuple[int, int]] = {}
+# Quiz Poll: poll_id -> {attempt_id, question_id, option_order}
+# option_order — список option_id в том порядке, в котором показаны в poll
+_poll_map: dict[str, dict] = {}
 
 
 def cancel_timer(attempt_id: int) -> None:
@@ -164,6 +167,18 @@ def _get_ordered_options(question_id: int, attempt: dict) -> list[dict]:
     return [by_id[oid] for oid in order if oid in by_id]
 
 
+def _can_use_quiz_poll(question_text: str, options: list[dict]) -> bool:
+    """Проверка лимитов Telegram Quiz Poll."""
+    if len(question_text) > 300:
+        return False
+    if not (2 <= len(options) <= 10):
+        return False
+    for o in options:
+        if len(o["text"]) > 100:
+            return False
+    return True
+
+
 async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None:
     """Отправляет в чат текущий вопрос. Запускает таймер."""
     attempt = get_attempt(attempt_id)
@@ -193,33 +208,94 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
         return
     options = _get_ordered_options(qid, attempt)
     time_per_q = test["time_per_question"] or DEFAULT_TIME_PER_QUESTION
+    # Telegram poll: open_period 5-600 сек
+    poll_period = max(5, min(600, time_per_q))
     lang = attempt["language"] or "ru"
 
-    text = build_question_text(idx + 1, len(qids), q["text"], time_per_q, lang)
+    # Заголовок (номер + общая сводка) шлём отдельным сообщением — не помещается в poll question.
+    prefix = t("question_progress", lang, n=idx + 1, total=len(qids), sec=time_per_q)
+    poll_question = q["text"]
+
+    use_poll = _can_use_quiz_poll(poll_question, options)
+
+    # Кнопка «🛑 СТОП» для прерывания — показывается с каждым заголовком вопроса
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    stop_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🛑 СТОП", callback_data=f"abort:{attempt_id}")
+    ]])
+
+    msg = None
     try:
-        if q.get("image_file_id"):
-            msg = await bot.send_photo(
+        if use_poll:
+            # Шлём заголовок С КНОПКОЙ СТОП
+            await bot.send_message(chat_id=chat_id, text=prefix,
+                                    parse_mode="HTML", reply_markup=stop_kb)
+            # Картинка, если есть
+            if q.get("image_file_id"):
+                try:
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=q["image_file_id"],
+                        protect_content=PROTECT_CONTENT,
+                    )
+                except Exception:
+                    pass
+            # Находим индекс правильного варианта в текущем порядке
+            correct_idx = 0
+            for i, o in enumerate(options):
+                if o.get("is_correct"):
+                    correct_idx = i
+                    break
+            option_texts = [o["text"] for o in options]
+            poll_msg = await bot.send_poll(
                 chat_id=chat_id,
-                photo=q["image_file_id"],
-                caption=text,
-                reply_markup=options_kb(attempt_id, qid, options),
-                parse_mode="HTML",
+                question=poll_question[:300],
+                options=option_texts,
+                type="quiz",
+                correct_option_id=correct_idx,
+                is_anonymous=False,
+                open_period=poll_period,
+                explanation=(q.get("explanation") or "")[:200] or None,
                 protect_content=PROTECT_CONTENT,
             )
+            # Запомним связь poll_id -> attempt/question
+            _poll_map[poll_msg.poll.id] = {
+                "attempt_id": attempt_id,
+                "question_id": qid,
+                "option_order": [o["id"] for o in options],
+                "correct_option_id_in_poll": correct_idx,
+                "chat_id": chat_id,
+                "msg_id": poll_msg.message_id,
+                "sent_at": time.time(),
+            }
+            msg = poll_msg
         else:
-            msg = await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=options_kb(attempt_id, qid, options),
-                parse_mode="HTML",
-                protect_content=PROTECT_CONTENT,
-            )
+            # Fallback на inline-кнопки
+            text = build_question_text(idx + 1, len(qids), q["text"], time_per_q, lang)
+            if q.get("image_file_id"):
+                msg = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=q["image_file_id"],
+                    caption=text,
+                    reply_markup=options_kb(attempt_id, qid, options),
+                    parse_mode="HTML",
+                    protect_content=PROTECT_CONTENT,
+                )
+            else:
+                msg = await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=options_kb(attempt_id, qid, options),
+                    parse_mode="HTML",
+                    protect_content=PROTECT_CONTENT,
+                )
     except (TelegramBadRequest, TelegramForbiddenError) as e:
         logger.warning("Не удалось отправить вопрос: %s", e)
         return
 
-    _active_messages[attempt_id] = (chat_id, msg.message_id)
-    # Запускаем таймер
+    if msg:
+        _active_messages[attempt_id] = (chat_id, msg.message_id)
+    # Запускаем таймер (он же определяет момент перехода к следующему вопросу)
     cancel_timer(attempt_id)
     _timers[attempt_id] = asyncio.create_task(
         _question_timeout(bot, attempt_id, qid, chat_id, time_per_q)
@@ -343,6 +419,36 @@ async def process_answer(bot: Bot, attempt_id: int, question_id: int,
     else:
         await send_current_question(bot, attempt_id, chat_id)
     return "ok"
+
+
+async def process_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
+                               user_tg_id: int) -> None:
+    """
+    Обработка ответа из Telegram Quiz Poll (poll_answer update).
+    option_ids — индексы выбранных вариантов в poll (для quiz — всегда один).
+    """
+    info = _poll_map.get(poll_id)
+    if not info:
+        return
+    if not option_ids:
+        return
+    poll_index = option_ids[0]
+    order = info["option_order"]
+    if poll_index < 0 or poll_index >= len(order):
+        return
+    option_id = order[poll_index]
+    attempt = get_attempt(info["attempt_id"])
+    if not attempt or attempt["status"] != "in_progress":
+        return
+    # Проверим, что пользователь — владелец попытки
+    user_row = db.fetchone("SELECT id FROM users WHERE tg_id=?", (user_tg_id,))
+    if not user_row or user_row["id"] != attempt["user_id"]:
+        return
+    # Делегируем стандартному обработчику
+    await process_answer(bot, info["attempt_id"], info["question_id"],
+                          option_id, info["chat_id"])
+    # Чистим
+    _poll_map.pop(poll_id, None)
 
 
 async def pause_attempt(bot: Bot, attempt_id: int, chat_id: int) -> None:
