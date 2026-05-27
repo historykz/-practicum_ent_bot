@@ -28,10 +28,12 @@ async def inline_search(query: InlineQuery):
     user_lang = u.get("language")
     q = (query.query or "").strip()
     # Если в запросе есть test:<id> — игнорируем язык
-    if q.lower().startswith("test:"):
-        results = share_service.build_inline_results(q, None)
+    if q.lower().startswith("test:") or q.lower().startswith("grp:"):
+        results = share_service.build_inline_results(
+            q, None, user_tg_id=query.from_user.id)
     else:
-        results = share_service.build_inline_results(q, user_lang)
+        results = share_service.build_inline_results(
+            q, user_lang, user_tg_id=query.from_user.id)
 
     try:
         await query.answer(
