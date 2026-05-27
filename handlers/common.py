@@ -29,6 +29,48 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
     arg = (command.args or "").strip()
     lang = _resolve_lang(user)
 
+    # === Запуск теста в группе (через ?startgroup=launch_X) ===
+    if arg.startswith("launch_") and message.chat.type in ("group", "supergroup"):
+        try:
+            test_id = int(arg[7:])
+        except ValueError:
+            return
+        # Проверяем что добавивший — админ
+        import utils as _utils
+        if not _utils.is_admin(message.from_user.id):
+            try:
+                await message.reply("⛔ Запустить тест может только администратор бота.")
+            except Exception:
+                pass
+            return
+        # Запускаем тест в этой группе
+        from services import test_runner, group_quiz_service
+        import database as _db
+        test = test_runner.get_test(test_id)
+        if not test:
+            try:
+                await message.reply("❌ Тест не найден.")
+            except Exception:
+                pass
+            return
+        # Записываем группу
+        _db.execute(
+            """INSERT OR IGNORE INTO known_groups (chat_id, title, type, added_by, seen_at)
+               VALUES (?,?,?,?, CURRENT_TIMESTAMP)""",
+            (message.chat.id, message.chat.title or "",
+             message.chat.type, message.from_user.id))
+        ok, key, gq_id = await group_quiz_service.start_lobby(
+            message.bot, dict(test), message.chat.id, message.from_user.id)
+        if not ok:
+            try:
+                if key == "already_running":
+                    await message.reply("⚠️ В этой группе уже идёт тест. Сначала /stop.")
+                else:
+                    await message.reply(f"❌ Не удалось запустить: {key}")
+            except Exception:
+                pass
+        return
+
     # Сохраняем приглашение в state для применения после выбора языка
     pending = {}
     if arg.startswith("ref_"):
@@ -63,14 +105,45 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
 async def cmd_start(message: Message, state: FSMContext, user: dict):
     await state.clear()
     lang = _resolve_lang(user)
+    # В группах не показываем главное меню
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.reply(
+                "👋 Бот добавлен в группу. Для запуска теста админ может "
+                "использовать команду /launch_&lt;test_id&gt;",
+                parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
+    # Если язык ещё не выбран — спрашиваем
     if not user.get('language'):
-        await message.answer(t("choose_language", lang), reply_markup=language_kb())
+        await message.answer(
+            "👋 <b>Привет! Сәлем!</b>\n\n"
+            "Я твой помощник по ЕНТ.\n"
+            "Сначала выбери язык — на нём бот будет с тобой общаться.\n\n"
+            "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>\n\n"
+            "👇 Тапни на нужный язык:",
+            reply_markup=language_kb(), parse_mode="HTML")
         await state.set_state(CommonStates.choosing_language)
         return
+
+    # Сразу главное меню
     await message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)),
+        parse_mode="HTML",
     )
+
+
+@router.message(Command("restart"))
+async def cmd_restart(message: Message, state: FSMContext, user: dict):
+    """Перезапуск — спрашиваем язык заново."""
+    await state.clear()
+    await message.answer(
+        "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>",
+        reply_markup=language_kb(), parse_mode="HTML")
+    await state.set_state(CommonStates.choosing_language)
 
 
 async def _apply_pending_and_show_menu(message: Message, state: FSMContext, user: dict):
@@ -173,11 +246,15 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext, user: dict):
             await state.set_state(None)
             return
 
+    # Просто главное меню — без длинного intro
+    await state.set_state(None)
+    await state.clear()
+
     await call.message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+        parse_mode="HTML",
     )
-    await state.set_state(None)
 
 
 @router.message(Command("cancel"))
@@ -241,11 +318,15 @@ async def cmd_help(message: Message, user: dict):
 @router.callback_query(F.data == "m:help")
 async def cb_help(call: CallbackQuery, user: dict):
     lang = _resolve_lang(user)
+    text = t("help_text", lang, manager=config.MANAGER_USERNAME)
     try:
-        await call.message.edit_text(t("help_text", lang),
-                                     reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)))
+        await call.message.edit_text(text, parse_mode="HTML",
+                                       reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+                                       disable_web_page_preview=True)
     except Exception:
-        await call.message.answer(t("help_text", lang))
+        await call.message.answer(text, parse_mode="HTML",
+                                    reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+                                    disable_web_page_preview=True)
     await call.answer()
 
 
