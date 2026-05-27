@@ -55,7 +55,8 @@ def _author_label(test: dict) -> str:
 
 
 def build_test_card(test: dict, bot_username: str = None,
-                     in_bot: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+                     in_bot: bool = False,
+                     viewer_is_admin: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     """
     Возвращает (text, inline_keyboard) в стиле @QuizBot.
 
@@ -63,6 +64,7 @@ def build_test_card(test: dict, bot_username: str = None,
                    Кнопка «Пройти тест» — обычный callback run:{id}.
     in_bot=False — карточка для шеринга в чужие чаты.
                    Кнопка «Пройти тест» — deep-link, открывающий бот.
+    viewer_is_admin — показать админ-кнопки: Отправить в группу, Редактировать, Статистика.
     """
     bu = bot_username or config.BOT_USERNAME or "bot"
     test_id = test["id"]
@@ -87,24 +89,35 @@ def build_test_card(test: dict, bot_username: str = None,
     text = "\n".join(lines)
 
     deep_link = build_test_deep_link(test_id, bu)
+    is_private_test = bool(test.get("is_private"))
+    is_paid_test = bool(test.get("is_paid"))
 
     rows = []
     if in_bot:
-        # В личке у юзера — callback (без deep-link через t.me)
         rows.append([InlineKeyboardButton(
-            text="✅ Пройти тест", callback_data=f"run:{test_id}")])
+            text="▶️ Пройти тест", callback_data=f"run:{test_id}")])
     else:
         rows.append([InlineKeyboardButton(
-            text="✅ Пройти тест", url=deep_link)])
+            text="▶️ Пройти тест", url=deep_link)])
 
-    rows.append([InlineKeyboardButton(
-        text="📤 Отправить в группу",
-        switch_inline_query=f"test:{test_id}",
-    )])
-    rows.append([InlineKeyboardButton(
-        text="🔗 Поделиться",
-        switch_inline_query=f"test:{test_id}",
-    )])
+    # Кнопка «Поделиться» только для бесплатных и не-приватных тестов
+    if not is_private_test and not is_paid_test:
+        rows.append([InlineKeyboardButton(
+            text="🔗 Поделиться",
+            switch_inline_query=f"test:{test_id}",
+        )])
+
+    # Админ-кнопки (только в личке)
+    if in_bot and viewer_is_admin:
+        rows.append([InlineKeyboardButton(
+            text="📤 Отправить в группу",
+            callback_data=f"groupsend:{test_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="📊 Статистика",
+            callback_data=f"stats:{test_id}:1",
+        )])
+
     if in_bot:
         rows.append([InlineKeyboardButton(
             text="↩️ Назад", callback_data="m:tests")])
@@ -141,6 +154,49 @@ def _build_inline_card(test: dict, bot_username: str) -> InlineQueryResultArticl
     )
 
 
+def _build_group_launch_card(test: dict, bot_username: str,
+                              admin_tg_id: int) -> InlineQueryResultArticle:
+    """
+    Карточка для запуска теста в группе.
+    Когда админ выбирает чат — Telegram отправит это сообщение в группу.
+    Кнопка «🚀 Запустить тест» проверит, что нажавший = админ бота.
+    """
+    qcount_row = db.fetchone(
+        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test["id"],)
+    )
+    qcount = qcount_row["c"] if qcount_row else 0
+    title = utils.escape_html(test.get("title") or "—")
+    author = utils.escape_html(_author_label(test))
+    time_per_q = test.get("time_per_question") or 30
+
+    text = (
+        f"🎲 <b>Тест «{title}»</b> готов к запуску\n\n"
+        f"👤 Автор: {author}\n"
+        f"📚 {qcount} вопросов · ⏱ {time_per_q} сек\n\n"
+        f"Нажмите <b>«🚀 Запустить тест»</b> чтобы начать. "
+        f"Запустить может только администратор бота. "
+        f"Когда наберутся ≥2 игроков — тест начнётся автоматически."
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🚀 Запустить тест в этом чате",
+            callback_data=f"gqlaunch:{test['id']}:{admin_tg_id}",
+        )
+    ]])
+
+    return InlineQueryResultArticle(
+        id=f"grp_{test['id']}",
+        title=f"📤 Запустить «{test.get('title') or 'тест'}» в чате",
+        description=f"Только для админа · {qcount} вопросов",
+        input_message_content=InputTextMessageContent(
+            message_text=text,
+            parse_mode="HTML",
+        ),
+        reply_markup=kb,
+    )
+
+
 def _fetch_test(test_id: int) -> Optional[dict]:
     row = db.fetchone(
         "SELECT * FROM tests WHERE id=? AND status='active'", (test_id,))
@@ -148,12 +204,13 @@ def _fetch_test(test_id: int) -> Optional[dict]:
 
 
 def build_inline_results(query: str, user_lang: Optional[str],
-                         bot_username: str = None) -> list[InlineQueryResultArticle]:
+                         bot_username: str = None,
+                         user_tg_id: Optional[int] = None) -> list[InlineQueryResultArticle]:
     """
     Возвращает результаты для inline-режима.
 
     Поддерживаемые форматы query:
-        "test:<id>"      — конкретный тест по ID
+        "test:<id>"      — конкретный тест (карточка для шеринга друзьям)
         "<search text>"  — поиск по title/subject
         ""               — последние 30 активных
     """
@@ -175,12 +232,14 @@ def build_inline_results(query: str, user_lang: Optional[str],
         if user_lang:
             rows = db.fetchall(
                 """SELECT * FROM tests WHERE status='active' AND language=?
+                    AND COALESCE(is_private,0)=0
                     AND (LOWER(title) LIKE ? OR LOWER(subject) LIKE ?)
                     ORDER BY id DESC LIMIT 30""",
                 (user_lang, f"%{qlower}%", f"%{qlower}%"))
         else:
             rows = db.fetchall(
                 """SELECT * FROM tests WHERE status='active'
+                    AND COALESCE(is_private,0)=0
                     AND (LOWER(title) LIKE ? OR LOWER(subject) LIKE ?)
                     ORDER BY id DESC LIMIT 30""",
                 (f"%{qlower}%", f"%{qlower}%"))
@@ -188,11 +247,13 @@ def build_inline_results(query: str, user_lang: Optional[str],
         if user_lang:
             rows = db.fetchall(
                 "SELECT * FROM tests WHERE status='active' AND language=? "
+                "AND COALESCE(is_private,0)=0 "
                 "ORDER BY id DESC LIMIT 30",
                 (user_lang,))
         else:
             rows = db.fetchall(
                 "SELECT * FROM tests WHERE status='active' "
+                "AND COALESCE(is_private,0)=0 "
                 "ORDER BY id DESC LIMIT 30"
             )
 
