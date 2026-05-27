@@ -310,29 +310,280 @@ async def s_opens_days_input(message: Message, state: FSMContext):
 
 
 async def _proceed_to_test_choice(message_or_msg, state: FSMContext, days: int, edit: bool):
-    """Сохраняем срок и показываем список приватных тестов."""
-    await state.update_data(grant_days=days)
+    """Показываем разделы с приватными тестами."""
+    await state.update_data(grant_days=days, grant_selected=[])
+    await _show_grant_categories(message_or_msg, state)
+
+
+async def _show_grant_categories(message_or_msg, state: FSMContext):
+    """Показать список разделов с приватными тестами + кнопки 'Сохранить' и 'Все приватные'."""
+    data = await state.get_data()
+    days = data.get('grant_days', 0)
+    selected = set(data.get('grant_selected') or [])
+
+    # Соберём все приватные активные тесты
     tests = db.fetchall(
-        "SELECT id, title FROM tests WHERE is_private=1 AND status='active' ORDER BY id DESC LIMIT 30")
+        "SELECT id, title, category_id FROM tests "
+        "WHERE is_private=1 AND status='active'")
     if not tests:
         await message_or_msg.answer(
             "⚠️ Нет ни одного приватного теста.\n"
             "Сначала создайте/пометьте тест как приватный.")
         await state.clear()
         return
-    kb = InlineKeyboardBuilder()
+
+    # Группируем по категориям
+    from collections import defaultdict
+    by_cat = defaultdict(list)
     for t in tests:
-        title = (t['title'] or '—')[:50]
-        kb.button(text=f"🔐 {title}", callback_data=f"opensgrant:{t['id']}")
-    kb.button(text="⚡️ Дать ВСЕ приватные сразу", callback_data="opensgrant:all")
+        by_cat[t.get('category_id')].append(t)
+
+    duration_label = "бессрочно" if days == 0 else f"{days} дней"
+    sel_count = len(selected)
+    text = (f"⏱ <b>Срок:</b> {duration_label}\n"
+            f"✅ <b>Выбрано тестов:</b> {sel_count}\n\n"
+            f"👇 Выбери раздел — внутри отметь нужные тесты галочками.\n"
+            f"Когда закончишь — нажми «✅ Сохранить и выдать».")
+
+    kb = InlineKeyboardBuilder()
+    # Категории
+    cats = db.fetchall("SELECT * FROM test_categories ORDER BY id")
+    for c in cats:
+        cat_tests = by_cat.get(c['id'], [])
+        if not cat_tests:
+            continue
+        in_cat_selected = sum(1 for t in cat_tests if t['id'] in selected)
+        emoji = c.get('emoji') or '📚'
+        label = f"{emoji} {c['name']} ({in_cat_selected}/{len(cat_tests)})"
+        kb.button(text=label, callback_data=f"grantcat:{c['id']}")
+
+    # Без раздела
+    no_cat = by_cat.get(None, [])
+    if no_cat:
+        in_nocat_sel = sum(1 for t in no_cat if t['id'] in selected)
+        kb.button(text=f"📭 Без раздела ({in_nocat_sel}/{len(no_cat)})",
+                  callback_data="grantcat:none")
+
+    # Действия
+    kb.button(text="⚡️ Дать ВСЕ приватные", callback_data="opensgrant:all")
+    if sel_count > 0:
+        kb.button(text=f"✅ Сохранить и выдать ({sel_count})",
+                  callback_data="grant:save")
     kb.button(text="❌ Отмена", callback_data="opens:back")
     kb.adjust(1)
-    duration_label = "бессрочно" if days == 0 else f"{days} дней"
+
     await state.set_state(PrivateAccessStates.waiting_test_for_grant)
-    await message_or_msg.answer(
-        f"⏱ Срок: <b>{duration_label}</b>\n\n"
-        f"Выберите тест для выдачи доступа:",
-        reply_markup=kb.as_markup(), parse_mode="HTML")
+    if hasattr(message_or_msg, 'edit_text'):
+        try:
+            await message_or_msg.edit_text(text, reply_markup=kb.as_markup(),
+                                              parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    await message_or_msg.answer(text, reply_markup=kb.as_markup(),
+                                  parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("grantcat:"), IsAdmin())
+async def cb_grant_category(call: CallbackQuery, state: FSMContext):
+    """Открыть конкретный раздел — показать тесты с галочками."""
+    arg = call.data.split(":")[1]
+    data = await state.get_data()
+    selected = set(data.get('grant_selected') or [])
+
+    if arg == "none":
+        tests = db.fetchall(
+            "SELECT id, title FROM tests "
+            "WHERE is_private=1 AND status='active' AND category_id IS NULL "
+            "ORDER BY id DESC")
+        cat_title = "📭 Без раздела"
+    else:
+        try:
+            cat_id = int(arg)
+        except ValueError:
+            await call.answer()
+            return
+        cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
+        if not cat:
+            await call.answer("Раздел не найден.", show_alert=True)
+            return
+        tests = db.fetchall(
+            "SELECT id, title FROM tests "
+            "WHERE is_private=1 AND status='active' AND category_id=? "
+            "ORDER BY id DESC", (cat_id,))
+        emoji = cat.get('emoji') or '📚'
+        cat_title = f"{emoji} {cat['name']}"
+
+    if not tests:
+        await call.answer("В разделе нет приватных тестов.", show_alert=True)
+        return
+
+    in_sel = sum(1 for t in tests if t['id'] in selected)
+    text = (f"<b>{cat_title}</b>\n\n"
+            f"✅ Отмечено в этом разделе: <b>{in_sel}/{len(tests)}</b>\n\n"
+            f"Тапай на тест — отметится галочкой.\n"
+            f"Тапни ещё раз — снимется.")
+
+    kb = InlineKeyboardBuilder()
+    for t in tests:
+        mark = "✅" if t['id'] in selected else "▫️"
+        title = (t['title'] or '—')[:45]
+        kb.button(text=f"{mark} {title}",
+                  callback_data=f"gtoggle:{t['id']}")
+    # Быстрые действия
+    if in_sel == len(tests):
+        kb.button(text="◻️ Снять все галочки в разделе",
+                  callback_data=f"gall:{arg}:off")
+    else:
+        kb.button(text="☑️ Отметить все в разделе",
+                  callback_data=f"gall:{arg}:on")
+    kb.button(text="↩️ К разделам", callback_data="grant:back_cats")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(),
+                                    parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("gtoggle:"), IsAdmin())
+async def cb_grant_toggle(call: CallbackQuery, state: FSMContext):
+    """Переключить галочку на тесте."""
+    try:
+        test_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    data = await state.get_data()
+    selected = set(data.get('grant_selected') or [])
+    if test_id in selected:
+        selected.discard(test_id)
+    else:
+        selected.add(test_id)
+    await state.update_data(grant_selected=list(selected))
+    # Найдём какая категория сейчас — перерисуем тот же экран
+    t = db.fetchone("SELECT category_id FROM tests WHERE id=?", (test_id,))
+    if not t:
+        await call.answer()
+        return
+    cat_arg = "none" if t['category_id'] is None else str(t['category_id'])
+    # Перерисовываем экран категории
+    fake = type('F', (), {'data': f"grantcat:{cat_arg}", 'message': call.message,
+                          'from_user': call.from_user, 'bot': call.bot,
+                          'answer': call.answer})()
+    await cb_grant_category(fake, state)
+
+
+@router.callback_query(F.data.startswith("gall:"), IsAdmin())
+async def cb_grant_all_in_cat(call: CallbackQuery, state: FSMContext):
+    """Отметить/снять все в разделе."""
+    try:
+        _, arg, action = call.data.split(":")
+    except ValueError:
+        await call.answer()
+        return
+    if arg == "none":
+        tests = db.fetchall(
+            "SELECT id FROM tests WHERE is_private=1 AND status='active' "
+            "AND category_id IS NULL")
+    else:
+        try:
+            cat_id = int(arg)
+        except ValueError:
+            await call.answer()
+            return
+        tests = db.fetchall(
+            "SELECT id FROM tests WHERE is_private=1 AND status='active' "
+            "AND category_id=?", (cat_id,))
+    data = await state.get_data()
+    selected = set(data.get('grant_selected') or [])
+    if action == "on":
+        for t in tests:
+            selected.add(t['id'])
+    else:
+        for t in tests:
+            selected.discard(t['id'])
+    await state.update_data(grant_selected=list(selected))
+    # Перерисовываем
+    fake = type('F', (), {'data': f"grantcat:{arg}", 'message': call.message,
+                          'from_user': call.from_user, 'bot': call.bot,
+                          'answer': call.answer})()
+    await cb_grant_category(fake, state)
+
+
+@router.callback_query(F.data == "grant:back_cats", IsAdmin())
+async def cb_grant_back_to_cats(call: CallbackQuery, state: FSMContext):
+    """Назад к списку разделов."""
+    await _show_grant_categories(call.message, state)
+    await call.answer()
+
+
+@router.callback_query(F.data == "grant:save", IsAdmin())
+async def cb_grant_save(call: CallbackQuery, state: FSMContext):
+    """Сохранить — выдать доступ ко всем выбранным тестам."""
+    data = await state.get_data()
+    targets = data.get('grant_targets') or []
+    days = data.get('grant_days', 0)
+    selected = list(data.get('grant_selected') or [])
+
+    if not targets:
+        await call.answer("Сессия истекла, начни заново.", show_alert=True)
+        await state.clear()
+        return
+    if not selected:
+        await call.answer("Ничего не выбрано.", show_alert=True)
+        return
+
+    tests_to_grant = []
+    for tid in selected:
+        tst = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+        if tst:
+            tests_to_grant.append(dict(tst))
+
+    expires_at = None
+    if days > 0:
+        from datetime import datetime, timedelta
+        expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+
+    granted_count = 0
+    notified_count = 0
+    for tg_id, name in targets:
+        for tst in tests_to_grant:
+            try:
+                db.execute(
+                    """INSERT INTO private_test_access
+                          (test_id, user_tg_id, granted_by, expires_at, notified_expired)
+                       VALUES (?,?,?,?,0)
+                       ON CONFLICT(test_id, user_tg_id) DO UPDATE SET
+                          expires_at=excluded.expires_at,
+                          granted_by=excluded.granted_by,
+                          notified_expired=0""",
+                    (tst['id'], tg_id, call.from_user.id, expires_at))
+                granted_count += 1
+            except Exception as e:
+                log.warning("grant fail tg=%s: %s", tg_id, e)
+        try:
+            await _notify_user_grant(call.bot, tg_id,
+                                       tests_to_grant[0] if len(tests_to_grant) == 1 else None,
+                                       all_tests=False, days=days)
+            notified_count += 1
+        except Exception:
+            pass
+
+    duration_label = "бессрочно" if days == 0 else f"{days} дней"
+    summary = (
+        f"✅ <b>Доступ выдан!</b>\n\n"
+        f"👥 Пользователей: <b>{len(targets)}</b>\n"
+        f"🔐 Тестов: <b>{len(tests_to_grant)}</b>\n"
+        f"⏱ Срок: <b>{duration_label}</b>\n"
+        f"📊 Записей: <b>{granted_count}</b>\n"
+        f"📩 Уведомлено: <b>{notified_count}</b>"
+    )
+    await call.message.answer(summary, parse_mode="HTML")
+    await state.clear()
+    await call.answer("✅")
 
 
 @router.callback_query(F.data.startswith("opensgrant:"), IsAdmin())
