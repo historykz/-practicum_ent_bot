@@ -331,6 +331,7 @@ def admin_menu_kb(lang: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t("btn_admin_create_test", lang), callback_data="adm:create_test")
     kb.button(text=t("btn_admin_my_tests", lang), callback_data="adm:my_tests")
+    kb.button(text="📥 Импорт из файла", callback_data="adm:import_file")
     kb.button(text="📂 Разделы", callback_data="adm:categories")
     kb.button(text=t("btn_admin_import_text", lang), callback_data="adm:import_text")
     kb.button(text=t("btn_admin_premium", lang), callback_data="adm:premium")
@@ -359,6 +360,8 @@ def admin_test_actions_kb(test_id: int, lang: str, is_private: bool = False) -> 
     kb.button(text="✏️ Редактировать вопросы", callback_data=f"qe:list:{test_id}")
     kb.button(text="📝 Импорт текстом", callback_data=f"admimport_text:{test_id}")
     kb.button(text="📥 Импорт Quiz Poll", callback_data=f"admimport_poll:{test_id}")
+    kb.button(text="📤 Экспорт JSON", callback_data=f"admexport_json:{test_id}")
+    kb.button(text="📄 Экспорт TXT", callback_data=f"admexport_txt:{test_id}")
     kb.button(text="📋 Черновики", callback_data=f"admdrafts:{test_id}")
     kb.button(text="❓ Список вопросов", callback_data=f"admquestions:{test_id}")
     if is_private:
