@@ -34,7 +34,7 @@ class AntiSpamMiddleware(BaseMiddleware):
         if not user:
             return await handler(event, data)
 
-        # Пропускаем без проверки: Poll-сообщения и пересланные (массовый импорт админом).
+        # Пропускаем без проверки: Poll-сообщения и пересланные.
         if isinstance(event, Message):
             if event.poll is not None:
                 return await handler(event, data)
@@ -42,14 +42,27 @@ class AntiSpamMiddleware(BaseMiddleware):
                     or event.forward_from_chat is not None:
                 return await handler(event, data)
 
+        # ВАЖНЫЕ callback'и пропускаем без anti-spam:
+        # онбординг, выбор языка, отмена — иначе юзер не сможет пройти первый /start
+        if isinstance(event, CallbackQuery) and event.data:
+            critical_prefixes = ("onb:", "setlang:", "cancel")
+            if any(event.data.startswith(p) for p in critical_prefixes):
+                return await handler(event, data)
+
+        # Пропускаем админов — у них могут быть массовые действия
+        try:
+            from utils import is_admin
+            if is_admin(user.id):
+                return await handler(event, data)
+        except Exception:
+            pass
+
         now = time.monotonic()
         last = self._last.get(user.id, 0)
         if now - last < ANTISPAM_COOLDOWN_SECONDS:
-            # Игнорируем callback, на сообщение можем ответить (но не будем плодить флуд)
             if isinstance(event, CallbackQuery):
                 try:
-                    lang = data.get("lang", "ru")
-                    await event.answer(t("spam_warning", lang), show_alert=False)
+                    await event.answer()
                 except Exception:
                     pass
             return
@@ -72,8 +85,12 @@ class UserContextMiddleware(BaseMiddleware):
     ) -> Any:
         tg_user = data.get("event_from_user")
         if tg_user is None:
+            # Гарантируем что в data всегда есть user (пусть пустой)
+            data.setdefault("user", {})
+            data.setdefault("lang", "ru")
             return await handler(event, data)
 
+        user = None
         try:
             user = get_or_create_user(
                 tg_id=tg_user.id,
@@ -83,23 +100,35 @@ class UserContextMiddleware(BaseMiddleware):
             )
         except Exception as e:
             logger.exception("Не удалось создать/обновить пользователя: %s", e)
-            return await handler(event, data)
+
+        # Fallback — минимальный user dict если БД упала
+        if not user:
+            user = {
+                'id': 0,
+                'tg_id': tg_user.id,
+                'username': tg_user.username or '',
+                'first_name': tg_user.first_name or '',
+                'language': 'ru',
+            }
 
         data["user"] = user
         data["lang"] = user.get("language") or "ru"
 
-        # Блок
-        if is_blocked(tg_user.id):
-            if isinstance(event, Message):
-                try:
-                    await event.answer(t("blocked", data["lang"]))
-                except Exception:
-                    pass
-            elif isinstance(event, CallbackQuery):
-                try:
-                    await event.answer(t("blocked", data["lang"]), show_alert=True)
-                except Exception:
-                    pass
-            return
+        # Блок (с защитой)
+        try:
+            if is_blocked(tg_user.id):
+                if isinstance(event, Message):
+                    try:
+                        await event.answer(t("blocked", data["lang"]))
+                    except Exception:
+                        pass
+                elif isinstance(event, CallbackQuery):
+                    try:
+                        await event.answer(t("blocked", data["lang"]), show_alert=True)
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
 
         return await handler(event, data)
