@@ -91,10 +91,25 @@ def set_user_lang(tg_id: int, lang: str) -> None:
 
 # === Админ / блок ===
 def is_admin(tg_id: int) -> bool:
+    """Проверка админ-прав. С retry на случай гонки БД."""
+    if not tg_id:
+        return False
     if tg_id in ADMIN_IDS:
         return True
-    row = db.fetchone("SELECT 1 FROM admins WHERE tg_id=?", (tg_id,))
-    return bool(row)
+    # Retry до 3 раз
+    for attempt in range(3):
+        try:
+            row = db.fetchone("SELECT 1 FROM admins WHERE tg_id=?", (tg_id,))
+            return bool(row)
+        except Exception as e:
+            if attempt == 2:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "is_admin DB check failed after 3 retries: %s", e)
+                return False
+            import time as _t
+            _t.sleep(0.05)
+    return False
 
 
 def is_blocked(tg_id: int) -> bool:
@@ -128,12 +143,14 @@ def grant_premium(user_id: int, days: int, admin_tg_id: int) -> None:
     existing = db.fetchone("SELECT id FROM premium_users WHERE user_id=?", (user_id,))
     if existing:
         db.execute(
-            "UPDATE premium_users SET expires_at=?, granted_at=?, granted_by_admin=? WHERE user_id=?",
+            "UPDATE premium_users SET expires_at=?, granted_at=?, granted_by_admin=?, "
+            "notified_expired=0 WHERE user_id=?",
             (expires, now_iso(), admin_tg_id, user_id),
         )
     else:
         db.execute(
-            "INSERT INTO premium_users (user_id, expires_at, granted_by_admin) VALUES (?,?,?)",
+            "INSERT INTO premium_users (user_id, expires_at, granted_by_admin, notified_expired) "
+            "VALUES (?,?,?,0)",
             (user_id, expires, admin_tg_id),
         )
 
@@ -334,3 +351,29 @@ def build_question_text(qnum: int, total: int, question_text: str,
     progress = t("question_progress", lang, n=qnum, total=total)
     time_label = t("time_left", lang, sec=time_sec)
     return f"<b>{progress}</b>\n⏱ {time_sec} сек\n\n{escape_html(question_text)}"
+
+
+# === Безопасное обновление сообщений ===
+async def safe_edit_or_send(call, text, reply_markup=None, parse_mode="HTML"):
+    """
+    Безопасное обновление callback-сообщения.
+    Если edit_text падает (старое сообщение, удалено, нет изменений) —
+    отправляет новое и снимает «загрузку».
+    """
+    try:
+        await call.message.edit_text(
+            text, reply_markup=reply_markup,
+            parse_mode=parse_mode, disable_web_page_preview=True)
+    except Exception:
+        try:
+            await call.message.answer(
+                text, reply_markup=reply_markup,
+                parse_mode=parse_mode, disable_web_page_preview=True)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("safe_edit_or_send failed: %s", e)
+    # Всегда закрываем «загрузку»
+    try:
+        await call.answer()
+    except Exception:
+        pass
