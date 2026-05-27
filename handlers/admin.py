@@ -258,6 +258,42 @@ async def cb_my_tests(call: CallbackQuery, user: dict):
     await call.answer()
 
 
+async def _show_test_admin_card(bot, chat_id: int, test_id: int, lang: str = 'ru'):
+    """Отправить карточку теста для админа в чат (используется из других модулей)."""
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+    if not test:
+        try:
+            await bot.send_message(chat_id, "⚠️ Тест не найден.")
+        except Exception:
+            pass
+        return
+    qcount = 0
+    try:
+        r = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
+                         (test_id,))
+        qcount = (r and r['c']) or 0
+    except Exception:
+        pass
+    is_private = bool(test.get('is_private') or 0)
+    title = test.get('title') or '—'
+    title_safe = utils.escape_html(title)
+    text = (
+        f"<b>{title_safe}</b>\n\n"
+        f"ID: {test_id}\n"
+        f"Тип: {test.get('test_type') or '—'}\n"
+        f"Язык: {test.get('language') or '—'}\n"
+        f"Статус: {test.get('status') or '—'}\n"
+        f"Вопросов: {qcount}\n"
+        f"Платный: {'да' if test.get('is_paid') else 'нет'}\n"
+        f"Приватный: {'🔐 ДА' if is_private else 'нет'}"
+    )
+    kb = admin_test_actions_kb(test_id, lang, is_private=is_private)
+    try:
+        await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        log.warning("_show_test_admin_card: %s", e)
+
+
 @router.callback_query(F.data.startswith("admtest:"), IsAdmin())
 async def cb_admtest(call: CallbackQuery, user: dict):
     """Карточка теста для админа. Crash-proof."""
