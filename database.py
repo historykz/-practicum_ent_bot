@@ -54,18 +54,37 @@ def executemany(sql: str, seq: Iterable[Iterable[Any]]) -> sqlite3.Cursor:
         return conn.executemany(sql, seq)
 
 
-def fetchone(sql: str, params: Iterable[Any] = ()) -> Optional[sqlite3.Row]:
-    """Вернуть одну строку или None."""
-    with db_lock() as conn:
-        cur = conn.execute(sql, params)
-        return cur.fetchone()
+class _RowDict(dict):
+    """Словарь с защитой от KeyError — для совместимости с .get() и [key]."""
+    pass
 
 
-def fetchall(sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-    """Вернуть все строки."""
+def _row_to_dict(row) -> Optional[_RowDict]:
+    """Конвертирует sqlite3.Row в dict-подобный объект."""
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return _RowDict(row)
+    try:
+        return _RowDict({k: row[k] for k in row.keys()})
+    except Exception:
+        return _RowDict(dict(row))
+
+
+def fetchone(sql: str, params: Iterable[Any] = ()) -> Optional[dict]:
+    """Вернуть одну строку как dict (с поддержкой .get()) или None."""
     with db_lock() as conn:
         cur = conn.execute(sql, params)
-        return cur.fetchall()
+        row = cur.fetchone()
+        return _row_to_dict(row)
+
+
+def fetchall(sql: str, params: Iterable[Any] = ()) -> list[dict]:
+    """Вернуть все строки как dict-объекты."""
+    with db_lock() as conn:
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+        return [_row_to_dict(r) for r in rows if r is not None]
 
 
 def init_db() -> None:
@@ -250,7 +269,8 @@ def init_db() -> None:
             user_id INTEGER UNIQUE NOT NULL,
             granted_at TEXT DEFAULT CURRENT_TIMESTAMP,
             expires_at TEXT,  -- NULL = бессрочно
-            granted_by_admin INTEGER
+            granted_by_admin INTEGER,
+            notified_expired INTEGER DEFAULT 0
         );
         """)
 
@@ -297,24 +317,7 @@ def init_db() -> None:
         );
         """)
 
-        # --- GROUP QUIZZES ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS group_quizzes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            test_id INTEGER NOT NULL,
-            started_by_user_id INTEGER NOT NULL,
-            status TEXT DEFAULT 'collecting',  -- collecting, running, paused, finished
-            current_question_index INTEGER DEFAULT 0,
-            question_order TEXT DEFAULT '',
-            missed_questions_counter INTEGER DEFAULT 0,
-            announce_message_id INTEGER,
-            language TEXT DEFAULT 'ru',
-            finished_at TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_groupq_chat ON group_quizzes(chat_id);")
+        # --- (group_quizzes определена ниже в актуальной версии) ---
 
         cur.execute("""
         CREATE TABLE IF NOT EXISTS group_quiz_participants (
@@ -526,5 +529,219 @@ def init_db() -> None:
             value TEXT
         );
         """)
+
+        # --- ГРУППЫ, ГДЕ БОТ ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS known_groups (
+            chat_id INTEGER PRIMARY KEY,
+            title TEXT,
+            type TEXT,                 -- group/supergroup/channel
+            added_by INTEGER,          -- tg_id того, кто добавил
+            is_bot_admin INTEGER DEFAULT 0,
+            seen_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        # --- ГРУППОВЫЕ ТЕСТЫ (live-сессии) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS group_quizzes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            test_id INTEGER NOT NULL,
+            started_by INTEGER NOT NULL,         -- tg_id админа, запустившего
+            status TEXT DEFAULT 'lobby',         -- lobby, running, finished, cancelled
+            lobby_message_id INTEGER,
+            current_question_index INTEGER DEFAULT 0,
+            current_poll_id TEXT,
+            current_poll_message_id INTEGER,
+            current_poll_correct_index INTEGER,
+            current_poll_options TEXT,           -- json
+            current_question_started_at TEXT,
+            language TEXT DEFAULT 'ru',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            started_at TEXT,
+            finished_at TEXT
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_gq_chat ON group_quizzes(chat_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_gq_status ON group_quizzes(status);")
+
+        # === МИГРАЦИИ для старых БД (раньше была другая схема group_quizzes) ===
+        for alter in [
+            "ALTER TABLE group_quizzes ADD COLUMN started_by INTEGER",
+            "ALTER TABLE group_quizzes ADD COLUMN lobby_message_id INTEGER",
+            "ALTER TABLE group_quizzes ADD COLUMN current_poll_id TEXT",
+            "ALTER TABLE group_quizzes ADD COLUMN current_poll_message_id INTEGER",
+            "ALTER TABLE group_quizzes ADD COLUMN current_poll_correct_index INTEGER",
+            "ALTER TABLE group_quizzes ADD COLUMN current_poll_options TEXT",
+            "ALTER TABLE group_quizzes ADD COLUMN current_question_started_at TEXT",
+            "ALTER TABLE group_quizzes ADD COLUMN started_at TEXT",
+        ]:
+            try:
+                cur.execute(alter)
+            except Exception:
+                pass
+
+        # Если БД старая — там было started_by_user_id; копируем в started_by
+        try:
+            cur.execute(
+                "UPDATE group_quizzes SET started_by = started_by_user_id "
+                "WHERE started_by IS NULL AND started_by_user_id IS NOT NULL")
+        except Exception:
+            pass
+
+        # Проверяем есть ли старое поле started_by_user_id с NOT NULL — пересоздаём таблицу
+        try:
+            cols = cur.execute("PRAGMA table_info(group_quizzes)").fetchall()
+            col_names = [c[1] for c in cols]
+            has_legacy = 'started_by_user_id' in col_names
+            if has_legacy:
+                logger.info("Обнаружена старая схема group_quizzes, пересоздаём таблицу...")
+                # Сохраняем данные
+                cur.execute("ALTER TABLE group_quizzes RENAME TO group_quizzes_old")
+                # Создаём новую таблицу с правильной схемой
+                cur.execute("""
+                    CREATE TABLE group_quizzes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chat_id INTEGER NOT NULL,
+                        test_id INTEGER NOT NULL,
+                        started_by INTEGER NOT NULL,
+                        status TEXT DEFAULT 'lobby',
+                        lobby_message_id INTEGER,
+                        current_question_index INTEGER DEFAULT 0,
+                        current_poll_id TEXT,
+                        current_poll_message_id INTEGER,
+                        current_poll_correct_index INTEGER,
+                        current_poll_options TEXT,
+                        current_question_started_at TEXT,
+                        language TEXT DEFAULT 'ru',
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        started_at TEXT,
+                        finished_at TEXT
+                    )""")
+                # Переносим данные
+                cur.execute("""
+                    INSERT INTO group_quizzes
+                        (id, chat_id, test_id, started_by, status,
+                         current_question_index, language, finished_at, created_at)
+                    SELECT id, chat_id, test_id,
+                           COALESCE(started_by, started_by_user_id) AS started_by,
+                           status, current_question_index, language, finished_at, created_at
+                    FROM group_quizzes_old
+                """)
+                cur.execute("DROP TABLE group_quizzes_old")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_gq_chat ON group_quizzes(chat_id);")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_gq_status ON group_quizzes(status);")
+                logger.info("group_quizzes успешно пересоздана с актуальной схемой")
+        except Exception as e:
+            logger.warning("Миграция group_quizzes провалилась: %s", e)
+
+        # --- УЧАСТНИКИ ГРУППОВОГО ТЕСТА ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS group_quiz_players (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_quiz_id INTEGER NOT NULL,
+            tg_id INTEGER NOT NULL,
+            username TEXT,
+            full_name TEXT,
+            correct_answers INTEGER DEFAULT 0,
+            wrong_answers INTEGER DEFAULT 0,
+            skipped_answers INTEGER DEFAULT 0,
+            total_time_seconds INTEGER DEFAULT 0,
+            joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(group_quiz_id, tg_id)
+        );
+        """)
+
+        # --- СТАТИСТИКА ПРОХОЖДЕНИЙ ТЕСТА (для лидерборда) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS test_statistics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            test_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            tg_id INTEGER,
+            username TEXT,
+            full_name TEXT,
+            score INTEGER DEFAULT 0,
+            total_questions INTEGER DEFAULT 0,
+            correct_answers INTEGER DEFAULT 0,
+            wrong_answers INTEGER DEFAULT 0,
+            skipped_answers INTEGER DEFAULT 0,
+            percentage REAL DEFAULT 0,
+            total_time_seconds INTEGER DEFAULT 0,
+            average_answer_time REAL DEFAULT 0,
+            source_type TEXT DEFAULT 'private', -- private / group
+            group_chat_id INTEGER,
+            group_quiz_id INTEGER,
+            started_at TEXT,
+            finished_at TEXT,
+            is_first_attempt INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ts_test ON test_statistics(test_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ts_user ON test_statistics(user_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ts_first ON test_statistics(test_id, is_first_attempt);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ts_score ON test_statistics(test_id, score DESC, total_time_seconds ASC);")
+
+        # --- МИГРАЦИИ для существующих БД ---
+        try:
+            cur.execute("ALTER TABLE premium_users ADD COLUMN notified_expired INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE tests ADD COLUMN is_private INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        # --- ПРИВАТНЫЙ ДОСТУП К ТЕСТАМ ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS private_test_access (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            test_id INTEGER NOT NULL,
+            user_tg_id INTEGER NOT NULL,
+            granted_by INTEGER,
+            granted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT,
+            notified_expired INTEGER DEFAULT 0,
+            UNIQUE(test_id, user_tg_id)
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pta_user ON private_test_access(user_tg_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pta_test ON private_test_access(test_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pta_expires ON private_test_access(expires_at);")
+
+        # Миграции для существующих БД
+        try:
+            cur.execute("ALTER TABLE private_test_access ADD COLUMN expires_at TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE private_test_access ADD COLUMN notified_expired INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        # --- КАТЕГОРИИ ТЕСТОВ (разделы каталога) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS test_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            emoji TEXT DEFAULT '📚',
+            sort_order INTEGER DEFAULT 0,
+            created_by INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        try:
+            cur.execute("ALTER TABLE tests ADD COLUMN category_id INTEGER")
+        except Exception:
+            pass
+
+        # --- Флаг прохождения онбординга ---
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN onboarded_at TEXT")
+        except Exception:
+            pass
 
         logger.info("База данных инициализирована")
