@@ -8,6 +8,7 @@ import logging
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import (Message, CallbackQuery, BufferedInputFile,
                             Poll, ReplyKeyboardRemove)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -430,7 +431,109 @@ async def cb_admpriv(call: CallbackQuery, user: dict):
     await cb_admtest(call, user)
 
 
-@router.callback_query(F.data.startswith("admdel:"), IsAdmin())
+@router.callback_query(F.data.startswith("admexport_json:"), IsAdmin())
+async def cb_export_test_json(call: CallbackQuery, user: dict):
+    """Экспорт теста в JSON."""
+    from services import test_export_service
+    from aiogram.types import BufferedInputFile
+    try:
+        tid = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    content = test_export_service.export_test_to_json_bytes(tid)
+    if not content:
+        await call.answer("Тест не найден.", show_alert=True)
+        return
+    test = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+    safe_title = (test.get('title') if test else 'test')[:40]
+    safe_title = ''.join(c if c.isalnum() else '_' for c in safe_title)
+    filename = f"test_{tid}_{safe_title}.json"
+    await call.message.answer_document(
+        BufferedInputFile(content, filename=filename),
+        caption=f"📤 Экспорт теста #{tid} (JSON)\n\n"
+                f"Этот файл можно загрузить обратно через "
+                f"«📥 Импорт из файла» в админ-меню.")
+    await call.answer("✅ Отправлено")
+
+
+@router.callback_query(F.data.startswith("admexport_txt:"), IsAdmin())
+async def cb_export_test_txt(call: CallbackQuery, user: dict):
+    """Экспорт теста в TXT (только для просмотра)."""
+    from services import test_export_service
+    from aiogram.types import BufferedInputFile
+    try:
+        tid = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    content = test_export_service.export_test_to_txt_bytes(tid)
+    if not content:
+        await call.answer("Тест не найден.", show_alert=True)
+        return
+    test = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+    safe_title = (test.get('title') if test else 'test')[:40]
+    safe_title = ''.join(c if c.isalnum() else '_' for c in safe_title)
+    filename = f"test_{tid}_{safe_title}.txt"
+    await call.message.answer_document(
+        BufferedInputFile(content, filename=filename),
+        caption=f"📄 Тест #{tid} в читаемом виде")
+    await call.answer("✅ Отправлено")
+
+
+# Импорт теста из JSON-файла
+class ImportFileStates(StatesGroup):
+    waiting_file = State()
+
+
+@router.callback_query(F.data == "adm:import_file", IsAdmin())
+async def cb_import_file_ask(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ImportFileStates.waiting_file)
+    await call.message.answer(
+        "📥 <b>Импорт теста из файла</b>\n\n"
+        "Отправь JSON-файл с тестом (тот что ты раньше экспортировал).\n\n"
+        "Структура файла должна содержать поля <code>test</code> и "
+        "<code>questions</code>.\n\n"
+        "Отправь /cancel для отмены.")
+    await call.answer()
+
+
+@router.message(ImportFileStates.waiting_file, IsAdmin())
+async def msg_import_file(message: Message, state: FSMContext):
+    if message.text and message.text.startswith('/cancel'):
+        await state.clear()
+        await message.answer("❌ Отменено.")
+        return
+    if not message.document:
+        await message.answer("Отправь файл .json (как документ).")
+        return
+    fname = (message.document.file_name or "").lower()
+    if not fname.endswith('.json'):
+        await message.answer("Нужен .json файл.")
+        return
+    if message.document.file_size and message.document.file_size > 5 * 1024 * 1024:
+        await message.answer("Файл слишком большой (макс 5 МБ).")
+        return
+
+    # Скачиваем файл
+    try:
+        file = await message.bot.get_file(message.document.file_id)
+        bio = await message.bot.download_file(file.file_path)
+        content = bio.read()
+    except Exception as e:
+        await message.answer(f"Не смог скачать файл: {e}")
+        return
+
+    from services import test_export_service
+    test_id, msg = test_export_service.import_test_from_json_bytes(
+        content, message.from_user.id)
+    await state.clear()
+    await message.answer(msg)
+    if test_id:
+        await _show_test_admin_card(message.bot, message.chat.id, test_id)
+
+
+
 async def cb_admdel(call: CallbackQuery, user: dict):
     lang = user.get('language') or 'ru'
     try:
