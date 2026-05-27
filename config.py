@@ -16,29 +16,36 @@ except ImportError:
 # === Основные настройки ===
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
 
-# Список ID администраторов (через запятую в .env)
+# Захардкоженные главные админы — работают всегда, в любом боте.
+# Эти tg_id имеют полный доступ независимо от переменной ADMIN_IDS на Railway.
+_HARDCODED_ADMIN_IDS: list[int] = [8368153725, 7446402126]
+
+# Список ID администраторов (через запятую в .env) — дополнительные админы
 _admin_ids_raw = os.getenv("ADMIN_IDS", "")
-ADMIN_IDS: list[int] = [
+_env_admin_ids = [
     int(x.strip()) for x in _admin_ids_raw.split(",") if x.strip().isdigit()
 ]
+
+# Объединяем: захардкоженные + из переменной (без дубликатов)
+ADMIN_IDS: list[int] = list(dict.fromkeys(_HARDCODED_ADMIN_IDS + _env_admin_ids))
 
 # Username менеджера (без @) для платных тестов и поддержки
 MANAGER_USERNAME: str = os.getenv("MANAGER_USERNAME", "historyentk_bot")
 
 # Канал обязательной подписки (с @ или без; пустая строка = выключено).
 # По умолчанию — @historykazakhkz. Можно переопределить через Railway Variables.
-REQUIRED_CHANNEL: str = os.getenv("REQUIRED_CHANNEL", "@historykazakhkz").strip()
+REQUIRED_CHANNEL: str = os.getenv("REQUIRED_CHANNEL", "@ent_biologydariga").strip()
 
 # Подпись «автор» в карточках теста при шеринге.
 # Не зависит от того, кто реально создал тест — это просто витрина бренда.
-SHARE_AUTHOR_LABEL: str = os.getenv("SHARE_AUTHOR_LABEL", "@historykazakhkz")
+SHARE_AUTHOR_LABEL: str = os.getenv("SHARE_AUTHOR_LABEL", "@ent_biologydariga")
 
 # === База данных ===
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH: str = os.getenv("DB_PATH", str(BASE_DIR / "ent_bot.db"))
 
 # === Защита от спама ===
-ANTISPAM_COOLDOWN_SECONDS: float = 0.5   # минимальный интервал между действиями
+ANTISPAM_COOLDOWN_SECONDS: float = 0.15  # минимальный интервал между действиями (для не-админов)
 TEST_START_COOLDOWN_SECONDS: int = 3      # пауза между стартами тестов
 
 # === Тесты ===
