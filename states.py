@@ -17,6 +17,7 @@ class TestCreateStates(StatesGroup):
     subject = State()
     grade = State()
     category = State()
+    category_select = State()
     language = State()
     test_type = State()
     time_per_question = State()
@@ -54,6 +55,12 @@ class GrantAccessStates(StatesGroup):
 class PremiumStates(StatesGroup):
     waiting_user = State()
     waiting_days = State()
+    waiting_revoke_user = State()
+
+
+class AdminMgmtStates(StatesGroup):
+    waiting_add_user = State()
+    waiting_remove_user = State()
 
 
 class BlockStates(StatesGroup):
