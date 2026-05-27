@@ -22,7 +22,8 @@ import config
 import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
-                       homework, rating, inline, admin)
+                       homework, rating, inline, admin, group_quiz,
+                       private_access, categories)
 
 
 def setup_logging() -> None:
@@ -60,6 +61,7 @@ async def set_default_commands(bot: Bot) -> None:
         BotCommand(command="help", description="Помощь"),
         BotCommand(command="cancel", description="Отмена"),
         BotCommand(command="admin", description="Админ-панель"),
+        BotCommand(command="opens", description="Закрытый доступ (admin)"),
     ]
     try:
         await bot.set_my_commands(cmds)
@@ -77,6 +79,14 @@ async def main() -> None:
 
     # БД создаётся на старте автоматически
     database.init_db()
+    log.info("DB_PATH: %s", config.DB_PATH)
+    # Предупреждение если БД лежит в репозитории (не Volume)
+    if not config.DB_PATH.startswith("/data") and not config.DB_PATH.startswith("/mnt"):
+        log.warning(
+            "⚠️ DB_PATH=%s — БД лежит в репозитории и БУДЕТ СТЕРТА при следующем деплое! "
+            "Создай Volume на Railway (Settings → Volumes), смонтируй на /data, "
+            "и поставь переменную DB_PATH=/data/bot.db",
+            config.DB_PATH)
     log.info("База данных инициализирована: %s", config.DB_PATH)
 
     # Обязательный канал — прописываем в required_channels, если задан
@@ -101,6 +111,43 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+
+    # Глобальный обработчик ошибок — снимает «загрузку» и не даёт боту падать
+    from aiogram.types import ErrorEvent, CallbackQuery
+    @dp.errors()
+    async def global_error_handler(event: ErrorEvent):
+        log.exception("Unhandled exception: %s", event.exception)
+        err_text = str(event.exception)[:200]
+        try:
+            update = event.update
+            if update and update.callback_query:
+                user_id = update.callback_query.from_user.id if update.callback_query.from_user else None
+                # Админу показываем настоящую ошибку, обычному юзеру — общую
+                is_a = False
+                try:
+                    from utils import is_admin
+                    is_a = is_admin(user_id) if user_id else False
+                except Exception:
+                    pass
+                if is_a:
+                    msg = f"⚠️ Ошибка: {err_text}"
+                else:
+                    msg = "⚠️ Произошла ошибка. Попробуйте ещё раз."
+                try:
+                    await update.callback_query.answer(msg, show_alert=True)
+                except Exception:
+                    pass
+            elif update and update.message:
+                try:
+                    user_id = update.message.from_user.id if update.message.from_user else None
+                    from utils import is_admin
+                    if is_admin(user_id):
+                        await update.message.answer(f"⚠️ Ошибка: {err_text}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return True
 
     # Узнаём username бота — нужен для deep-link'ов
     try:
@@ -129,9 +176,20 @@ async def main() -> None:
     dp.include_router(homework.router)
     dp.include_router(rating.router)
     dp.include_router(inline.router)
+    dp.include_router(group_quiz.router)
+    dp.include_router(private_access.router)
+    dp.include_router(categories.router)
     dp.include_router(admin.router)
 
     await set_default_commands(bot)
+
+    # Фоновая задача: уведомления об истечении Premium (раз в час)
+    from services import premium_service as _ps
+    asyncio.create_task(_ps.premium_expiry_loop(bot))
+
+    # Фоновая задача: истечение приватного доступа
+    from handlers import private_access as _pa
+    asyncio.create_task(_pa.expiry_check_loop(bot))
 
     log.info("Запуск polling...")
     try:
