@@ -457,9 +457,9 @@ async def cb_export_test_json(call: CallbackQuery, user: dict):
     await call.answer("✅ Отправлено")
 
 
-@router.callback_query(F.data.startswith("admexport_txt:"), IsAdmin())
-async def cb_export_test_txt(call: CallbackQuery, user: dict):
-    """Экспорт теста в TXT (только для просмотра)."""
+@router.callback_query(F.data.startswith("admexport_star:"), IsAdmin())
+async def cb_export_test_star(call: CallbackQuery, user: dict):
+    """Экспорт теста в .txt со звёздочкой возле правильного варианта."""
     from services import test_export_service
     from aiogram.types import BufferedInputFile
     try:
@@ -467,7 +467,7 @@ async def cb_export_test_txt(call: CallbackQuery, user: dict):
     except (ValueError, IndexError):
         await call.answer()
         return
-    content = test_export_service.export_test_to_txt_bytes(tid)
+    content = test_export_service.export_test_to_star_bytes(tid)
     if not content:
         await call.answer("Тест не найден.", show_alert=True)
         return
@@ -477,8 +477,217 @@ async def cb_export_test_txt(call: CallbackQuery, user: dict):
     filename = f"test_{tid}_{safe_title}.txt"
     await call.message.answer_document(
         BufferedInputFile(content, filename=filename),
-        caption=f"📄 Тест #{tid} в читаемом виде")
+        caption=(f"📤 Тест #{tid} в формате .txt\n\n"
+                  f"Правильные ответы отмечены * после варианта.\n"
+                  f"Этот же файл можно дописать новыми вопросами и "
+                  f"загрузить обратно через «➕ Дописать вопросы из .txt»."))
     await call.answer("✅ Отправлено")
+
+
+# ====== Дописать вопросы из .txt ======
+class AppendStarStates(StatesGroup):
+    waiting_file = State()
+
+
+@router.callback_query(F.data.startswith("admappend_star:"), IsAdmin())
+async def cb_append_star_ask(call: CallbackQuery, state: FSMContext):
+    try:
+        tid = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    await state.set_state(AppendStarStates.waiting_file)
+    await state.update_data(append_test_id=tid)
+    await call.message.answer(
+        f"➕ <b>Дописать вопросы к тесту #{tid}</b>\n\n"
+        f"Пришли .txt файл в формате:\n"
+        f"<pre>1. Вопрос?\n"
+        f"A) вариант\n"
+        f"B) вариант *\n"
+        f"C) вариант\n"
+        f"D) вариант</pre>\n\n"
+        f"где <b>*</b> — правильный ответ.\n\n"
+        f"Или просто отправь текст таким же форматом сообщением.\n\n"
+        f"/cancel для отмены.")
+    await call.answer()
+
+
+@router.message(AppendStarStates.waiting_file, IsAdmin())
+async def msg_append_star(message: Message, state: FSMContext):
+    if message.text and message.text.startswith('/cancel'):
+        await state.clear()
+        await message.answer("❌ Отменено.")
+        return
+    data = await state.get_data()
+    test_id = data.get('append_test_id')
+    if not test_id:
+        await state.clear()
+        await message.answer("⚠️ Сессия истекла.")
+        return
+
+    # Получим текст — из файла или из сообщения
+    txt = None
+    if message.document:
+        fname = (message.document.file_name or "").lower()
+        if not fname.endswith('.txt'):
+            await message.answer("Нужен .txt файл (или просто текст сообщением).")
+            return
+        if message.document.file_size and message.document.file_size > 5 * 1024 * 1024:
+            await message.answer("Файл слишком большой (макс 5 МБ).")
+            return
+        try:
+            file = await message.bot.get_file(message.document.file_id)
+            bio = await message.bot.download_file(file.file_path)
+            txt = bio.read().decode('utf-8', errors='replace')
+        except Exception as e:
+            await message.answer(f"Не смог скачать файл: {e}")
+            return
+    elif message.text:
+        txt = message.text
+
+    if not txt:
+        await message.answer("Пришли .txt файл или текст.")
+        return
+
+    from services import test_export_service
+    qs = test_export_service.parse_star_format(txt)
+    if not qs:
+        await message.answer("⚠️ Не нашёл ни одного вопроса в формате со звёздочкой.")
+        return
+    added, skipped = test_export_service.append_questions_to_test(test_id, qs)
+    await state.clear()
+    msg_text = (f"✅ Добавлено вопросов: <b>{added}</b>\n"
+                f"⚠️ Пропущено: {skipped}\n\n"
+                f"Тест #{test_id} обновлён.")
+    await message.answer(msg_text)
+    await _show_test_admin_card(message.bot, message.chat.id, test_id)
+
+
+# ====== Редактировать название теста ======
+class EditTestFieldStates(StatesGroup):
+    waiting_title = State()
+    waiting_timer = State()
+
+
+@router.callback_query(F.data.startswith("admedit_title:"), IsAdmin())
+async def cb_edit_title_ask(call: CallbackQuery, state: FSMContext):
+    try:
+        tid = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    test = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+    if not test:
+        await call.answer("Тест не найден.", show_alert=True)
+        return
+    await state.set_state(EditTestFieldStates.waiting_title)
+    await state.update_data(edit_test_id=tid)
+    await call.message.answer(
+        f"📝 <b>Введи новое название теста</b>\n\n"
+        f"Текущее: <code>{utils.escape_html(test.get('title') or '')}</code>\n\n"
+        f"Или /cancel для отмены.")
+    await call.answer()
+
+
+@router.message(EditTestFieldStates.waiting_title, IsAdmin())
+async def msg_edit_title(message: Message, state: FSMContext):
+    if message.text and message.text.startswith('/cancel'):
+        await state.clear()
+        await message.answer("❌ Отменено.")
+        return
+    new_title = (message.text or "").strip()
+    if not new_title:
+        await message.answer("Название не может быть пустым.")
+        return
+    if len(new_title) > 200:
+        await message.answer("Слишком длинное (макс 200 символов).")
+        return
+    data = await state.get_data()
+    tid = data.get('edit_test_id')
+    db.execute("UPDATE tests SET title=? WHERE id=?", (new_title, tid))
+    await state.clear()
+    await message.answer(f"✅ Название обновлено на: <b>{utils.escape_html(new_title)}</b>")
+    await _show_test_admin_card(message.bot, message.chat.id, tid)
+
+
+@router.callback_query(F.data.startswith("admedit_timer:"), IsAdmin())
+async def cb_edit_timer_ask(call: CallbackQuery, state: FSMContext):
+    try:
+        tid = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    test = db.fetchone("SELECT time_per_question FROM tests WHERE id=?", (tid,))
+    if not test:
+        await call.answer("Тест не найден.", show_alert=True)
+        return
+    cur = test.get('time_per_question') or 30
+    await state.set_state(EditTestFieldStates.waiting_timer)
+    await state.update_data(edit_test_id=tid)
+    kb = InlineKeyboardBuilder()
+    for sec in (15, 30, 45, 60, 90, 120, 180, 300):
+        kb.button(text=f"{sec} сек", callback_data=f"settimer:{tid}:{sec}")
+    kb.button(text="✏️ Ввести вручную", callback_data=f"settimer:{tid}:manual")
+    kb.button(text="❌ Отмена", callback_data="cancel")
+    kb.adjust(4, 4, 1, 1)
+    await call.message.answer(
+        f"⏱ <b>Изменить таймер вопроса</b>\n\n"
+        f"Текущий: <b>{cur} сек</b>\n\n"
+        f"Выбери из вариантов или введи своё число:",
+        reply_markup=kb.as_markup())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("settimer:"), IsAdmin())
+async def cb_set_timer(call: CallbackQuery, state: FSMContext):
+    try:
+        _, tid, arg = call.data.split(":")
+        tid = int(tid)
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    if arg == "manual":
+        await state.set_state(EditTestFieldStates.waiting_timer)
+        await state.update_data(edit_test_id=tid)
+        await call.message.answer(
+            "✏️ Введи число секунд (от 5 до 600):")
+        await call.answer()
+        return
+    try:
+        sec = int(arg)
+    except ValueError:
+        await call.answer()
+        return
+    if not 5 <= sec <= 600:
+        await call.answer("Допустимо 5-600 сек.", show_alert=True)
+        return
+    db.execute("UPDATE tests SET time_per_question=? WHERE id=?", (sec, tid))
+    await state.clear()
+    await call.message.answer(f"✅ Таймер обновлён: <b>{sec} сек</b>")
+    await _show_test_admin_card(call.bot, call.message.chat.id, tid)
+    await call.answer()
+
+
+@router.message(EditTestFieldStates.waiting_timer, IsAdmin())
+async def msg_edit_timer_manual(message: Message, state: FSMContext):
+    if message.text and message.text.startswith('/cancel'):
+        await state.clear()
+        await message.answer("❌ Отменено.")
+        return
+    txt = (message.text or "").strip()
+    if not txt.isdigit():
+        await message.answer("Введи число (от 5 до 600).")
+        return
+    sec = int(txt)
+    if not 5 <= sec <= 600:
+        await message.answer("Допустимо 5-600 сек.")
+        return
+    data = await state.get_data()
+    tid = data.get('edit_test_id')
+    db.execute("UPDATE tests SET time_per_question=? WHERE id=?", (sec, tid))
+    await state.clear()
+    await message.answer(f"✅ Таймер обновлён: <b>{sec} сек</b>")
+    await _show_test_admin_card(message.bot, message.chat.id, tid)
 
 
 # Импорт теста из JSON-файла
@@ -490,11 +699,15 @@ class ImportFileStates(StatesGroup):
 async def cb_import_file_ask(call: CallbackQuery, state: FSMContext):
     await state.set_state(ImportFileStates.waiting_file)
     await call.message.answer(
-        "📥 <b>Импорт теста из файла</b>\n\n"
-        "Отправь JSON-файл с тестом (тот что ты раньше экспортировал).\n\n"
-        "Структура файла должна содержать поля <code>test</code> и "
-        "<code>questions</code>.\n\n"
-        "Отправь /cancel для отмены.")
+        "📥 <b>Импорт нового теста из файла</b>\n\n"
+        "Пришли <b>.json</b> (тот что экспортировал) "
+        "или <b>.txt</b> в формате со звёздочкой:\n\n"
+        "<pre>1. Вопрос?\n"
+        "A) вариант\n"
+        "B) вариант *\n"
+        "C) вариант</pre>\n\n"
+        "где <b>*</b> — правильный ответ.\n\n"
+        "/cancel для отмены.")
     await call.answer()
 
 
@@ -505,17 +718,16 @@ async def msg_import_file(message: Message, state: FSMContext):
         await message.answer("❌ Отменено.")
         return
     if not message.document:
-        await message.answer("Отправь файл .json (как документ).")
+        await message.answer("Отправь файл (.json или .txt) как документ.")
         return
     fname = (message.document.file_name or "").lower()
-    if not fname.endswith('.json'):
-        await message.answer("Нужен .json файл.")
+    if not (fname.endswith('.json') or fname.endswith('.txt')):
+        await message.answer("Нужен .json или .txt файл.")
         return
     if message.document.file_size and message.document.file_size > 5 * 1024 * 1024:
         await message.answer("Файл слишком большой (макс 5 МБ).")
         return
 
-    # Скачиваем файл
     try:
         file = await message.bot.get_file(message.document.file_id)
         bio = await message.bot.download_file(file.file_path)
@@ -525,8 +737,17 @@ async def msg_import_file(message: Message, state: FSMContext):
         return
 
     from services import test_export_service
-    test_id, msg = test_export_service.import_test_from_json_bytes(
-        content, message.from_user.id)
+    if fname.endswith('.json'):
+        test_id, msg = test_export_service.import_test_from_json_bytes(
+            content, message.from_user.id)
+    else:
+        # txt-формат со звёздочкой
+        title = fname.replace('.txt', '').replace('_', ' ')[:100]
+        test_id, msg = test_export_service.import_test_from_star_text(
+            content.decode('utf-8', errors='replace'),
+            message.from_user.id,
+            title=title)
+
     await state.clear()
     await message.answer(msg)
     if test_id:
