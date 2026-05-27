@@ -481,18 +481,17 @@ async def _finalize_group(bot: Bot, gqid: int, chat_id: int):
 
 @router.poll_answer()
 async def on_poll_answer(poll_answer: PollAnswer):
-    """Ответ из Quiz Poll — личный тест."""
+    """Ответ из Quiz Poll — может быть личный или групповой тест."""
     try:
-        # У PollAnswer есть bot из контекста, но безопаснее взять из Router
-        from aiogram import Bot
         bot = poll_answer.bot
         if bot is None:
             return
+        # Сначала пробуем как групповой
+        from services import group_quiz_service
+        await group_quiz_service.on_poll_answer(
+            bot, poll_answer.poll_id, poll_answer.option_ids, poll_answer.user)
+        # Параллельно пробуем как личный — функция сама проверит маппинг
         await test_runner.process_poll_answer(
-            bot,
-            poll_answer.poll_id,
-            poll_answer.option_ids,
-            poll_answer.user.id,
-        )
+            bot, poll_answer.poll_id, poll_answer.option_ids, poll_answer.user.id)
     except Exception as e:
         log.warning("poll_answer handler error: %s", e)
