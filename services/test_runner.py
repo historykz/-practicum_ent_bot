@@ -48,6 +48,8 @@ _active_messages: dict[int, tuple[int, int]] = {}
 # Quiz Poll: poll_id -> {attempt_id, question_id, option_order}
 # option_order — список option_id в том порядке, в котором показаны в poll
 _poll_map: dict[str, dict] = {}
+# attempt_id → [(chat_id, msg_id), ...] — для удаления Quiz Poll после завершения приватного теста
+_private_poll_msgs: dict[int, list[tuple[int, int]]] = {}
 
 
 def cancel_timer(attempt_id: int) -> None:
@@ -440,14 +442,24 @@ async def process_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
     attempt = get_attempt(info["attempt_id"])
     if not attempt or attempt["status"] != "in_progress":
         return
-    # Проверим, что пользователь — владелец попытки
     user_row = db.fetchone("SELECT id FROM users WHERE tg_id=?", (user_tg_id,))
     if not user_row or user_row["id"] != attempt["user_id"]:
         return
-    # Делегируем стандартному обработчику
     await process_answer(bot, info["attempt_id"], info["question_id"],
                           option_id, info["chat_id"])
-    # Чистим
+
+    # ── Защита приватных тестов: запоминаем msg_id для удаления после теста ──
+    try:
+        test = db.fetchone(
+            "SELECT is_private FROM tests WHERE id=?", (attempt['test_id'],))
+        if test and test.get('is_private'):
+            # Сохраняем msg_id для последующего удаления
+            attempt_id = info["attempt_id"]
+            _private_poll_msgs.setdefault(attempt_id, []).append(
+                (info["chat_id"], info["msg_id"]))
+    except Exception:
+        pass
+
     _poll_map.pop(poll_id, None)
 
 
@@ -529,6 +541,47 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
         (status, now_iso(), score, attempt_id),
     )
 
+    # === Сохраняем в test_statistics для лидерборда ===
+    try:
+        from services import group_quiz_service as _gqs
+        user_row = db.fetchone("SELECT tg_id, username, first_name, last_name FROM users WHERE id=?",
+                                (attempt['user_id'],))
+        if user_row and (correct + wrong + skipped) > 0:
+            # КРИТИЧНО: sqlite3.Row не имеет .get() — конвертируем в dict
+            user_dict = dict(user_row)
+            attempt_dict = dict(attempt)
+            full_name = " ".join(filter(None, [
+                user_dict.get('first_name') or '',
+                user_dict.get('last_name') or ''
+            ])).strip() or "Игрок"
+            # Длительность в секундах
+            duration_sec = 0
+            if attempt_dict.get('start_time'):
+                try:
+                    from datetime import datetime as _dt
+                    st = _dt.fromisoformat(attempt_dict['start_time'])
+                    duration_sec = int((_dt.utcnow() - st).total_seconds())
+                except Exception:
+                    pass
+            _gqs.save_private_attempt_to_statistics(
+                test_id=test['id'],
+                user_id=attempt_dict['user_id'],
+                tg_id=user_dict.get('tg_id'),
+                username=user_dict.get('username') or "",
+                full_name=full_name,
+                correct=correct,
+                wrong=wrong,
+                skipped=skipped,
+                total_questions=total,
+                total_time_seconds=duration_sec,
+                started_at=attempt_dict.get('start_time') or now_iso(),
+                finished_at=now_iso(),
+            )
+            logger.info("Сохранено в test_statistics: test_id=%s user_id=%s score=%s",
+                         test['id'], attempt_dict['user_id'], correct)
+    except Exception as e:
+        logger.warning("Не удалось сохранить в test_statistics: %s", e, exc_info=True)
+
     lang = attempt["language"] or "ru"
 
     # Слабые темы
@@ -566,6 +619,22 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
             update_streak_after_daily(attempt["user_id"], percent)
         except Exception as e:
             logger.exception("update_streak error: %s", e)
+
+    # ── Защита приватных тестов: удаляем все Quiz Poll через 5 минут после теста ──
+    if test.get('is_private'):
+        msgs_to_del = _private_poll_msgs.pop(attempt_id, [])
+        if msgs_to_del:
+            async def _delete_after_delay():
+                try:
+                    await asyncio.sleep(300)  # 5 минут
+                    for chat_id_msg, msg_id in msgs_to_del:
+                        try:
+                            await bot.delete_message(chat_id_msg, msg_id)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            asyncio.create_task(_delete_after_delay())
 
 
 def compute_weak_topics(attempt_id: int) -> list[str]:
