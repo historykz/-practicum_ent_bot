@@ -28,7 +28,6 @@ def main_menu_kb(lang: str, is_admin: bool = False) -> InlineKeyboardMarkup:
     kb.button(text=t("btn_rating", lang), callback_data="m:rating")
     kb.button(text=t("btn_my_results", lang), callback_data="m:results")
     kb.button(text=t("btn_profile", lang), callback_data="m:profile")
-    kb.button(text=t("btn_share", lang), callback_data="m:share")
     kb.button(text=t("btn_invite", lang), callback_data="m:invite")
     kb.button(text=t("btn_support", lang), callback_data="m:support")
     kb.button(text=t("btn_help", lang), callback_data="m:help")
@@ -63,7 +62,6 @@ def cancel_kb(lang: str, callback: str = "cancel") -> InlineKeyboardMarkup:
 def profile_kb(lang: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t("btn_change_lang", lang), callback_data="profile:lang")
-    kb.button(text=t("btn_set_school", lang), callback_data="profile:school")
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
     return kb.as_markup()
@@ -242,8 +240,6 @@ def rating_menu_kb(lang: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t("btn_rating_overall", lang), callback_data="rating:overall")
     kb.button(text=t("btn_rating_week", lang), callback_data="rating:week")
-    kb.button(text=t("btn_rating_daily", lang), callback_data="rating:daily")
-    kb.button(text=t("btn_rating_school", lang), callback_data="rating:school")
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
     return kb.as_markup()
@@ -335,15 +331,14 @@ def admin_menu_kb(lang: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t("btn_admin_create_test", lang), callback_data="adm:create_test")
     kb.button(text=t("btn_admin_my_tests", lang), callback_data="adm:my_tests")
+    kb.button(text="📂 Разделы", callback_data="adm:categories")
     kb.button(text=t("btn_admin_import_text", lang), callback_data="adm:import_text")
-    kb.button(text=t("btn_admin_import_poll", lang), callback_data="adm:import_poll")
-    kb.button(text=t("btn_admin_grant_access", lang), callback_data="adm:grant")
     kb.button(text=t("btn_admin_premium", lang), callback_data="adm:premium")
     kb.button(text=t("btn_admin_block", lang), callback_data="adm:block")
     kb.button(text=t("btn_admin_channels", lang), callback_data="adm:channels")
-    kb.button(text=t("btn_admin_notes", lang), callback_data="adm:notes")
     kb.button(text=t("btn_admin_stats", lang), callback_data="adm:stats")
     kb.button(text=t("btn_admin_export", lang), callback_data="adm:export")
+    kb.button(text="🛠 Управление админами", callback_data="adm:admins")
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(2)
     return kb.as_markup()
@@ -359,12 +354,16 @@ def admin_tests_list_kb(tests: list[dict], lang: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def admin_test_actions_kb(test_id: int, lang: str) -> InlineKeyboardMarkup:
+def admin_test_actions_kb(test_id: int, lang: str, is_private: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📝 Импорт текстом", callback_data=f"admimport_text:{test_id}")
     kb.button(text="📥 Импорт Quiz Poll", callback_data=f"admimport_poll:{test_id}")
     kb.button(text="📋 Черновики", callback_data=f"admdrafts:{test_id}")
     kb.button(text="❓ Вопросы", callback_data=f"admquestions:{test_id}")
+    if is_private:
+        kb.button(text="🔓 Снять приватный режим", callback_data=f"admpriv:{test_id}:0")
+    else:
+        kb.button(text="🔐 Сделать приватным", callback_data=f"admpriv:{test_id}:1")
     kb.button(text="🗑 Удалить тест", callback_data=f"admdel:{test_id}")
     kb.button(text=t("btn_back", lang), callback_data="adm:my_tests")
     kb.adjust(1)
