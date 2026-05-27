@@ -250,6 +250,20 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext, user: dict):
     await state.set_state(None)
     await state.clear()
 
+    # Объяснение про смену языка — на двух языках, чтобы юзер всегда понял
+    chosen_msg = (
+        ("✅ <b>Язык выбран: Русский</b>" if lang == "ru"
+         else "✅ <b>Тіл таңдалды: Қазақша</b>") +
+        "\n\n"
+        "🇷🇺 <b>Если захочешь сменить язык:</b>\n"
+        "«👤 Профиль» → «🌐 Сменить язык»\n\n"
+        "🇰🇿 <b>Тілді ауыстырғың келсе:</b>\n"
+        "«👤 Профиль» → «🌐 Тілді ауыстыру»")
+    try:
+        await call.message.answer(chosen_msg, parse_mode="HTML")
+    except Exception:
+        pass
+
     await call.message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
