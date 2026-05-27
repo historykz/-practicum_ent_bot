@@ -358,12 +358,14 @@ def admin_tests_list_kb(tests: list[dict], lang: str) -> InlineKeyboardMarkup:
 def admin_test_actions_kb(test_id: int, lang: str, is_private: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✏️ Редактировать вопросы", callback_data=f"qe:list:{test_id}")
+    kb.button(text="📝 Изменить название", callback_data=f"admedit_title:{test_id}")
+    kb.button(text="⏱ Изменить таймер", callback_data=f"admedit_timer:{test_id}")
     kb.button(text="📝 Импорт текстом", callback_data=f"admimport_text:{test_id}")
     kb.button(text="📥 Импорт Quiz Poll", callback_data=f"admimport_poll:{test_id}")
+    kb.button(text="➕ Дописать вопросы из .txt", callback_data=f"admappend_star:{test_id}")
+    kb.button(text="📤 Экспорт в .txt (со *)", callback_data=f"admexport_star:{test_id}")
     kb.button(text="📤 Экспорт JSON", callback_data=f"admexport_json:{test_id}")
-    kb.button(text="📄 Экспорт TXT", callback_data=f"admexport_txt:{test_id}")
     kb.button(text="📋 Черновики", callback_data=f"admdrafts:{test_id}")
-    kb.button(text="❓ Список вопросов", callback_data=f"admquestions:{test_id}")
     if is_private:
         kb.button(text="🔓 Снять приватный режим", callback_data=f"admpriv:{test_id}:0")
     else:
