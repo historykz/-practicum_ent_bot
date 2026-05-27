@@ -22,9 +22,13 @@ async def cb_duel_menu(call: CallbackQuery, user: dict):
         await call.answer(t("personal_chat_only", lang), show_alert=True)
         return
     try:
-        await call.message.edit_text(t("duel_menu", lang), reply_markup=duel_menu_kb(lang))
+        await call.message.edit_text(t("duel_menu", lang),
+                                       reply_markup=duel_menu_kb(lang),
+                                       parse_mode="HTML")
     except Exception:
-        await call.message.answer(t("duel_menu", lang), reply_markup=duel_menu_kb(lang))
+        await call.message.answer(t("duel_menu", lang),
+                                    reply_markup=duel_menu_kb(lang),
+                                    parse_mode="HTML")
     await call.answer()
 
 
