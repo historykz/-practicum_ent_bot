@@ -30,17 +30,17 @@ _active_lock = asyncio.Lock()
 async def join_queue(bot: Bot, user_id: int, chat_id: int, lang: str) -> Optional[int]:
     """Поставить пользователя в очередь. Возвращает duel_id, если нашли пару, иначе None."""
     async with _queue_lock:
-        # Ищем подходящего противника
+        # Ищем противника с ТЕМ ЖЕ языком
         for i, w in enumerate(_queue):
             if w['user_id'] == user_id:
-                # уже в очереди
                 return None
-            # Подходит любой
+            if w.get('lang') != lang:
+                continue
             opponent = _queue.pop(i)
             duel_id = await _start_duel(bot, opponent['user_id'], opponent['chat_id'],
                                         opponent['lang'], user_id, chat_id, lang)
             return duel_id
-        # Никого нет — добавляем
+        # Никого нет с таким языком — добавляем
         _queue.append({
             'user_id': user_id,
             'chat_id': chat_id,
@@ -59,21 +59,24 @@ async def leave_queue(user_id: int) -> bool:
     return False
 
 
-def _pick_questions(count: int) -> list[int]:
-    """Случайные вопросы ТОЛЬКО из бесплатных активных тестов.
-    Платные тесты не должны утекать через дуэли."""
+def _pick_questions(count: int, lang: str = 'ru') -> list[int]:
+    """Случайные вопросы из бесплатных НЕприватных активных тестов на нужном языке."""
     rows = db.fetchall("""
         SELECT q.id FROM questions q
         JOIN tests t ON t.id = q.test_id
-        WHERE t.status='active' AND t.is_paid=0 AND t.allow_duel=1
-    """)
+        WHERE t.status='active' AND t.is_paid=0
+          AND COALESCE(t.is_private,0)=0
+          AND t.allow_duel=1
+          AND t.language=?
+    """, (lang,))
     if len(rows) < count:
-        # Расширяем выборку — но всё равно только бесплатные
         rows = db.fetchall("""
             SELECT q.id FROM questions q
             JOIN tests t ON t.id = q.test_id
             WHERE t.status='active' AND t.is_paid=0
-        """)
+              AND COALESCE(t.is_private,0)=0
+              AND t.language=?
+        """, (lang,))
     qids = [r['id'] for r in rows]
     if len(qids) < count:
         return qids
@@ -82,7 +85,7 @@ def _pick_questions(count: int) -> list[int]:
 
 async def _start_duel(bot: Bot, uid1: int, chat1: int, lang1: str,
                       uid2: int, chat2: int, lang2: str) -> Optional[int]:
-    qids = _pick_questions(config.DUEL_QUESTIONS_COUNT)
+    qids = _pick_questions(config.DUEL_QUESTIONS_COUNT, lang1)
     if not qids:
         try:
             await bot.send_message(chat1, t("duel_no_questions", lang1))
