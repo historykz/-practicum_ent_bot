@@ -332,6 +332,7 @@ def admin_menu_kb(lang: str) -> InlineKeyboardMarkup:
     kb.button(text=t("btn_admin_create_test", lang), callback_data="adm:create_test")
     kb.button(text=t("btn_admin_my_tests", lang), callback_data="adm:my_tests")
     kb.button(text="📥 Импорт из файла", callback_data="adm:import_file")
+    kb.button(text="📅 Авто-публикация", callback_data="adm:autopub")
     kb.button(text="📂 Разделы", callback_data="adm:categories")
     kb.button(text=t("btn_admin_import_text", lang), callback_data="adm:import_text")
     kb.button(text=t("btn_admin_premium", lang), callback_data="adm:premium")
