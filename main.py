@@ -23,7 +23,7 @@ import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
                        homework, rating, inline, admin, group_quiz,
-                       private_access, categories, question_editor)
+                       private_access, categories, question_editor, autopub)
 
 
 def setup_logging() -> None:
@@ -180,6 +180,7 @@ async def main() -> None:
     dp.include_router(private_access.router)
     dp.include_router(categories.router)
     dp.include_router(question_editor.router)
+    dp.include_router(autopub.router)
     dp.include_router(admin.router)
 
     await set_default_commands(bot)
@@ -191,6 +192,10 @@ async def main() -> None:
     # Фоновая задача: истечение приватного доступа
     from handlers import private_access as _pa
     asyncio.create_task(_pa.expiry_check_loop(bot))
+
+    # Фоновая задача: авто-публикация тестов по расписанию
+    from services import autopub_service as _aps
+    _aps.start_worker(bot)
 
     log.info("Запуск polling...")
     try:
