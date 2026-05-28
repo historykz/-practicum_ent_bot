@@ -116,24 +116,15 @@ async def cmd_start(message: Message, state: FSMContext, user: dict):
             pass
         return
 
-    # Если язык ещё не выбран — спрашиваем
-    if not user.get('language'):
-        await message.answer(
-            "👋 <b>Привет! Сәлем!</b>\n\n"
-            "Я твой помощник по ЕНТ.\n"
-            "Сначала выбери язык — на нём бот будет с тобой общаться.\n\n"
-            "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>\n\n"
-            "👇 Тапни на нужный язык:",
-            reply_markup=language_kb(), parse_mode="HTML")
-        await state.set_state(CommonStates.choosing_language)
-        return
-
-    # Сразу главное меню
+    # ВСЕГДА спрашиваем язык в начале — так договаривались
     await message.answer(
-        t("main_menu", lang),
-        reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)),
-        parse_mode="HTML",
-    )
+        "👋 <b>Привет! Сәлем!</b>\n\n"
+        "Я твой помощник по ЕНТ.\n"
+        "Сначала выбери язык — на нём бот будет с тобой общаться.\n\n"
+        "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>\n\n"
+        "👇 Тапни на нужный язык:",
+        reply_markup=language_kb(), parse_mode="HTML")
+    await state.set_state(CommonStates.choosing_language)
 
 
 @router.message(Command("restart"))
