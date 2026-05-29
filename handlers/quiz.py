@@ -133,6 +133,21 @@ async def cb_retake(call: CallbackQuery, user: dict):
             return
     attempt_id = test_runner.create_attempt(
         user['id'], test_id, lang, group_id=None, started_by_user_id=user['id'])
+    if not attempt_id:
+        # Возможно бан за апелляции
+        try:
+            from services import appeal_service
+            banned, until = appeal_service.is_user_banned(user['id'])
+            if banned:
+                await call.answer(
+                    "⛔ Ты временно отстранён от тестов за ложные апелляции.\n"
+                    f"Сможешь снова проходить после {until[:10]}.",
+                    show_alert=True)
+                return
+        except Exception:
+            pass
+        await call.answer("Не смог запустить тест.", show_alert=True)
+        return
     try:
         await call.message.delete()
     except Exception:
