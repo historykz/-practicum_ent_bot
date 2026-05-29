@@ -21,6 +21,27 @@ router = Router(name="autopub")
 log = logging.getLogger(__name__)
 
 
+def _humanize_minutes(minutes: int) -> str:
+    """Превращает минуты в человекочитаемый текст."""
+    if minutes <= 0:
+        return "прямо сейчас"
+    if minutes == 1:
+        return "через 1 минуту"
+    if minutes < 5:
+        return f"через {minutes} минуты"
+    if minutes < 60:
+        return f"через {minutes} минут"
+    hours = minutes // 60
+    rem = minutes % 60
+    if rem == 0:
+        if hours == 1:
+            return "через 1 час"
+        if 2 <= hours <= 4:
+            return f"через {hours} часа"
+        return f"через {hours} часов"
+    return f"через {hours} ч {rem} мин"
+
+
 class AutoPubStates(StatesGroup):
     waiting_chat_id = State()
     waiting_channel_id = State()
@@ -581,7 +602,7 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
         mix_test = db.fetchone("SELECT * FROM tests WHERE id=?", (mix_id,))
         # ОДИН анонс на канале (если время в будущем)
         if minutes > 0:
-            when_str = run_at.strftime('%d.%m %H:%M') + ' UTC'
+            when_str = _humanize_minutes(minutes)
             try:
                 await autopub_service.announce_test_on_channel(
                     call.bot, dict(mix_test), when_str, template_id=tpl_id)
@@ -631,7 +652,7 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
 
         if tests_obj:
             if minutes > 0:
-                when_str = first_run_at.strftime('%d.%m %H:%M') + ' UTC'
+                when_str = _humanize_minutes(minutes)
                 try:
                     await autopub_service.announce_batch_on_channel(
                         call.bot, tests_obj, when_str, template_id=tpl_id)
