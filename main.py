@@ -170,6 +170,7 @@ async def main() -> None:
 
     # Routers — порядок важен (общие → специфичные)
     dp.include_router(common.router)
+    dp.include_router(appeals.router)
     dp.include_router(profile.router)
     dp.include_router(user.router)
     dp.include_router(quiz.router)
@@ -182,7 +183,6 @@ async def main() -> None:
     dp.include_router(categories.router)
     dp.include_router(question_editor.router)
     dp.include_router(autopub.router)
-    dp.include_router(appeals.router)
     dp.include_router(admin.router)
 
     await set_default_commands(bot)
