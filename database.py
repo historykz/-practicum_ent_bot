@@ -695,6 +695,72 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # Серийный номер вопроса Q-NNNN
+        try:
+            cur.execute("ALTER TABLE questions ADD COLUMN serial_no TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_q_serial ON questions(serial_no)")
+        except Exception:
+            pass
+
+        # Предупреждения юзера + бан
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN appeal_warnings INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN banned_until TEXT")
+        except Exception:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE test_attempts ADD COLUMN paused_at TEXT")
+        except Exception:
+            pass
+
+        # Таблица апелляций
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS appeals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_id INTEGER NOT NULL,
+            user_tg_id INTEGER NOT NULL,
+            user_text TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            resolved_by INTEGER,
+            resolved_at TEXT
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_appeals_status ON appeals(status);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_appeals_q ON appeals(question_id);")
+
+        # Бэкфилл серийных номеров для существующих вопросов
+        try:
+            rows = cur.execute("SELECT id FROM questions WHERE serial_no IS NULL ORDER BY id").fetchall()
+            for r in rows:
+                qid = r[0] if isinstance(r, tuple) else r['id']
+                serial = f"Q-{qid:04d}"
+                cur.execute("UPDATE questions SET serial_no=? WHERE id=?", (serial, qid))
+        except Exception:
+            pass
+
+        # Триггер: автоназначение serial_no новым вопросам
+        try:
+            cur.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_q_serial
+                AFTER INSERT ON questions
+                WHEN NEW.serial_no IS NULL
+                BEGIN
+                    UPDATE questions
+                    SET serial_no = printf('Q-%04d', NEW.id)
+                    WHERE id = NEW.id;
+                END;
+            """)
+        except Exception:
+            pass
+
         # --- ПРИВАТНЫЙ ДОСТУП К ТЕСТАМ ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS private_test_access (
