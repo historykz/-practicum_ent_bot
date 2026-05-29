@@ -420,22 +420,78 @@ async def announce_batch_reminder(bot: Bot, tests: list[dict]) -> bool:
         return False
 
 
-async def announce_single_reminder(bot: Bot, test: dict) -> bool:
-    """Короткое напоминание про следующий тест (между тестами в серии, 20 сек)."""
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
-    if not channel_id:
+async def _lock_chat(bot: Bot, chat_id: int) -> bool:
+    """Закрыть чат — только админы пишут."""
+    try:
+        from aiogram.types import ChatPermissions
+        perms = ChatPermissions(
+            can_send_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+        )
+        await bot.set_chat_permissions(chat_id, permissions=perms)
+        await bot.send_message(
+            chat_id,
+            "🔒 <b>Чат закрыт на время тестов</b>\n\n"
+            "Писать могут только админы.\n"
+            "После окончания серии тестов чат откроется автоматически.",
+            parse_mode="HTML")
+        return True
+    except Exception as e:
+        log.warning("lock chat failed: %s", e)
         return False
-    invite = cfg.get('invite_link') or ''
+
+
+async def _unlock_chat(bot: Bot, chat_id: int) -> bool:
+    """Открыть чат обратно."""
+    try:
+        from aiogram.types import ChatPermissions
+        perms = ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+        )
+        await bot.set_chat_permissions(chat_id, permissions=perms)
+        await bot.send_message(
+            chat_id,
+            "🔓 <b>Чат открыт!</b>\n\n"
+            "Серия тестов окончена. Можно писать.\n"
+            "Спасибо всем участникам! 🎉",
+            parse_mode="HTML")
+        return True
+    except Exception as e:
+        log.warning("unlock chat failed: %s", e)
+        return False
+
+
+async def announce_single_reminder(bot: Bot, test: dict) -> bool:
+    """Короткое напоминание про следующий тест — в ЧАТЕ где идут тесты, не на канале."""
+    cfg = get_autopub_config()
+    chat_id = cfg.get('chat_id')
+    if not chat_id:
+        return False
     text = (
         f"⏳ <b>Через 20 сек — новый тест!</b>\n\n"
         f"📚 <b>{test['title']}</b>\n\n"
-        f"🔗 Чат: {invite}"
+        f"Готовься! 🚀"
     )
     try:
-        await bot.send_message(int(channel_id), text,
-                                 parse_mode="HTML",
-                                 disable_web_page_preview=False)
+        await bot.send_message(int(chat_id), text,
+                                 parse_mode="HTML")
         return True
     except Exception as e:
         log.warning("single reminder: %s", e)
@@ -653,8 +709,9 @@ async def _worker_loop(bot: Bot):
 
                 db.execute("UPDATE autopub_queue SET status='running' WHERE id=?", (qid,))
                 try:
+                    posted_full_announce = False
                     # 1) Если первый в серии — шлём ПОЛНЫЙ напоминание-анонс с темами
-                    if series_pos == 0 and series_total >= 1 and series_ids_str:
+                    if series_pos == 0 and series_ids_str:
                         try:
                             ids = [int(x) for x in series_ids_str.split(',') if x.strip().isdigit()]
                             tests_obj = []
@@ -663,26 +720,29 @@ async def _worker_loop(bot: Bot):
                                 if t:
                                     tests_obj.append(dict(t))
                             if tests_obj:
-                                if series_total == 1:
+                                if len(tests_obj) == 1:
                                     # один тест — анонс "уже идёт"
-                                    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+                                    test = tests_obj[0]
                                     cfg = get_autopub_config()
                                     chan = cfg.get('channel_id')
                                     invite = cfg.get('invite_link') or ''
                                     qc = db.fetchone(
                                         "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
-                                        (test_id,))['c']
-                                    if chan and test:
+                                        (test['id'],))['c']
+                                    if chan:
                                         try:
                                             await bot.send_message(
                                                 int(chan),
                                                 announce_now_text(0, test['title'], qc, invite),
                                                 parse_mode="HTML",
                                                 disable_web_page_preview=False)
-                                        except Exception:
-                                            pass
+                                            posted_full_announce = True
+                                        except Exception as e:
+                                            log.warning("now announce: %s", e)
                                 else:
-                                    await announce_batch_reminder(bot, tests_obj)
+                                    ok = await announce_batch_reminder(bot, tests_obj)
+                                    if ok:
+                                        posted_full_announce = True
                         except Exception as e:
                             log.warning("series head reminder: %s", e)
                     elif series_pos > 0:
@@ -693,14 +753,42 @@ async def _worker_loop(bot: Bot):
                                 await announce_single_reminder(bot, dict(test))
                             except Exception:
                                 pass
-                            # Ждём 20 сек чтобы юзеры успели увидеть
-                            await asyncio.sleep(20)
+
+                    # Пауза чтобы юзеры успели зайти в чат
+                    if posted_full_announce:
+                        await asyncio.sleep(15)
+                    elif series_pos > 0:
+                        await asyncio.sleep(20)
+
+                    # При запуске ПЕРВОГО теста серии — закрыть чат
+                    if series_pos == 0:
+                        cfg = get_autopub_config()
+                        chat_id = cfg.get('chat_id')
+                        if chat_id:
+                            try:
+                                await _lock_chat(bot, int(chat_id))
+                            except Exception as e:
+                                log.warning("lock on first: %s", e)
 
                     # 2) Запуск лобби
                     ok = await publish_test_to_chat(bot, test_id)
                     if ok:
                         db.execute("UPDATE autopub_queue SET status='done' WHERE id=?",
                                     (qid,))
+                        # При запуске ПОСЛЕДНЕГО теста серии — запланировать unlock
+                        if series_pos == series_total - 1:
+                            # Длительность теста + запас на лобби и финиш
+                            test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+                            qcount = db.fetchone(
+                                "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
+                                (test_id,))['c']
+                            tpq = (test.get('time_per_question') if test else 30) or 30
+                            duration_sec = qcount * tpq + 120  # +2 мин на лобби/финиш
+                            cfg = get_autopub_config()
+                            chat_id = cfg.get('chat_id')
+                            if chat_id:
+                                asyncio.create_task(
+                                    _delayed_unlock(bot, int(chat_id), duration_sec))
                     else:
                         db.execute(
                             "UPDATE autopub_queue SET status='failed', error=? WHERE id=?",
@@ -715,6 +803,17 @@ async def _worker_loop(bot: Bot):
             return
         except Exception as e:
             log.exception("worker loop: %s", e)
+
+
+async def _delayed_unlock(bot: Bot, chat_id: int, delay_sec: int):
+    """Отложенно открыть чат после окончания серии."""
+    try:
+        await asyncio.sleep(delay_sec)
+        await _unlock_chat(bot, chat_id)
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        log.warning("delayed unlock: %s", e)
 
 
 def start_worker(bot: Bot):
