@@ -284,8 +284,8 @@ async def _show_categories(msg_obj, state: FSMContext):
         kb.button(text=f"📭 Без раздела ({sel_cnt}/{len(no_cat)})",
                   callback_data="apubcat:none")
     if selected:
-        kb.button(text=f"⏰ Выбрать время старта ({len(selected)})",
-                  callback_data="apub:pickwhen")
+        kb.button(text=f"➡️ Далее ({len(selected)} тестов)",
+                  callback_data="apub:choose_mode")
     kb.button(text="❌ Отмена", callback_data="adm:autopub")
     kb.adjust(1)
     try:
@@ -414,14 +414,91 @@ async def cb_apub_back_cats(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.callback_query(F.data == "apub:pickwhen", IsAdmin())
-async def cb_pick_when(call: CallbackQuery, state: FSMContext):
-    """Шаг 2: выбор времени старта."""
+@router.callback_query(F.data == "apub:choose_mode", IsAdmin())
+async def cb_choose_mode(call: CallbackQuery, state: FSMContext):
+    """Шаг 2: выбор режима — микс или по очереди."""
     data = await state.get_data()
     selected = list(data.get('apub_selected') or [])
     if not selected:
         await call.answer("Ничего не выбрано.", show_alert=True)
         return
+    if len(selected) > 4:
+        await call.answer(
+            "Для микса максимум 4 теста. Сними галочки лишних.",
+            show_alert=True)
+        return
+    kb = InlineKeyboardBuilder()
+    if len(selected) >= 2:
+        kb.button(text=f"🎲 МИКС: 10 вопросов из всех",
+                  callback_data="apub:mode:mix")
+    kb.button(text=f"📚 По очереди (целиком)",
+              callback_data="apub:mode:full")
+    kb.button(text="↩️ Назад", callback_data="apub:back_cats")
+    kb.adjust(1)
+    text = (
+        f"⚙️ <b>Как публиковать?</b>\n\n"
+        f"Выбрано тестов: <b>{len(selected)}</b>\n\n"
+        f"🎲 <b>МИКС</b> — бот возьмёт <b>10 вопросов</b>, поделит "
+        f"поровну из каждого теста, добавит рандом для добора. "
+        f"В чате один большой квиз.\n\n"
+        f"📚 <b>По очереди</b> — публикует тесты целиком, каждый отдельным лобби."
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML")
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("apub:mode:"), IsAdmin())
+async def cb_set_mode(call: CallbackQuery, state: FSMContext):
+    mode = call.data.split(":")[2]
+    if mode not in ("mix", "full"):
+        await call.answer()
+        return
+    await state.update_data(apub_mode=mode)
+    await _show_template_picker(call, state)
+
+
+async def _show_template_picker(call: CallbackQuery, state: FSMContext):
+    """Шаг 3: выбор шаблона анонса."""
+    from services import autopub_service
+    kb = InlineKeyboardBuilder()
+    for i, tpl in enumerate(autopub_service.ANNOUNCE_TEMPLATES):
+        kb.button(text=tpl['name'], callback_data=f"apub:tpl:{i}")
+    kb.button(text="↩️ Назад", callback_data="apub:choose_mode")
+    kb.adjust(1)
+    # Превью первого шаблона
+    cfg = autopub_service.get_autopub_config()
+    invite = cfg.get('invite_link') or 'https://t.me/...'
+    preview = autopub_service.ANNOUNCE_TEMPLATES[0]['build'](
+        "Казахское ханство", "сейчас", 10, invite)
+    text = (f"📝 <b>Выбери шаблон анонса</b>\n\n"
+            f"<i>Превью «{autopub_service.ANNOUNCE_TEMPLATES[0]['name']}»:</i>\n"
+            f"━━━━━━━━━━\n{preview}\n━━━━━━━━━━")
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML",
+                                       disable_web_page_preview=True)
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("apub:tpl:"), IsAdmin())
+async def cb_set_template(call: CallbackQuery, state: FSMContext):
+    try:
+        tpl_id = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    await state.update_data(apub_template=tpl_id)
+    # Шаг 4: время
+    await _show_time_picker(call, state)
+
+
+async def _show_time_picker(call: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="🚀 Прямо сейчас", callback_data="apub:when:0")
     kb.button(text="⏰ Через 5 мин", callback_data="apub:when:5")
@@ -430,11 +507,16 @@ async def cb_pick_when(call: CallbackQuery, state: FSMContext):
     kb.button(text="⏰ Через 1 час", callback_data="apub:when:60")
     kb.button(text="⏰ Через 3 часа", callback_data="apub:when:180")
     kb.button(text="✏️ Ввести минуты вручную", callback_data="apub:when:manual")
-    kb.button(text="↩️ Назад", callback_data="apub:back_cats")
+    kb.button(text="↩️ Назад", callback_data="apub:choose_mode")
     kb.adjust(2, 2, 2, 1, 1)
+    data = await state.get_data()
+    mode = data.get('apub_mode', 'mix')
+    mode_label = "🎲 Микс из 10 вопросов" if mode == "mix" else "📚 По очереди"
     text = (f"⏰ <b>Когда запустить?</b>\n\n"
-            f"Выбрано тестов: <b>{len(selected)}</b>\n\n"
-            f"Бот опубликует их по очереди в чат и сделает анонс на канале.")
+            f"Режим: {mode_label}\n\n"
+            f"<i>«Прямо сейчас» — бот сразу запустит лобби. "
+            f"В чате появится карточка теста, нужно 2 человека "
+            f"чтобы нажали «Пройти тест» — потом вопросы.</i>")
     try:
         await call.message.edit_text(text, reply_markup=kb.as_markup(),
                                        parse_mode="HTML")
@@ -480,44 +562,96 @@ async def msg_custom_time(message: Message, state: FSMContext):
 async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
     data = await state.get_data()
     selected = list(data.get('apub_selected') or [])
+    mode = data.get('apub_mode', 'mix')
+    tpl_id = data.get('apub_template', 0)
+    lang = 'ru'  # язык по умолчанию для микса
     if not selected:
         await call.answer("Список пуст.", show_alert=True)
         return
-    # Перемешаем — рандомный порядок
-    import random as _r
-    _r.shuffle(selected)
-    base = datetime.utcnow() + timedelta(minutes=minutes)
-    # Пауза между тестами — 1 минута ПОСЛЕ окончания предыдущего
-    GAP_MIN = 1
-    enqueued = 0
-    cursor = base  # время старта текущего теста
-    for tid in selected:
-        run_at = cursor
-        autopub_service.enqueue_test(tid, run_at, call.from_user.id)
-        enqueued += 1
-        # Анонс на канале — для каждого
-        test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
-        if test:
+
+    if mode == 'mix' and len(selected) >= 2:
+        # Создаём один большой микс
+        mix_id = autopub_service.create_mixed_test(
+            selected, call.from_user.id, total=10, language=lang)
+        if not mix_id:
+            await call.answer("Не смог собрать микс.", show_alert=True)
+            return
+        run_at = datetime.utcnow() + timedelta(minutes=minutes)
+        autopub_service.enqueue_test(mix_id, run_at, call.from_user.id)
+        mix_test = db.fetchone("SELECT * FROM tests WHERE id=?", (mix_id,))
+        # ОДИН анонс на канале (если время в будущем)
+        if minutes > 0:
             when_str = run_at.strftime('%d.%m %H:%M') + ' UTC'
             try:
                 await autopub_service.announce_test_on_channel(
-                    call.bot, dict(test), when_str)
+                    call.bot, dict(mix_test), when_str, template_id=tpl_id)
             except Exception:
                 pass
-        # Сдвигаем курсор: длительность теста + пауза
-        qcount = db.fetchone(
-            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (tid,))['c']
-        tpq = (test.get('time_per_question') if test else 30) or 30
-        test_duration_sec = qcount * tpq + 30  # +30 сек на шапку/задержки
-        cursor = cursor + timedelta(seconds=test_duration_sec) + timedelta(minutes=GAP_MIN)
+        await state.clear()
+        summary = (
+            f"✅ <b>МИКС из 10 вопросов создан!</b>\n\n"
+            f"Использовано тестов: <b>{len(selected)}</b>\n"
+            f"Запуск через: <b>{minutes} мин</b>\n\n"
+            + (f"Анонс отправлен на канал.\n" if minutes > 0 else
+                "Запускаю прямо сейчас — следи за чатом.\n")
+            + f"В чате появится лобби — нужно <b>2 человека</b>, "
+            f"чтобы нажали «Я готов».")
+    else:
+        # По очереди — целиком. ОДИН общий анонс со всеми темами.
+        import random as _r
+        _r.shuffle(selected)
+        base = datetime.utcnow() + timedelta(minutes=minutes)
+        GAP_MIN = 1
+        enqueued = 0
+        cursor = base
+        titles = []  # для общего анонса
+        first_run_at = base
 
-    await state.clear()
-    summary = (f"✅ <b>Запланировано {enqueued} тестов!</b>\n\n"
-                f"Первый — через {minutes} мин\n"
-                f"Следующие — после окончания предыдущего + 1 мин паузы\n\n"
-                f"Анонсы уже отправлены на канал.\n"
-                f"Бот будет публиковать сам — следи через "
-                f"«📋 Очередь публикаций».")
+        for tid in selected:
+            run_at = cursor
+            autopub_service.enqueue_test(tid, run_at, call.from_user.id)
+            enqueued += 1
+            test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+            if test:
+                titles.append(test['title'])
+            qcount = db.fetchone(
+                "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
+                (tid,))['c']
+            tpq = (test.get('time_per_question') if test else 30) or 30
+            test_duration_sec = qcount * tpq + 60  # +60 сек на лобби+шапку
+            cursor = cursor + timedelta(seconds=test_duration_sec) \
+                     + timedelta(minutes=GAP_MIN)
+
+        # ОДИН анонс — со всеми темами разом
+        tests_obj = []
+        for tid in selected:
+            t = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+            if t:
+                tests_obj.append(dict(t))
+
+        if tests_obj:
+            if minutes > 0:
+                when_str = first_run_at.strftime('%d.%m %H:%M') + ' UTC'
+                try:
+                    await autopub_service.announce_batch_on_channel(
+                        call.bot, tests_obj, when_str, template_id=tpl_id)
+                except Exception as e:
+                    log.warning("batch announce: %s", e)
+            else:
+                try:
+                    await autopub_service.announce_batch_now(
+                        call.bot, tests_obj, template_id=tpl_id)
+                except Exception as e:
+                    log.warning("batch now: %s", e)
+
+        await state.clear()
+        summary = (
+            f"✅ <b>Запланировано {enqueued} тестов!</b>\n\n"
+            f"Первый — через {minutes} мин\n"
+            f"Следующие — после окончания предыдущего + 1 мин паузы\n\n"
+            + (f"Один общий анонс отправлен на канал." if minutes > 0
+                else "Первый запускается сейчас."))
+
     try:
         await call.message.edit_text(summary, reply_markup=_main_menu_kb(),
                                        parse_mode="HTML")
@@ -527,39 +661,20 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
     await call.answer("✅")
 
 
+async def _noop_answer(*a, **k):
+    pass
+
+
 async def _enqueue_series_msg(message: Message, state: FSMContext, minutes: int):
-    data = await state.get_data()
-    selected = list(data.get('apub_selected') or [])
-    if not selected:
-        await message.answer("Список пуст.")
-        await state.clear()
-        return
-    import random as _r
-    _r.shuffle(selected)
-    base = datetime.utcnow() + timedelta(minutes=minutes)
-    GAP_MIN = 1
-    enqueued = 0
-    cursor = base
-    for tid in selected:
-        run_at = cursor
-        autopub_service.enqueue_test(tid, run_at, message.from_user.id)
-        enqueued += 1
-        test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
-        if test:
-            when_str = run_at.strftime('%d.%m %H:%M') + ' UTC'
-            try:
-                await autopub_service.announce_test_on_channel(
-                    message.bot, dict(test), when_str)
-            except Exception:
-                pass
-        qcount = db.fetchone(
-            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (tid,))['c']
-        tpq = (test.get('time_per_question') if test else 30) or 30
-        test_duration_sec = qcount * tpq + 30
-        cursor = cursor + timedelta(seconds=test_duration_sec) + timedelta(minutes=GAP_MIN)
-    await state.clear()
-    await message.answer(
-        f"✅ Запланировано {enqueued} тестов через {minutes} мин.")
+    """Ручной ввод минут — переиспользуем логику через fake-call."""
+    fake_call = type('F', (), {
+        'data': '',
+        'message': message,
+        'from_user': message.from_user,
+        'bot': message.bot,
+        'answer': _noop_answer
+    })()
+    await _enqueue_series(fake_call, state, minutes)
 
 
 # ===================== ОЧЕРЕДЬ =====================
