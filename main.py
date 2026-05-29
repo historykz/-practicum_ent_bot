@@ -23,7 +23,8 @@ import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
                        homework, rating, inline, admin, group_quiz,
-                       private_access, categories, question_editor, autopub)
+                       private_access, categories, question_editor, autopub,
+                       appeals)
 
 
 def setup_logging() -> None:
@@ -181,6 +182,7 @@ async def main() -> None:
     dp.include_router(categories.router)
     dp.include_router(question_editor.router)
     dp.include_router(autopub.router)
+    dp.include_router(appeals.router)
     dp.include_router(admin.router)
 
     await set_default_commands(bot)
