@@ -77,20 +77,40 @@ def ensure_schedule_table():
                 status TEXT DEFAULT 'pending',
                 error TEXT DEFAULT '',
                 created_by INTEGER,
+                series_id TEXT DEFAULT '',
+                series_pos INTEGER DEFAULT 0,
+                series_total INTEGER DEFAULT 1,
+                series_test_ids TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
         db.execute("CREATE INDEX IF NOT EXISTS idx_autopub_status_time "
                     "ON autopub_queue(status, run_at)")
+        # Миграции
+        for sql in (
+            "ALTER TABLE autopub_queue ADD COLUMN series_id TEXT DEFAULT ''",
+            "ALTER TABLE autopub_queue ADD COLUMN series_pos INTEGER DEFAULT 0",
+            "ALTER TABLE autopub_queue ADD COLUMN series_total INTEGER DEFAULT 1",
+            "ALTER TABLE autopub_queue ADD COLUMN series_test_ids TEXT DEFAULT ''",
+        ):
+            try:
+                db.execute(sql)
+            except Exception:
+                pass
     except Exception as e:
         log.exception("ensure_schedule_table: %s", e)
 
 
-def enqueue_test(test_id: int, run_at: datetime, created_by: int) -> int:
+def enqueue_test(test_id: int, run_at: datetime, created_by: int,
+                  series_id: str = '', series_pos: int = 0,
+                  series_total: int = 1, series_test_ids: str = '') -> int:
     """Поставить тест в очередь на публикацию."""
     cur = db.execute(
-        "INSERT INTO autopub_queue (test_id, run_at, created_by) VALUES (?, ?, ?)",
-        (test_id, run_at.isoformat(), created_by))
+        "INSERT INTO autopub_queue (test_id, run_at, created_by, "
+        "series_id, series_pos, series_total, series_test_ids) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (test_id, run_at.isoformat(), created_by,
+          series_id, series_pos, series_total, series_test_ids))
     return cur.lastrowid
 
 
@@ -353,6 +373,75 @@ async def announce_batch_on_channel(bot: Bot, tests: list[dict],
         return False
 
 
+async def announce_batch_short(bot: Bot, count: int, when_str: str) -> bool:
+    """Короткий ПРЕД-анонс: только когда начнётся, без тем."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    text = (
+        f"🔔 <b>СКОРО ТЕСТ В ЧАТЕ</b>\n\n"
+        f"⏰ Начинаем: <b>{when_str}</b>\n"
+        f"📚 Тестов в серии: <b>{count}</b>\n\n"
+        f"📩 Когда время подойдёт — пришлю темы и ссылку.\n\n"
+        f"🔗 Чат: {invite}"
+    )
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("short announce: %s", e)
+        return False
+
+
+async def announce_batch_reminder(bot: Bot, tests: list[dict]) -> bool:
+    """Краткое напоминание когда время подошло — темы + ссылка."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
+    text = (
+        f"⏰ <b>НАЧИНАЕМ!</b>\n\n"
+        f"📚 Темы:\n{topics}\n\n"
+        f"👇 Заходи в чат:\n{invite}"
+    )
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("reminder: %s", e)
+        return False
+
+
+async def announce_single_reminder(bot: Bot, test: dict) -> bool:
+    """Короткое напоминание про следующий тест (между тестами в серии, 20 сек)."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    text = (
+        f"⏳ <b>Через 20 сек — новый тест!</b>\n\n"
+        f"📚 <b>{test['title']}</b>\n\n"
+        f"🔗 Чат: {invite}"
+    )
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("single reminder: %s", e)
+        return False
+
+
 async def announce_batch_now(bot: Bot, tests: list[dict],
                                 template_id: int = 0) -> bool:
     """ОДИН анонс «уже идёт» для нескольких тестов сразу."""
@@ -549,7 +638,7 @@ async def _worker_loop(bot: Bot):
     log.info("autopub worker started")
     while True:
         try:
-            await asyncio.sleep(20)  # проверка каждые 20 сек
+            await asyncio.sleep(10)
             now = datetime.utcnow().isoformat()
             rows = db.fetchall(
                 "SELECT * FROM autopub_queue "
@@ -558,10 +647,57 @@ async def _worker_loop(bot: Bot):
             for r in rows:
                 qid = r['id']
                 test_id = r['test_id']
+                series_pos = r.get('series_pos') or 0
+                series_total = r.get('series_total') or 1
+                series_ids_str = r.get('series_test_ids') or ''
+
                 db.execute("UPDATE autopub_queue SET status='running' WHERE id=?", (qid,))
                 try:
-                    # При наступлении времени: анонс «уже идёт» + лобби
-                    ok = await publish_now_with_announce(bot, test_id, template_id=0)
+                    # 1) Если первый в серии — шлём ПОЛНЫЙ напоминание-анонс с темами
+                    if series_pos == 0 and series_total >= 1 and series_ids_str:
+                        try:
+                            ids = [int(x) for x in series_ids_str.split(',') if x.strip().isdigit()]
+                            tests_obj = []
+                            for tid in ids:
+                                t = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+                                if t:
+                                    tests_obj.append(dict(t))
+                            if tests_obj:
+                                if series_total == 1:
+                                    # один тест — анонс "уже идёт"
+                                    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+                                    cfg = get_autopub_config()
+                                    chan = cfg.get('channel_id')
+                                    invite = cfg.get('invite_link') or ''
+                                    qc = db.fetchone(
+                                        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
+                                        (test_id,))['c']
+                                    if chan and test:
+                                        try:
+                                            await bot.send_message(
+                                                int(chan),
+                                                announce_now_text(0, test['title'], qc, invite),
+                                                parse_mode="HTML",
+                                                disable_web_page_preview=False)
+                                        except Exception:
+                                            pass
+                                else:
+                                    await announce_batch_reminder(bot, tests_obj)
+                        except Exception as e:
+                            log.warning("series head reminder: %s", e)
+                    elif series_pos > 0:
+                        # промежуточный — короткий анонс «через 20 сек»
+                        test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+                        if test:
+                            try:
+                                await announce_single_reminder(bot, dict(test))
+                            except Exception:
+                                pass
+                            # Ждём 20 сек чтобы юзеры успели увидеть
+                            await asyncio.sleep(20)
+
+                    # 2) Запуск лобби
+                    ok = await publish_test_to_chat(bot, test_id)
                     if ok:
                         db.execute("UPDATE autopub_queue SET status='done' WHERE id=?",
                                     (qid,))
