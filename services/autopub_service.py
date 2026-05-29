@@ -107,7 +107,7 @@ def cancel_pending(qid: int):
 # ===================== ПУБЛИКАЦИЯ =====================
 
 async def publish_test_to_chat(bot: Bot, test_id: int) -> bool:
-    """Опубликовать тест в чат как серию Quiz Poll. Вернёт True если ок."""
+    """Запустить лобби теста в чате (как групповой квиз, ждёт 2 игроков)."""
     cfg = get_autopub_config()
     chat_id = cfg['chat_id']
     if not chat_id:
@@ -117,67 +117,75 @@ async def publish_test_to_chat(bot: Bot, test_id: int) -> bool:
     if not test:
         return False
     questions = db.fetchall(
-        "SELECT * FROM questions WHERE test_id=? ORDER BY order_num, id",
-        (test_id,))
+        "SELECT id FROM questions WHERE test_id=?", (test_id,))
     if not questions:
         return False
-    # Шапка
+    # Запускаем лобби через group_quiz_service
+    from services import group_quiz_service
+    # Прорчищаем потенциально зависшие лобби в этом чате
     try:
-        await bot.send_message(
-            int(chat_id),
-            f"📚 <b>{test['title']}</b>\n\n"
-            f"Вопросов: {len(questions)}\n"
-            f"Время на вопрос: {test.get('time_per_question') or 30} сек\n\n"
-            f"Поехали! 🚀")
+        existing = db.fetchone(
+            "SELECT id FROM group_quizzes WHERE chat_id=? AND status IN ('lobby','running')",
+            (int(chat_id),))
+        if existing:
+            await group_quiz_service.stop_quiz(bot, int(chat_id), 0)
+            await asyncio.sleep(1)
+    except Exception:
+        pass
+    try:
+        # admin_tg_id = 0 — системный запуск
+        await group_quiz_service.start_lobby(
+            bot, dict(test), int(chat_id),
+            admin_tg_id=0,
+            language=test.get('language') or 'ru')
+        return True
     except Exception as e:
-        log.warning("send header: %s", e)
+        log.exception("publish_test_to_chat lobby: %s", e)
         return False
-    # Сами вопросы как Quiz Poll
-    for q in questions:
-        opts = db.fetchall(
-            "SELECT * FROM question_options WHERE question_id=? "
-            "ORDER BY order_num, id", (q['id'],))
-        if len(opts) < 2:
-            continue
-        correct_idx = 0
-        for i, o in enumerate(opts):
-            if o['is_correct']:
-                correct_idx = i
-                break
+
+
+async def publish_now_with_announce(bot: Bot, test_id: int,
+                                      template_id: int = 0) -> bool:
+    """
+    Опубликовать тест прямо сейчас:
+      1. Анонс на канале (без таймера, текст «уже идёт»)
+      2. Лобби в чате
+    """
+    cfg = get_autopub_config()
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+    if not test:
+        return False
+    channel_id = cfg.get('channel_id')
+    invite = cfg.get('invite_link') or ''
+    qc = db.fetchone(
+        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test_id,))['c']
+    if channel_id:
         try:
-            await bot.send_poll(
-                int(chat_id),
-                question=q['text'][:300],
-                options=[o['text'][:100] for o in opts[:10]],
-                type='quiz',
-                correct_option_id=correct_idx,
-                is_anonymous=True,
-                open_period=test.get('time_per_question') or 30,
-                explanation=(q.get('explanation') or '')[:200] or None,
-            )
-            await asyncio.sleep(0.5)  # анти-флуд
+            await bot.send_message(
+                int(channel_id),
+                announce_now_text(template_id, test['title'], qc, invite),
+                parse_mode="HTML",
+                disable_web_page_preview=False)
         except Exception as e:
-            log.warning("send poll q=%s: %s", q['id'], e)
-    return True
+            log.warning("announce_now: %s", e)
+    return await publish_test_to_chat(bot, test_id)
 
 
-async def announce_test_on_channel(bot: Bot, test: dict, when_str: str) -> bool:
-    """Анонс на канале со ссылкой на чат."""
+async def announce_test_on_channel(bot: Bot, test: dict, when_str: str,
+                                     template_id: int = 0) -> bool:
+    """Анонс на канале со ссылкой на чат. template_id — какой шаблон текста."""
     cfg = get_autopub_config()
     channel_id = cfg['channel_id']
     if not channel_id:
         log.warning("announce: channel_id не задан")
         return False
     invite = cfg.get('invite_link') or ''
+    qcount = db.fetchone(
+        'SELECT COUNT(*) AS c FROM questions WHERE test_id=?',
+        (test['id'],))['c']
+    title = test['title']
 
-    text = (
-        f"🔥 <b>СКОРО ТЕСТ В ЧАТЕ!</b>\n\n"
-        f"📚 <b>{test['title']}</b>\n"
-        f"⏰ Старт: <b>{when_str}</b>\n"
-        f"❓ Вопросов: <b>{db.fetchone('SELECT COUNT(*) AS c FROM questions WHERE test_id=?', (test['id'],))['c']}</b>\n\n"
-        f"👇 Заходи в чат, чтобы участвовать:\n"
-        f"{invite}"
-    )
+    text = build_announce_text(template_id, title, when_str, qcount, invite)
     try:
         await bot.send_message(int(channel_id), text,
                                  parse_mode="HTML",
@@ -186,6 +194,350 @@ async def announce_test_on_channel(bot: Bot, test: dict, when_str: str) -> bool:
     except Exception as e:
         log.warning("announce: %s", e)
         return False
+
+
+# ===================== ШАБЛОНЫ АНОНСА =====================
+
+ANNOUNCE_TEMPLATES = [
+    {
+        "name": "🔥 Зажигательный",
+        "build": lambda title, when, qc, link: (
+            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
+            f"📚 Тема: <b>«{title}»</b>\n"
+            f"⏰ Старт: <b>{when}</b>\n"
+            f"❓ {qc} вопросов на скорость\n\n"
+            f"💪 Проверь свои знания перед ЕНТ!\n"
+            f"⚡️ Соревнуйся с другими в реальном времени!\n"
+            f"🏆 Покажи кто тут лучший!\n\n"
+            f"👇 ЗАХОДИ В ЧАТ ПРЯМО СЕЙЧАС:\n{link}\n\n"
+            f"⏳ Не пропусти — места ограничены!"
+        ),
+    },
+    {
+        "name": "🎯 Деловой",
+        "build": lambda title, when, qc, link: (
+            f"🎯 <b>ОНЛАЙН-ТЕСТ В ЧАТЕ</b>\n\n"
+            f"📖 Раздел: <b>{title}</b>\n"
+            f"🕐 Время: <b>{when}</b>\n"
+            f"📝 Количество вопросов: {qc}\n\n"
+            f"Отличная возможность проверить подготовку к ЕНТ "
+            f"в формате живого соревнования.\n\n"
+            f"🔗 Присоединяйся к чату:\n{link}"
+        ),
+    },
+    {
+        "name": "🚀 Мотивационный",
+        "build": lambda title, when, qc, link: (
+            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
+            f"Сегодня разбираем: <b>«{title}»</b>\n"
+            f"⏰ Начинаем: <b>{when}</b>\n"
+            f"❓ Вопросов: {qc}\n\n"
+            f"Каждый тест — шаг к высокому баллу на ЕНТ! 📈\n"
+            f"Не учи в одиночку — соревнуйся и запоминай лучше! 🧠\n\n"
+            f"👇 Жми и заходи:\n{link}\n\n"
+            f"Увидимся в чате! 😎"
+        ),
+    },
+    {
+        "name": "⚡️ Краткий",
+        "build": lambda title, when, qc, link: (
+            f"⚡️ <b>ТЕСТ: {title}</b>\n"
+            f"⏰ {when} · {qc} вопросов\n\n"
+            f"Заходи в чат 👇\n{link}"
+        ),
+    },
+]
+
+
+def build_announce_text(template_id: int, title: str, when: str,
+                         qc: int, link: str) -> str:
+    if template_id < 0 or template_id >= len(ANNOUNCE_TEMPLATES):
+        template_id = 0
+    return ANNOUNCE_TEMPLATES[template_id]["build"](title, when, qc, link)
+
+
+def build_series_announce_text(template_id: int, titles: list[str],
+                                  when: str, link: str) -> str:
+    """Анонс серии нескольких тестов одним сообщением."""
+    if template_id < 0 or template_id >= len(ANNOUNCE_TEMPLATES):
+        template_id = 0
+
+    # Список тем красивым списком
+    topics = "\n".join(f"• <b>{t}</b>" for t in titles)
+    count = len(titles)
+
+    if template_id == 0:  # Зажигательный
+        return (
+            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
+            f"📚 Сегодня нас ждёт <b>серия из {count} тестов</b>:\n\n"
+            f"{topics}\n\n"
+            f"⏰ Старт: <b>{when}</b>\n\n"
+            f"💪 Проверь свои знания перед ЕНТ!\n"
+            f"⚡️ Соревнуйся с другими в реальном времени!\n"
+            f"🏆 Покажи кто тут лучший!\n\n"
+            f"👇 ЗАХОДИ В ЧАТ ПРЯМО СЕЙЧАС:\n{link}\n\n"
+            f"⏳ Не пропусти!")
+    elif template_id == 1:  # Деловой
+        return (
+            f"🎯 <b>СЕРИЯ ОНЛАЙН-ТЕСТОВ</b>\n\n"
+            f"📖 Темы ({count}):\n\n{topics}\n\n"
+            f"🕐 Время начала: <b>{when}</b>\n\n"
+            f"Отличная возможность проверить подготовку к ЕНТ "
+            f"в формате живого соревнования.\n\n"
+            f"🔗 Присоединяйся к чату:\n{link}")
+    elif template_id == 2:  # Мотивационный
+        return (
+            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
+            f"Сегодня разбираем <b>{count} тем</b>:\n\n{topics}\n\n"
+            f"⏰ Начинаем: <b>{when}</b>\n\n"
+            f"Каждый тест — шаг к высокому баллу на ЕНТ! 📈\n"
+            f"Не учи в одиночку — соревнуйся и запоминай лучше! 🧠\n\n"
+            f"👇 Жми и заходи:\n{link}\n\n"
+            f"Увидимся в чате! 😎")
+    else:  # Краткий
+        return (
+            f"⚡️ <b>СЕРИЯ ТЕСТОВ</b>\n\n"
+            f"{topics}\n\n"
+            f"⏰ {when}\n\n"
+            f"Заходи в чат 👇\n{link}")
+
+
+def build_series_now_text(template_id: int, titles: list[str], link: str) -> str:
+    """Анонс серии когда стартует прямо сейчас."""
+    topics = "\n".join(f"• <b>{t}</b>" for t in titles)
+    count = len(titles)
+    return (
+        f"🟢 <b>СЕРИЯ ТЕСТОВ УЖЕ ИДЁТ!</b>\n\n"
+        f"📚 Сейчас в чате <b>{count} тестов</b>:\n\n{topics}\n\n"
+        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{link}\n\n"
+        f"Успей! ⏳")
+
+
+def announce_now_text(template_id: int, title: str, qc: int, link: str) -> str:
+    """Текст когда тест НАЧИНАЕТСЯ прямо сейчас (без таймера)."""
+    return (
+        f"🟢 <b>ТЕСТ УЖЕ ИДЁТ!</b>\n\n"
+        f"📚 <b>«{title}»</b>\n"
+        f"❓ {qc} вопросов\n\n"
+        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{link}\n\n"
+        f"Успей ответить! ⏳"
+    )
+
+
+async def announce_batch_on_channel(bot: Bot, tests: list[dict],
+                                      when_str: str,
+                                      template_id: int = 0) -> bool:
+    """ОДИН общий анонс на канале для нескольких тестов сразу."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    # Список тем
+    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
+    total_q = 0
+    for t in tests:
+        r = db.fetchone(
+            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (t['id'],))
+        total_q += (r['c'] if r else 0)
+
+    text = build_batch_announce_text(template_id, topics, len(tests),
+                                       total_q, when_str, invite)
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("batch announce: %s", e)
+        return False
+
+
+async def announce_batch_now(bot: Bot, tests: list[dict],
+                                template_id: int = 0) -> bool:
+    """ОДИН анонс «уже идёт» для нескольких тестов сразу."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
+    total_q = 0
+    for t in tests:
+        r = db.fetchone(
+            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (t['id'],))
+        total_q += (r['c'] if r else 0)
+    text = (
+        f"🟢 <b>ТЕСТЫ УЖЕ ИДУТ В ЧАТЕ!</b>\n\n"
+        f"📚 <b>Темы:</b>\n{topics}\n\n"
+        f"❓ Всего вопросов: {total_q}\n\n"
+        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{invite}\n\n"
+        f"Успей ответить! ⏳"
+    )
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("batch announce now: %s", e)
+        return False
+
+
+BATCH_TEMPLATES = [
+    {
+        "name": "🔥 Зажигательный",
+        "build": lambda topics, n, qc, when, link: (
+            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
+            f"📚 <b>Темы ({n}):</b>\n{topics}\n\n"
+            f"⏰ Старт: <b>{when}</b>\n"
+            f"❓ Всего вопросов: <b>{qc}</b>\n\n"
+            f"💪 Проверь знания перед ЕНТ!\n"
+            f"⚡️ Соревнуйся в реальном времени!\n"
+            f"🏆 Покажи кто тут лучший!\n\n"
+            f"👇 ЗАХОДИ В ЧАТ:\n{link}\n\n"
+            f"⏳ Места ограничены!"
+        ),
+    },
+    {
+        "name": "🎯 Деловой",
+        "build": lambda topics, n, qc, when, link: (
+            f"🎯 <b>СЕРИЯ ОНЛАЙН-ТЕСТОВ В ЧАТЕ</b>\n\n"
+            f"📖 <b>Разделы ({n}):</b>\n{topics}\n\n"
+            f"🕐 Старт: <b>{when}</b>\n"
+            f"📝 Всего вопросов: {qc}\n\n"
+            f"Отличная возможность проверить подготовку к ЕНТ "
+            f"в формате живого соревнования.\n\n"
+            f"🔗 Чат:\n{link}"
+        ),
+    },
+    {
+        "name": "🚀 Мотивационный",
+        "build": lambda topics, n, qc, when, link: (
+            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
+            f"Сегодня разбираем <b>{n}</b> темы:\n{topics}\n\n"
+            f"⏰ Начинаем: <b>{when}</b>\n"
+            f"❓ Вопросов: {qc}\n\n"
+            f"Каждый тест — шаг к высокому баллу! 📈\n"
+            f"Не учи в одиночку — соревнуйся! 🧠\n\n"
+            f"👇 Чат:\n{link}\n\n"
+            f"Увидимся! 😎"
+        ),
+    },
+    {
+        "name": "⚡️ Краткий",
+        "build": lambda topics, n, qc, when, link: (
+            f"⚡️ <b>СЕРИЯ ТЕСТОВ ({n})</b>\n\n"
+            f"{topics}\n\n"
+            f"⏰ {when} · {qc} вопросов\n\n"
+            f"Заходи 👇\n{link}"
+        ),
+    },
+]
+
+
+def build_batch_announce_text(template_id: int, topics: str, n: int,
+                                qc: int, when: str, link: str) -> str:
+    if template_id < 0 or template_id >= len(BATCH_TEMPLATES):
+        template_id = 0
+    return BATCH_TEMPLATES[template_id]["build"](topics, n, qc, when, link)
+
+
+# ===================== МИКС ВОПРОСОВ ИЗ НЕСКОЛЬКИХ ТЕСТОВ =====================
+
+def create_mixed_test(test_ids: list[int], created_by: int,
+                       total: int = 10,
+                       language: str = 'ru') -> Optional[int]:
+    """
+    Создаёт временный тест-микс: берёт поровну вопросов из каждого теста,
+    добор рандомом до total. Вернёт id нового теста.
+    """
+    import random
+    if not test_ids:
+        return None
+    n = len(test_ids)
+    per = total // n        # поровну
+    remainder = total - per * n  # добор рандомом
+
+    selected_qids = []
+    pools = {}  # test_id -> список оставшихся вопросов
+
+    for tid in test_ids:
+        qs = db.fetchall(
+            "SELECT id FROM questions WHERE test_id=? ORDER BY RANDOM()", (tid,))
+        pool = [q['id'] for q in qs]
+        pools[tid] = pool
+        take = pool[:per]
+        selected_qids.extend(take)
+        pools[tid] = pool[per:]  # остаток для добора
+
+    # Добор остатка рандомом из всех оставшихся
+    leftover = []
+    for tid in test_ids:
+        leftover.extend(pools[tid])
+    random.shuffle(leftover)
+    selected_qids.extend(leftover[:remainder])
+
+    if not selected_qids:
+        return None
+
+    # Название микса
+    titles = []
+    for tid in test_ids:
+        tr = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+        if tr:
+            titles.append(tr['title'])
+    mix_title = " + ".join(titles[:3])
+    if len(mix_title) > 120:
+        mix_title = mix_title[:117] + "..."
+
+    # Берём время на вопрос из первого теста
+    first = db.fetchone("SELECT time_per_question FROM tests WHERE id=?",
+                         (test_ids[0],))
+    tpq = (first.get('time_per_question') if first else 30) or 30
+
+    # Создаём временный тест (помечаем is_mix=1, не показываем в каталоге)
+    cur = db.execute("""
+        INSERT INTO tests (title, description, language, time_per_question,
+                            is_paid, price, test_type, status, created_by,
+                            is_private)
+        VALUES (?, '', ?, ?, 0, 0, 'mix', 'mix_temp', ?, 1)
+    """, (f"🎲 {mix_title}", language, tpq, created_by))
+    mix_test_id = cur.lastrowid
+
+    # Копируем выбранные вопросы в новый тест
+    random.shuffle(selected_qids)
+    for order, qid in enumerate(selected_qids[:total]):
+        q = db.fetchone("SELECT * FROM questions WHERE id=?", (qid,))
+        if not q:
+            continue
+        qcur = db.execute("""
+            INSERT INTO questions (test_id, text, explanation, order_num, source_type)
+            VALUES (?, ?, ?, ?, 'mix')
+        """, (mix_test_id, q['text'], q.get('explanation') or '', order))
+        new_qid = qcur.lastrowid
+        opts = db.fetchall(
+            "SELECT * FROM question_options WHERE question_id=? ORDER BY order_num, id",
+            (qid,))
+        for j, o in enumerate(opts):
+            db.execute("""
+                INSERT INTO question_options (question_id, text, is_correct, order_num)
+                VALUES (?, ?, ?, ?)
+            """, (new_qid, o['text'], o['is_correct'], j))
+
+    return mix_test_id
+
+
+def cleanup_mix_test(test_id: int):
+    """Удалить временный микс-тест после использования."""
+    try:
+        qs = db.fetchall("SELECT id FROM questions WHERE test_id=?", (test_id,))
+        for q in qs:
+            db.execute("DELETE FROM question_options WHERE question_id=?", (q['id'],))
+        db.execute("DELETE FROM questions WHERE test_id=?", (test_id,))
+        db.execute("DELETE FROM tests WHERE id=? AND status='mix_temp'", (test_id,))
+    except Exception as e:
+        log.warning("cleanup_mix: %s", e)
 
 
 # ===================== ВОРКЕР =====================
@@ -206,10 +558,10 @@ async def _worker_loop(bot: Bot):
             for r in rows:
                 qid = r['id']
                 test_id = r['test_id']
-                # Помечаем как в работе
                 db.execute("UPDATE autopub_queue SET status='running' WHERE id=?", (qid,))
                 try:
-                    ok = await publish_test_to_chat(bot, test_id)
+                    # При наступлении времени: анонс «уже идёт» + лобби
+                    ok = await publish_now_with_announce(bot, test_id, template_id=0)
                     if ok:
                         db.execute("UPDATE autopub_queue SET status='done' WHERE id=?",
                                     (qid,))
