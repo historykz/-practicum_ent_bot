@@ -755,6 +755,7 @@ async def msg_import_file(message: Message, state: FSMContext):
 
 
 
+@router.callback_query(F.data.startswith("admdel:"), IsAdmin())
 async def cb_admdel(call: CallbackQuery, user: dict):
     lang = user.get('language') or 'ru'
     try:
@@ -762,8 +763,10 @@ async def cb_admdel(call: CallbackQuery, user: dict):
     except (ValueError, IndexError):
         await call.answer()
         return
-    db.execute("DELETE FROM tests WHERE id=?", (tid,))
+    db.execute("DELETE FROM question_options WHERE question_id IN "
+                "(SELECT id FROM questions WHERE test_id=?)", (tid,))
     db.execute("DELETE FROM questions WHERE test_id=?", (tid,))
+    db.execute("DELETE FROM tests WHERE id=?", (tid,))
     await call.answer(t("test_deleted", lang), show_alert=True)
     try:
         await call.message.delete()
