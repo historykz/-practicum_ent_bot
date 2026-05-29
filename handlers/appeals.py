@@ -58,14 +58,33 @@ async def cb_pause(call: CallbackQuery):
     a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (attempt_id,))
     if not a or a.get('user_id') != u['id']:
         return
+    if a.get('status') != 'in_progress':
+        await call.answer("Тест уже не активен.", show_alert=True)
+        return
 
-    # Сохраним в БД флаг паузы (если есть колонка) или просто пошлём сообщение
+    # Меняем status на 'paused' — _question_timeout в test_runner это увидит и выйдет
     try:
         db.execute(
-            "UPDATE test_attempts SET paused_at=CURRENT_TIMESTAMP WHERE id=?",
+            "UPDATE test_attempts SET status='paused', "
+            "paused_at=CURRENT_TIMESTAMP WHERE id=?",
             (attempt_id,))
     except Exception:
-        pass  # колонки нет — ничего страшного, кнопки покажем всё равно
+        pass
+
+    # Пытаемся закрыть текущий Quiz Poll, чтобы юзер не мог отвечать
+    try:
+        from services import test_runner as _tr
+        # Поищем активный poll этого attempt'а
+        for poll_id, info in list(_tr._poll_map.items()):
+            if info.get('attempt_id') == attempt_id:
+                try:
+                    await call.bot.stop_poll(info['chat_id'], info['msg_id'])
+                except Exception:
+                    pass
+                _tr._poll_map.pop(poll_id, None)
+                break
+    except Exception:
+        pass
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="▶️ Продолжить",
@@ -81,7 +100,6 @@ async def cb_pause(call: CallbackQuery):
             parse_mode="HTML")
     except Exception:
         pass
-    await call.answer("⏸ Пауза")
 
 
 @router.callback_query(F.data.startswith("tps:resume:"))
@@ -97,19 +115,31 @@ async def cb_resume(call: CallbackQuery):
     a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (attempt_id,))
     if not a or a.get('user_id') != u['id']:
         return
+
+    # Возвращаем status='in_progress' и сбрасываем missed
     try:
-        db.execute("UPDATE test_attempts SET paused_at=NULL WHERE id=?",
-                    (attempt_id,))
+        db.execute(
+            "UPDATE test_attempts SET status='in_progress', paused_at=NULL, "
+            "missed_questions_counter=0 WHERE id=?",
+            (attempt_id,))
     except Exception:
         pass
+
     try:
         await call.message.edit_text(
             "▶️ <b>Продолжаем!</b>\n\n"
-            "Следующий вопрос придёт автоматически.",
+            "Вопрос отправлю заново с новым таймером.",
             parse_mode="HTML")
     except Exception:
         pass
-    await call.answer("▶️")
+
+    # Переотправляем текущий вопрос с новым таймером
+    try:
+        from services import test_runner
+        await test_runner.send_current_question(
+            call.bot, attempt_id, call.message.chat.id)
+    except Exception as e:
+        log.warning("resume send_current: %s", e)
 
 
 @router.callback_query(F.data.startswith("tps:finish:"))
@@ -171,17 +201,34 @@ async def cb_appeal_start(call: CallbackQuery, state: FSMContext):
             show_alert=True)
         return
 
-    # Приостанавливаем
+    # Приостанавливаем — меняем status + закрываем текущий poll
     try:
         db.execute(
-            "UPDATE test_attempts SET paused_at=CURRENT_TIMESTAMP WHERE id=?",
+            "UPDATE test_attempts SET status='paused', "
+            "paused_at=CURRENT_TIMESTAMP WHERE id=?",
             (attempt_id,))
+    except Exception:
+        pass
+    try:
+        from services import test_runner as _tr
+        for poll_id, info in list(_tr._poll_map.items()):
+            if info.get('attempt_id') == attempt_id:
+                try:
+                    await call.bot.stop_poll(info['chat_id'], info['msg_id'])
+                except Exception:
+                    pass
+                _tr._poll_map.pop(poll_id, None)
+                break
     except Exception:
         pass
 
     serial = q.get('serial_no') or f"Q-{qid:04d}"
     await state.set_state(AppealStates.waiting_text)
     await state.update_data(appeal_qid=qid, appeal_attempt=attempt_id)
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена — продолжить тест",
+                             callback_data=f"apl:abort:{attempt_id}")
+    ]])
     await call.message.answer(
         f"⚠️ <b>Апелляция на вопрос {serial}</b>\n\n"
         f"Тест приостановлен на время апелляции.\n\n"
@@ -191,7 +238,8 @@ async def cb_appeal_start(call: CallbackQuery, state: FSMContext):
         f"• Автор и класс учебника\n\n"
         f"<i>Пример:</i>\n"
         f"<i>«Правильный — B. Учебник Алмаатинов А., 10 класс, стр. 145»</i>\n\n"
-        f"Отправь сообщение или /cancel для отмены.",
+        f"Или тапни «Отмена» чтобы вернуться к тесту.",
+        reply_markup=cancel_kb,
         parse_mode="HTML")
 
 
@@ -240,21 +288,69 @@ async def msg_appeal_text(message: Message, state: FSMContext):
         parse_mode="HTML")
 
 
+@router.callback_query(F.data.startswith("apl:abort:"))
+async def cb_appeal_abort(call: CallbackQuery, state: FSMContext):
+    """Отмена апелляции на этапе ввода текста — вернуть к тесту."""
+    await call.answer()
+    try:
+        attempt_id = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        return
+    u = db.fetchone("SELECT id FROM users WHERE tg_id=?", (call.from_user.id,))
+    if not u:
+        return
+    a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (attempt_id,))
+    if not a or a.get('user_id') != u['id']:
+        return
+    await state.clear()
+    # Возвращаем status='in_progress'
+    try:
+        db.execute(
+            "UPDATE test_attempts SET status='in_progress', paused_at=NULL, "
+            "missed_questions_counter=0 WHERE id=?",
+            (attempt_id,))
+    except Exception:
+        pass
+    try:
+        await call.message.edit_text(
+            "✅ Апелляция отменена. Продолжаем тест!")
+    except Exception:
+        pass
+    # Переотправляем текущий вопрос с новым таймером
+    try:
+        from services import test_runner
+        await test_runner.send_current_question(
+            call.bot, attempt_id, call.message.chat.id)
+    except Exception as e:
+        log.warning("appeal abort send_current: %s", e)
+
+
 @router.callback_query(F.data == "apl:cancel", AppealStates.waiting_confirm)
 async def cb_appeal_cancel(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    attempt_id = data.get('appeal_attempt')
     try:
-        db.execute("UPDATE test_attempts SET paused_at=NULL WHERE id=?",
-                    (data.get('appeal_attempt'),))
+        db.execute(
+            "UPDATE test_attempts SET status='in_progress', paused_at=NULL, "
+            "missed_questions_counter=0 WHERE id=?",
+            (attempt_id,))
     except Exception:
         pass
     await state.clear()
     try:
         await call.message.edit_text(
-            "❌ Апелляция отменена. Возвращайся к тесту.")
+            "❌ Апелляция отменена. Продолжаем тест!")
     except Exception:
         pass
     await call.answer()
+    # Переотправим текущий вопрос
+    if attempt_id:
+        try:
+            from services import test_runner
+            await test_runner.send_current_question(
+                call.bot, attempt_id, call.message.chat.id)
+        except Exception as e:
+            log.warning("appeal cancel send_current: %s", e)
 
 
 @router.callback_query(F.data == "apl:confirm", AppealStates.waiting_confirm)
@@ -277,10 +373,12 @@ async def cb_appeal_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
         await call.message.answer("⚠️ Не смог сохранить апелляцию. Попробуй позже.")
         return
 
-    # Снимаем паузу с теста
+    # Возвращаем status='in_progress'
     try:
-        db.execute("UPDATE test_attempts SET paused_at=NULL WHERE id=?",
-                    (attempt_id,))
+        db.execute(
+            "UPDATE test_attempts SET status='in_progress', paused_at=NULL, "
+            "missed_questions_counter=0 WHERE id=?",
+            (attempt_id,))
     except Exception:
         pass
 
@@ -288,7 +386,7 @@ async def cb_appeal_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
         await call.message.edit_text(
             "✅ <b>Апелляция отправлена!</b>\n\n"
             "Админ рассмотрит её в ближайшее время. "
-            "Можешь продолжать тест — следующий вопрос придёт.",
+            "Возвращаемся к тесту.",
             parse_mode="HTML")
     except Exception:
         pass
@@ -296,6 +394,15 @@ async def cb_appeal_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
 
     # Уведомление админам
     await _notify_admins_about_appeal(bot, appeal_id)
+
+    # Переотправляем текущий вопрос
+    if attempt_id:
+        try:
+            from services import test_runner
+            await test_runner.send_current_question(
+                bot, attempt_id, call.message.chat.id)
+        except Exception as e:
+            log.warning("appeal confirm send_current: %s", e)
 
 
 # ===================== АДМИН-ИНТЕРФЕЙС =====================
