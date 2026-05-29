@@ -102,6 +102,18 @@ def create_attempt(user_id: int, test_id: int, language: str,
                    group_id: Optional[int] = None,
                    started_by_user_id: Optional[int] = None) -> Optional[int]:
     """Создаёт попытку прохождения теста. Возвращает attempt_id или None."""
+    # Проверка бана за ложные апелляции (только для личных тестов)
+    if group_id is None:
+        try:
+            from services import appeal_service
+            banned, until = appeal_service.is_user_banned(user_id)
+            if banned:
+                log.info("user %s banned until %s — block test start",
+                         user_id, until)
+                return None
+        except Exception:
+            pass
+
     test = get_test(test_id)
     if not test:
         return None
@@ -271,6 +283,22 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
                 "sent_at": time.time(),
             }
             msg = poll_msg
+            # Кнопки «Приостановить» и «Апелляция» — только в личке
+            try:
+                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                pause_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="⏸ Приостановить",
+                                         callback_data=f"tpz:{attempt_id}"),
+                    InlineKeyboardButton(text="⚠️ Апелляция",
+                                         callback_data=f"tap:{attempt_id}:{qid}"),
+                ]])
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="↑ Управление вопросом:",
+                    reply_markup=pause_kb,
+                )
+            except Exception:
+                pass
         else:
             # Fallback на inline-кнопки
             text = build_question_text(idx + 1, len(qids), q["text"], time_per_q, lang)
