@@ -46,15 +46,17 @@ def _get_admin_ids() -> list[int]:
 @router.callback_query(F.data.startswith("tpz:"))
 async def cb_pause(call: CallbackQuery):
     """Юзер тапнул «Приостановить» — заморозить таймер."""
+    await call.answer()  # сразу убираем "загрузку"
     try:
         attempt_id = int(call.data.split(":")[1])
     except (ValueError, IndexError):
-        await call.answer()
         return
-    # Проверяем что юзер — владелец attempt
+    # Получаем internal id юзера по tg_id
+    u = db.fetchone("SELECT id FROM users WHERE tg_id=?", (call.from_user.id,))
+    if not u:
+        return
     a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (attempt_id,))
-    if not a or a.get('user_tg_id') != call.from_user.id:
-        await call.answer()
+    if not a or a.get('user_id') != u['id']:
         return
 
     # Сохраним в БД флаг паузы (если есть колонка) или просто пошлём сообщение
@@ -84,14 +86,16 @@ async def cb_pause(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("tps:resume:"))
 async def cb_resume(call: CallbackQuery):
+    await call.answer()
     try:
         attempt_id = int(call.data.split(":")[2])
     except (ValueError, IndexError):
-        await call.answer()
+        return
+    u = db.fetchone("SELECT id FROM users WHERE tg_id=?", (call.from_user.id,))
+    if not u:
         return
     a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (attempt_id,))
-    if not a or a.get('user_tg_id') != call.from_user.id:
-        await call.answer()
+    if not a or a.get('user_id') != u['id']:
         return
     try:
         db.execute("UPDATE test_attempts SET paused_at=NULL WHERE id=?",
@@ -110,19 +114,21 @@ async def cb_resume(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("tps:finish:"))
 async def cb_finish(call: CallbackQuery):
+    await call.answer()
     try:
         attempt_id = int(call.data.split(":")[2])
     except (ValueError, IndexError):
-        await call.answer()
+        return
+    u = db.fetchone("SELECT id FROM users WHERE tg_id=?", (call.from_user.id,))
+    if not u:
         return
     a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (attempt_id,))
-    if not a or a.get('user_tg_id') != call.from_user.id:
-        await call.answer()
+    if not a or a.get('user_id') != u['id']:
         return
     try:
         db.execute(
             "UPDATE test_attempts SET status='finished', "
-            "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+            "end_time=CURRENT_TIMESTAMP WHERE id=?",
             (attempt_id,))
     except Exception:
         pass
@@ -141,20 +147,21 @@ async def cb_finish(call: CallbackQuery):
 @router.callback_query(F.data.startswith("tap:"))
 async def cb_appeal_start(call: CallbackQuery, state: FSMContext):
     """Юзер тапнул «Апелляция»."""
+    await call.answer()
     try:
         _, attempt_id, qid = call.data.split(":")
         attempt_id = int(attempt_id)
         qid = int(qid)
     except (ValueError, IndexError):
-        await call.answer()
+        return
+    u = db.fetchone("SELECT id FROM users WHERE tg_id=?", (call.from_user.id,))
+    if not u:
         return
     a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (attempt_id,))
-    if not a or a.get('user_tg_id') != call.from_user.id:
-        await call.answer()
+    if not a or a.get('user_id') != u['id']:
         return
     q = db.fetchone("SELECT * FROM questions WHERE id=?", (qid,))
     if not q:
-        await call.answer("Вопрос не найден.", show_alert=True)
         return
     # Проверим бан
     banned, until = appeal_service.is_user_banned(call.from_user.id)
@@ -186,7 +193,6 @@ async def cb_appeal_start(call: CallbackQuery, state: FSMContext):
         f"<i>«Правильный — B. Учебник Алмаатинов А., 10 класс, стр. 145»</i>\n\n"
         f"Отправь сообщение или /cancel для отмены.",
         parse_mode="HTML")
-    await call.answer()
 
 
 @router.message(AppealStates.waiting_text)
