@@ -21,6 +21,51 @@ router = Router(name="autopub")
 log = logging.getLogger(__name__)
 
 
+@router.message(Command("stop"))
+async def cmd_stop_series(message: Message, bot: Bot):
+    """Команда /stop в чате — остановить серию тестов. Только для админов бота."""
+    if not utils.is_admin(message.from_user.id):
+        return
+    cfg = autopub_service.get_autopub_config()
+    target_chat_id = cfg.get('chat_id')
+    # Отменяем все pending
+    cancelled = 0
+    try:
+        rows = autopub_service.list_pending()
+        for r in rows:
+            autopub_service.cancel_pending(r['id'])
+            cancelled += 1
+    except Exception as e:
+        log.warning("stop cancel pending: %s", e)
+    # Останавливаем активный групповой квиз
+    finalized = False
+    try:
+        from services import group_quiz_service
+        if target_chat_id:
+            gq = db.fetchone(
+                "SELECT id FROM group_quizzes WHERE chat_id=? "
+                "AND status IN ('lobby','running')",
+                (int(target_chat_id),))
+            if gq:
+                await group_quiz_service.stop_quiz(bot, int(target_chat_id), 0)
+                finalized = True
+    except Exception as e:
+        log.warning("stop active quiz: %s", e)
+    # Открываем чат
+    unlocked = False
+    if target_chat_id:
+        try:
+            unlocked = await autopub_service._unlock_chat(bot, int(target_chat_id))
+        except Exception as e:
+            log.warning("stop unlock: %s", e)
+    await message.reply(
+        f"🛑 <b>Серия тестов остановлена</b>\n\n"
+        f"• Отменено запланированных: <b>{cancelled}</b>\n"
+        f"• Активный квиз: <b>{'завершён' if finalized else 'не было'}</b>\n"
+        f"• Чат: <b>{'открыт' if unlocked else 'без изменений'}</b>",
+        parse_mode="HTML")
+
+
 def _humanize_minutes(minutes: int) -> str:
     """Превращает минуты в человекочитаемый текст."""
     if minutes <= 0:
