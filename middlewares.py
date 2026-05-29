@@ -45,7 +45,8 @@ class AntiSpamMiddleware(BaseMiddleware):
         # ВАЖНЫЕ callback'и пропускаем без anti-spam:
         # онбординг, выбор языка, отмена — иначе юзер не сможет пройти первый /start
         if isinstance(event, CallbackQuery) and event.data:
-            critical_prefixes = ("onb:", "setlang:", "cancel")
+            critical_prefixes = ("onb:", "setlang:", "cancel",
+                                  "tpz:", "tap:", "tps:", "apl:")
             if any(event.data.startswith(p) for p in critical_prefixes):
                 return await handler(event, data)
 
