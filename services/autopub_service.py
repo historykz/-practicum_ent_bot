@@ -975,24 +975,29 @@ def start_worker(bot: Bot):
 async def post_random_quiz_polls_to_channel(
         bot: Bot, count: int = 10,
         category_id: Optional[int] = None,
-        language: str = 'ru') -> tuple[int, int]:
+        topic_id: Optional[int] = None,
+        language: str = 'ru',
+        bot_username: str = '') -> tuple[int, int]:
     """
-    Опубликовать N рандомных Quiz Poll на канале из бесплатных НЕприватных тестов.
-    Вернёт (отправлено, ошибок).
+    Опубликовать N рандомных Quiz Poll на канале БЕЗ таймера.
+    topic_id — если задан, берём вопросы только из этого теста.
+    Между вопросами задержка 10 сек. В конце — пост с кнопкой «Начать тестирование».
     """
     cfg = get_autopub_config()
     channel_id = cfg.get('channel_id')
     if not channel_id:
         return 0, 0
 
-    # Собираем кандидатов
-    sql = """SELECT q.id, q.text, q.explanation, q.test_id, t.time_per_question
+    sql = """SELECT q.id, q.text, q.explanation, q.test_id
              FROM questions q JOIN tests t ON t.id=q.test_id
              WHERE t.status='active' AND t.is_paid=0
                AND COALESCE(t.is_private,0)=0
                AND t.language=?"""
     args = [language]
-    if category_id is not None:
+    if topic_id is not None:
+        sql += " AND t.id=?"
+        args.append(topic_id)
+    elif category_id is not None:
         sql += " AND t.category_id=?"
         args.append(category_id)
     rows = db.fetchall(sql, tuple(args))
@@ -1021,12 +1026,44 @@ async def post_random_quiz_polls_to_channel(
                 type='quiz',
                 correct_option_id=correct_idx,
                 is_anonymous=True,
-                open_period=q.get('time_per_question') or 30,
+                # БЕЗ open_period — опрос без таймера
                 explanation=(q.get('explanation') or '')[:200] or None,
             )
             sent += 1
-            await asyncio.sleep(0.7)
+            # Задержка 10 сек между вопросами
+            await asyncio.sleep(10)
         except Exception as e:
             log.warning("post random poll: %s", e)
             failed += 1
+
+    # Финальный пост с призывом и кнопкой «Начать тестирование»
+    if sent > 0:
+        try:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            uname = bot_username.lstrip('@') if bot_username else ''
+            start_url = f"https://t.me/{uname}?start=quiz" if uname else None
+            kb = None
+            if start_url:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="🚀 Начать тестирование",
+                                         url=start_url)
+                ]])
+            await bot.send_message(
+                int(channel_id),
+                "📚 <b>Понравились вопросы?</b>\n\n"
+                "В нашем боте <b>намного больше тестов</b> по всем предметам ЕНТ!\n\n"
+                "✅ Проходи тесты в удобное время\n"
+                "⚔️ Соревнуйся в дуэлях с другими\n"
+                "🏆 Поднимайся в рейтинге\n"
+                "📊 Отслеживай свой прогресс\n\n"
+                "👇 <b>Как начать:</b>\n"
+                "1. Нажми кнопку ниже\n"
+                "2. Выбери язык\n"
+                "3. Тапни «📚 Пройти тест» и выбери тему\n\n"
+                "Удачи на ЕНТ! 💪",
+                reply_markup=kb,
+                parse_mode="HTML")
+        except Exception as e:
+            log.warning("final CTA: %s", e)
+
     return sent, failed
