@@ -41,11 +41,21 @@ def _build_profile_text(user: dict, lang: str) -> str:
     else:
         prem_line = t('profile_premium_off', lang)
 
+    # Профильные предметы
+    subj_ids = utils.get_profile_subjects(user.get('tg_id') or 0)
+    subj_names = []
+    for cid in subj_ids:
+        c = db.fetchone("SELECT name, emoji FROM test_categories WHERE id=?", (cid,))
+        if c:
+            subj_names.append(f"{c.get('emoji') or '📚'} {c['name']}")
+    subj_label = ", ".join(subj_names) if subj_names else ("таңдалмаған" if lang == "kz" else "не выбраны")
+
     lines = [
         t("profile_title", lang),
         "",
         f"{t('profile_name', lang)}: {utils.escape_html(name)}",
         f"{t('profile_lang', lang)}: {lang_label(lang)}",
+        ("🎓 Бейіндік пәндер" if lang == "kz" else "🎓 Профильные") + f": {subj_label}",
         f"{t('profile_school', lang)}: {utils.escape_html(school)}",
         f"{t('profile_city', lang)}: {utils.escape_html(city)}",
         f"{t('profile_tests_done', lang)}: <b>{tests_done}</b>",
