@@ -496,16 +496,25 @@ async def _finalize_group(bot: Bot, gqid: int, chat_id: int):
 
 @router.poll_answer()
 async def on_poll_answer(poll_answer: PollAnswer):
-    """Ответ из Quiz Poll — может быть личный или групповой тест."""
+    """Ответ из Quiz Poll — личный, групповой тест или смена правильного ответа админом."""
     try:
         bot = poll_answer.bot
         if bot is None:
             return
-        # Сначала пробуем как групповой
+        # Админский poll смены правильного ответа (question_editor)
+        try:
+            from handlers.question_editor import _correct_poll_map
+            if poll_answer.poll_id in _correct_poll_map:
+                from handlers import question_editor as _qe
+                await _qe.on_poll_answer_admin(poll_answer, bot)
+                return
+        except Exception:
+            pass
+        # Групповой
         from services import group_quiz_service
         await group_quiz_service.on_poll_answer(
             bot, poll_answer.poll_id, poll_answer.option_ids, poll_answer.user)
-        # Параллельно пробуем как личный — функция сама проверит маппинг
+        # Личный — функция сама проверит маппинг
         await test_runner.process_poll_answer(
             bot, poll_answer.poll_id, poll_answer.option_ids, poll_answer.user.id)
     except Exception as e:
