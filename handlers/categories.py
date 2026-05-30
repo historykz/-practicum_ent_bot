@@ -36,8 +36,8 @@ async def cb_adm_categories(call: CallbackQuery, state: FSMContext):
     cats = db.fetchall("SELECT * FROM test_categories ORDER BY sort_order, id")
 
     text = ("📂 <b>Разделы каталога</b>\n\n"
-            "Разделы группируют тесты по предметам. Когда юзер тапает «📚 Тесты», "
-            "он сначала видит список разделов, и только потом тесты внутри.\n\n")
+            "Разделы = предметы. ⭐️ = обязательный (виден всем), "
+            "🎓 = профильный (юзер выбирает сам).\n\n")
     if not cats:
         text += "<i>Пока нет ни одного раздела.</i>\n\nНажмите ➕ чтобы создать первый."
     else:
@@ -46,13 +46,16 @@ async def cb_adm_categories(call: CallbackQuery, state: FSMContext):
             cnt = db.fetchone(
                 "SELECT COUNT(*) AS c FROM tests WHERE category_id=? AND status='active'",
                 (c['id'],))['c']
-            text += f"{c.get('emoji') or '📚'} <b>{utils.escape_html(c['name'])}</b> — {cnt} тестов\n"
+            mark = "⭐️" if c.get('is_required') else "🎓"
+            text += f"{mark} {c.get('emoji') or '📚'} <b>{utils.escape_html(c['name'])}</b> — {cnt} тестов\n"
 
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Создать раздел", callback_data="cat:create")
     if cats:
         for c in cats[:20]:
-            kb.button(text=f"🗑 {c['name'][:30]}", callback_data=f"cat:del:{c['id']}")
+            mark = "⭐️" if c.get('is_required') else "🎓"
+            kb.button(text=f"{mark} {c['name'][:28]}",
+                      callback_data=f"cat:open:{c['id']}")
     kb.button(text="↩️ Назад", callback_data="m:admin")
     kb.adjust(1)
     try:
@@ -60,6 +63,61 @@ async def cb_adm_categories(call: CallbackQuery, state: FSMContext):
     except Exception:
         await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("cat:open:"), IsAdmin())
+async def cb_cat_open(call: CallbackQuery):
+    """Карточка раздела с управлением."""
+    try:
+        cat_id = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    c = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
+    if not c:
+        await call.answer("Не найден.", show_alert=True)
+        return
+    is_req = bool(c.get('is_required'))
+    type_label = "⭐️ Обязательный (виден всем)" if is_req else "🎓 Профильный (выбирается)"
+    cnt = db.fetchone(
+        "SELECT COUNT(*) AS c FROM tests WHERE category_id=? AND status='active'",
+        (cat_id,))['c']
+    text = (f"📂 <b>{c.get('emoji') or '📚'} {utils.escape_html(c['name'])}</b>\n\n"
+            f"Тип: {type_label}\n"
+            f"Тестов: {cnt}")
+    kb = InlineKeyboardBuilder()
+    if is_req:
+        kb.button(text="🎓 Сделать профильным", callback_data=f"cat:req:{cat_id}:0")
+    else:
+        kb.button(text="⭐️ Сделать обязательным", callback_data=f"cat:req:{cat_id}:1")
+    kb.button(text="🗑 Удалить раздел", callback_data=f"cat:del:{cat_id}")
+    kb.button(text="↩️ К разделам", callback_data="adm:categories")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML")
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("cat:req:"), IsAdmin())
+async def cb_cat_toggle_required(call: CallbackQuery):
+    """Переключить обязательный/профильный."""
+    try:
+        _, _, cat_id, val = call.data.split(":")
+        cat_id = int(cat_id)
+        val = int(val)
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    db.execute("UPDATE test_categories SET is_required=? WHERE id=?", (val, cat_id))
+    await call.answer("✅ Обновлено" if val else "✅ Теперь профильный")
+    # Перерисуем карточку
+    fake = type('F', (), {'data': f"cat:open:{cat_id}", 'message': call.message,
+                          'from_user': call.from_user, 'bot': call.bot,
+                          'answer': call.answer})()
+    await cb_cat_open(fake)
 
 
 @router.callback_query(F.data == "cat:create", IsAdmin())
