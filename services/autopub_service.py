@@ -1,1032 +1,810 @@
 """
-Сервис автоматической публикации тестов в чат + анонсы на канал.
+Сервис групповых квизов (QuizBot-style).
 
-Админ:
-  /admin → «📅 Авто-публикация тестов»
-  → выбирает раздел
-  → выбирает тесты галочками
-  → ставит время старта
-  → бот по очереди публикует каждый тест в нужный чат
-  → перед каждым шлёт анонс на канал со ссылкой на чат
-
-Сохраняем настройки в БД: target_chat_id, channel_id, invite_link.
+Поток:
+1. start_lobby(test, chat, admin_tg) → отправляет стартовую карточку, лобби
+2. join_player(group_quiz_id, user) → +1 в Готовые. При ≥2 — countdown_and_start
+3. countdown_and_start → редактируем лобби, шлём 3..2..1, удаляем, отправляем 1-й вопрос
+4. send_next_question → следующий Quiz Poll с open_period
+5. on_poll_answer → засчитываем ответ
+6. on_question_timeout → следующий вопрос или финал
+7. finalize → лидерборд + сохранение в test_statistics
 """
 import asyncio
+import json
 import logging
-import random
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 from typing import Optional
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+import config
 import database as db
+from utils import now_iso, escape_html
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+
+# Конфиг
+MIN_PLAYERS = 2
+COUNTDOWN_SECONDS = 3
+LOBBY_TIMEOUT_SECONDS = 5 * 60  # 5 минут
+
+# Активные таймеры на следующий вопрос: group_quiz_id -> Task
+_question_timers: dict[int, asyncio.Task] = {}
+# Активные таймеры лобби (5-мин авто-отмена): group_quiz_id -> Task
+_lobby_timers: dict[int, asyncio.Task] = {}
+# Активные countdown-таски
+_countdown_tasks: dict[int, asyncio.Task] = {}
+# Карта poll_id -> group_quiz_id (для on_poll_answer)
+_poll_to_gq: dict[str, int] = {}
 
 
-# Имя settings-ключей
-S_CHAT_ID = "autopub_chat_id"          # куда публиковать сами тесты
-S_CHAT_TITLE = "autopub_chat_title"    # для отображения
-S_CHANNEL_ID = "autopub_channel_id"    # канал для анонсов
-S_INVITE_LINK = "autopub_invite_link"  # ссылка-приглашение на чат
+# ============ ПУБЛИЧНЫЕ API ============
 
+async def start_lobby(bot: Bot, test: dict, chat_id: int,
+                      admin_tg_id: int, language: str = "ru") -> tuple[bool, str, Optional[int]]:
+    """
+    Возвращает (ok, message_or_error, group_quiz_id).
+    """
+    # Защита: один активный тест на группу
+    existing = db.fetchone(
+        "SELECT id FROM group_quizzes WHERE chat_id=? AND status IN ('lobby','running')",
+        (chat_id,))
+    if existing:
+        return False, "already_running", None
 
-def _get_setting(key: str) -> Optional[str]:
-    r = db.fetchone("SELECT value FROM settings WHERE key=?", (key,))
-    return r['value'] if r else None
-
-
-def _set_setting(key: str, value: str):
+    # Создаём сессию
     db.execute(
-        "INSERT INTO settings (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, value))
+        """INSERT INTO group_quizzes (chat_id, test_id, started_by, status, language)
+           VALUES (?,?,?,?,?)""",
+        (chat_id, test['id'], admin_tg_id, 'lobby', language))
+    gq_id = db.fetchone("SELECT last_insert_rowid() AS id")['id']
 
+    # Считаем кол-во вопросов
+    qcount_row = db.fetchone(
+        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test['id'],))
+    qcount = qcount_row['c'] if qcount_row else 0
+    time_per_q = test.get('time_per_question') or 30
 
-def get_autopub_config() -> dict:
-    return {
-        'chat_id': _get_setting(S_CHAT_ID),
-        'chat_title': _get_setting(S_CHAT_TITLE) or '',
-        'channel_id': _get_setting(S_CHANNEL_ID),
-        'invite_link': _get_setting(S_INVITE_LINK) or '',
-    }
+    author = config.SHARE_AUTHOR_LABEL or "—"
+    title = escape_html(test.get('title') or '—')
 
-
-def set_autopub_config(chat_id: str = None, chat_title: str = None,
-                        channel_id: str = None, invite_link: str = None):
-    if chat_id is not None:
-        _set_setting(S_CHAT_ID, str(chat_id))
-    if chat_title is not None:
-        _set_setting(S_CHAT_TITLE, str(chat_title))
-    if channel_id is not None:
-        _set_setting(S_CHANNEL_ID, str(channel_id))
-    if invite_link is not None:
-        _set_setting(S_INVITE_LINK, str(invite_link))
-
-
-# ===================== ТАБЛИЦА РАСПИСАНИЯ =====================
-
-def ensure_schedule_table():
-    """Создаёт таблицу для запланированных публикаций (если её нет)."""
-    try:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS autopub_queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_id INTEGER NOT NULL,
-                run_at TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                error TEXT DEFAULT '',
-                created_by INTEGER,
-                series_id TEXT DEFAULT '',
-                series_pos INTEGER DEFAULT 0,
-                series_total INTEGER DEFAULT 1,
-                series_test_ids TEXT DEFAULT '',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        db.execute("CREATE INDEX IF NOT EXISTS idx_autopub_status_time "
-                    "ON autopub_queue(status, run_at)")
-        # Миграции
-        for sql in (
-            "ALTER TABLE autopub_queue ADD COLUMN series_id TEXT DEFAULT ''",
-            "ALTER TABLE autopub_queue ADD COLUMN series_pos INTEGER DEFAULT 0",
-            "ALTER TABLE autopub_queue ADD COLUMN series_total INTEGER DEFAULT 1",
-            "ALTER TABLE autopub_queue ADD COLUMN series_test_ids TEXT DEFAULT ''",
-        ):
-            try:
-                db.execute(sql)
-            except Exception:
-                pass
-    except Exception as e:
-        log.exception("ensure_schedule_table: %s", e)
-
-
-def enqueue_test(test_id: int, run_at: datetime, created_by: int,
-                  series_id: str = '', series_pos: int = 0,
-                  series_total: int = 1, series_test_ids: str = '') -> int:
-    """Поставить тест в очередь на публикацию."""
-    cur = db.execute(
-        "INSERT INTO autopub_queue (test_id, run_at, created_by, "
-        "series_id, series_pos, series_total, series_test_ids) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (test_id, run_at.isoformat(), created_by,
-          series_id, series_pos, series_total, series_test_ids))
-    return cur.lastrowid
-
-
-def list_pending() -> list:
-    return db.fetchall(
-        "SELECT * FROM autopub_queue WHERE status='pending' "
-        "ORDER BY run_at LIMIT 100")
-
-
-def cancel_pending(qid: int):
-    db.execute("UPDATE autopub_queue SET status='cancelled' WHERE id=?", (qid,))
-
-
-# ===================== ПУБЛИКАЦИЯ =====================
-
-async def publish_test_to_chat(bot: Bot, test_id: int) -> bool:
-    """Запустить лобби теста в чате (как групповой квиз, ждёт 2 игроков)."""
-    cfg = get_autopub_config()
-    chat_id = cfg['chat_id']
-    if not chat_id:
-        log.warning("publish_test_to_chat: chat_id не задан")
-        return False
-    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
-    if not test:
-        return False
-    questions = db.fetchall(
-        "SELECT id FROM questions WHERE test_id=?", (test_id,))
-    if not questions:
-        return False
-    # Запускаем лобби через group_quiz_service
-    from services import group_quiz_service
-    # Прорчищаем потенциально зависшие лобби в этом чате
-    try:
-        existing = db.fetchone(
-            "SELECT id FROM group_quizzes WHERE chat_id=? AND status IN ('lobby','running')",
-            (int(chat_id),))
-        if existing:
-            await group_quiz_service.stop_quiz(bot, int(chat_id), 0)
-            await asyncio.sleep(1)
-    except Exception:
-        pass
-    try:
-        # admin_tg_id = 0 — системный запуск
-        await group_quiz_service.start_lobby(
-            bot, dict(test), int(chat_id),
-            admin_tg_id=0,
-            language=test.get('language') or 'ru')
-        return True
-    except Exception as e:
-        log.exception("publish_test_to_chat lobby: %s", e)
-        return False
-
-
-async def publish_now_with_announce(bot: Bot, test_id: int,
-                                      template_id: int = 0) -> bool:
-    """
-    Опубликовать тест прямо сейчас:
-      1. Анонс на канале (без таймера, текст «уже идёт»)
-      2. Лобби в чате
-    """
-    cfg = get_autopub_config()
-    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
-    if not test:
-        return False
-    channel_id = cfg.get('channel_id')
-    invite = cfg.get('invite_link') or ''
-    qc = db.fetchone(
-        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test_id,))['c']
-    if channel_id:
-        try:
-            await bot.send_message(
-                int(channel_id),
-                announce_now_text(template_id, test['title'], qc, invite),
-                parse_mode="HTML",
-                disable_web_page_preview=False)
-        except Exception as e:
-            log.warning("announce_now: %s", e)
-    return await publish_test_to_chat(bot, test_id)
-
-
-async def announce_test_on_channel(bot: Bot, test: dict, when_str: str,
-                                     template_id: int = 0) -> bool:
-    """Анонс на канале со ссылкой на чат. template_id — какой шаблон текста."""
-    cfg = get_autopub_config()
-    channel_id = cfg['channel_id']
-    if not channel_id:
-        log.warning("announce: channel_id не задан")
-        return False
-    invite = cfg.get('invite_link') or ''
-    qcount = db.fetchone(
-        'SELECT COUNT(*) AS c FROM questions WHERE test_id=?',
-        (test['id'],))['c']
-    title = test['title']
-
-    text = build_announce_text(template_id, title, when_str, qcount, invite)
-    try:
-        await bot.send_message(int(channel_id), text,
-                                 parse_mode="HTML",
-                                 disable_web_page_preview=False)
-        return True
-    except Exception as e:
-        log.warning("announce: %s", e)
-        return False
-
-
-# ===================== ШАБЛОНЫ АНОНСА =====================
-
-ANNOUNCE_TEMPLATES = [
-    {
-        "name": "🔥 Зажигательный",
-        "build": lambda title, when, qc, link: (
-            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
-            f"📚 Тема: <b>«{title}»</b>\n"
-            f"⏰ Старт: <b>{when}</b>\n"
-            f"❓ {qc} вопросов на скорость\n\n"
-            f"💪 Проверь свои знания перед ЕНТ!\n"
-            f"⚡️ Соревнуйся с другими в реальном времени!\n"
-            f"🏆 Покажи кто тут лучший!\n\n"
-            f"👇 ЗАХОДИ В ЧАТ ПРЯМО СЕЙЧАС:\n{link}\n\n"
-            f"⏳ Не пропусти — места ограничены!"
-        ),
-    },
-    {
-        "name": "🎯 Деловой",
-        "build": lambda title, when, qc, link: (
-            f"🎯 <b>ОНЛАЙН-ТЕСТ В ЧАТЕ</b>\n\n"
-            f"📖 Раздел: <b>{title}</b>\n"
-            f"🕐 Время: <b>{when}</b>\n"
-            f"📝 Количество вопросов: {qc}\n\n"
-            f"Отличная возможность проверить подготовку к ЕНТ "
-            f"в формате живого соревнования.\n\n"
-            f"🔗 Присоединяйся к чату:\n{link}"
-        ),
-    },
-    {
-        "name": "🚀 Мотивационный",
-        "build": lambda title, when, qc, link: (
-            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
-            f"Сегодня разбираем: <b>«{title}»</b>\n"
-            f"⏰ Начинаем: <b>{when}</b>\n"
-            f"❓ Вопросов: {qc}\n\n"
-            f"Каждый тест — шаг к высокому баллу на ЕНТ! 📈\n"
-            f"Не учи в одиночку — соревнуйся и запоминай лучше! 🧠\n\n"
-            f"👇 Жми и заходи:\n{link}\n\n"
-            f"Увидимся в чате! 😎"
-        ),
-    },
-    {
-        "name": "⚡️ Краткий",
-        "build": lambda title, when, qc, link: (
-            f"⚡️ <b>ТЕСТ: {title}</b>\n"
-            f"⏰ {when} · {qc} вопросов\n\n"
-            f"Заходи в чат 👇\n{link}"
-        ),
-    },
-]
-
-
-def build_announce_text(template_id: int, title: str, when: str,
-                         qc: int, link: str) -> str:
-    if template_id < 0 or template_id >= len(ANNOUNCE_TEMPLATES):
-        template_id = 0
-    return ANNOUNCE_TEMPLATES[template_id]["build"](title, when, qc, link)
-
-
-def build_series_announce_text(template_id: int, titles: list[str],
-                                  when: str, link: str) -> str:
-    """Анонс серии нескольких тестов одним сообщением."""
-    if template_id < 0 or template_id >= len(ANNOUNCE_TEMPLATES):
-        template_id = 0
-
-    # Список тем красивым списком
-    topics = "\n".join(f"• <b>{t}</b>" for t in titles)
-    count = len(titles)
-
-    if template_id == 0:  # Зажигательный
-        return (
-            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
-            f"📚 Сегодня нас ждёт <b>серия из {count} тестов</b>:\n\n"
-            f"{topics}\n\n"
-            f"⏰ Старт: <b>{when}</b>\n\n"
-            f"💪 Проверь свои знания перед ЕНТ!\n"
-            f"⚡️ Соревнуйся с другими в реальном времени!\n"
-            f"🏆 Покажи кто тут лучший!\n\n"
-            f"👇 ЗАХОДИ В ЧАТ ПРЯМО СЕЙЧАС:\n{link}\n\n"
-            f"⏳ Не пропусти!")
-    elif template_id == 1:  # Деловой
-        return (
-            f"🎯 <b>СЕРИЯ ОНЛАЙН-ТЕСТОВ</b>\n\n"
-            f"📖 Темы ({count}):\n\n{topics}\n\n"
-            f"🕐 Время начала: <b>{when}</b>\n\n"
-            f"Отличная возможность проверить подготовку к ЕНТ "
-            f"в формате живого соревнования.\n\n"
-            f"🔗 Присоединяйся к чату:\n{link}")
-    elif template_id == 2:  # Мотивационный
-        return (
-            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
-            f"Сегодня разбираем <b>{count} тем</b>:\n\n{topics}\n\n"
-            f"⏰ Начинаем: <b>{when}</b>\n\n"
-            f"Каждый тест — шаг к высокому баллу на ЕНТ! 📈\n"
-            f"Не учи в одиночку — соревнуйся и запоминай лучше! 🧠\n\n"
-            f"👇 Жми и заходи:\n{link}\n\n"
-            f"Увидимся в чате! 😎")
-    else:  # Краткий
-        return (
-            f"⚡️ <b>СЕРИЯ ТЕСТОВ</b>\n\n"
-            f"{topics}\n\n"
-            f"⏰ {when}\n\n"
-            f"Заходи в чат 👇\n{link}")
-
-
-def build_series_now_text(template_id: int, titles: list[str], link: str) -> str:
-    """Анонс серии когда стартует прямо сейчас."""
-    topics = "\n".join(f"• <b>{t}</b>" for t in titles)
-    count = len(titles)
-    return (
-        f"🟢 <b>СЕРИЯ ТЕСТОВ УЖЕ ИДЁТ!</b>\n\n"
-        f"📚 Сейчас в чате <b>{count} тестов</b>:\n\n{topics}\n\n"
-        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{link}\n\n"
-        f"Успей! ⏳")
-
-
-def announce_now_text(template_id: int, title: str, qc: int, link: str) -> str:
-    """Текст когда тест НАЧИНАЕТСЯ прямо сейчас (без таймера)."""
-    return (
-        f"🟢 <b>ТЕСТ УЖЕ ИДЁТ!</b>\n\n"
-        f"📚 <b>«{title}»</b>\n"
-        f"❓ {qc} вопросов\n\n"
-        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{link}\n\n"
-        f"Успей ответить! ⏳"
-    )
-
-
-async def announce_batch_on_channel(bot: Bot, tests: list[dict],
-                                      when_str: str,
-                                      template_id: int = 0) -> bool:
-    """ОДИН общий анонс на канале для нескольких тестов сразу."""
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
-    if not channel_id:
-        return False
-    invite = cfg.get('invite_link') or ''
-    # Список тем
-    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
-    total_q = 0
-    for t in tests:
-        r = db.fetchone(
-            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (t['id'],))
-        total_q += (r['c'] if r else 0)
-
-    text = build_batch_announce_text(template_id, topics, len(tests),
-                                       total_q, when_str, invite)
-    try:
-        await bot.send_message(int(channel_id), text,
-                                 parse_mode="HTML",
-                                 disable_web_page_preview=False)
-        return True
-    except Exception as e:
-        log.warning("batch announce: %s", e)
-        return False
-
-
-async def announce_batch_with_topics(bot: Bot, tests: list[dict],
-                                       when_str: str) -> bool:
-    """ПРЕД-анонс СРАЗУ С ТЕМАМИ (когда планируем на будущее)."""
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
-    if not channel_id:
-        return False
-    invite = cfg.get('invite_link') or ''
-    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
-    total_q = 0
-    for t in tests:
-        r = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
-                         (t['id'],))
-        total_q += (r['c'] if r else 0)
     text = (
-        f"🔥 <b>СКОРО ТЕСТЫ В ЧАТЕ!</b>\n\n"
-        f"📚 <b>Темы ({len(tests)}):</b>\n{topics}\n\n"
-        f"⏰ Начинаем: <b>{when_str}</b>\n"
-        f"❓ Всего вопросов: <b>{total_q}</b>\n\n"
-        f"👇 Заходи в чат заранее, чтобы успеть:\n{invite}"
+        f"🎲 <b>Приготовьтесь пройти тест «{title}»</b>\n\n"
+        f"Автор: {escape_html(author)}\n"
+        f"🖊 {qcount} вопросов\n"
+        f"⏱ {time_per_q} секунд на вопрос\n"
+        f"📄 Ответы видны участникам группы и автору теста\n\n"
+        f"🏁 Вопросы появятся, когда хотя бы {MIN_PLAYERS} человека будут готовы отвечать. "
+        f"Чтобы остановить тест, отправьте /stop\n\n"
+        f"👥 <b>Готовы: 0/{MIN_PLAYERS}</b>"
     )
+    kb = _lobby_kb(gq_id, 0)
+
     try:
-        await bot.send_message(int(channel_id), text,
-                                 parse_mode="HTML",
-                                 disable_web_page_preview=False)
-        return True
-    except Exception as e:
-        log.warning("announce with topics: %s", e)
-        return False
+        msg = await bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        logger.warning("Не удалось отправить стартовую карточку в %s: %s", chat_id, e)
+        db.execute("UPDATE group_quizzes SET status='cancelled' WHERE id=?", (gq_id,))
+        return False, str(e), None
+
+    db.execute("UPDATE group_quizzes SET lobby_message_id=? WHERE id=?",
+                (msg.message_id, gq_id))
+
+    # Запускаем 5-минутный таймер на авто-отмену
+    _lobby_timers[gq_id] = asyncio.create_task(_lobby_timeout(bot, gq_id))
+
+    return True, "ok", gq_id
 
 
-# ===================== СОСТОЯНИЕ СЕРИИ (ЦЕПОЧКА) =====================
-
-def save_series_state(series_id: str, test_ids_csv: str,
-                       total: int, created_by: int):
-    """Сохранить состояние серии для запуска цепочкой."""
-    import json as _json
-    state = {
-        "series_id": series_id,
-        "test_ids": [int(x) for x in test_ids_csv.split(',') if x.strip().isdigit()],
-        "total": total,
-        "created_by": created_by,
-        "current_index": 0,
-    }
-    _set_setting(f"series_state:{series_id}", _json.dumps(state))
-    # Запомним «активную» серию для чата
-    _set_setting("active_series_id", series_id)
-
-
-def get_active_series() -> Optional[dict]:
-    import json as _json
-    sid = _get_setting("active_series_id")
-    if not sid:
-        return None
-    raw = _get_setting(f"series_state:{sid}")
-    if not raw:
-        return None
-    try:
-        return _json.loads(raw)
-    except Exception:
-        return None
-
-
-def _update_series_state(state: dict):
-    import json as _json
-    _set_setting(f"series_state:{state['series_id']}", _json.dumps(state))
-
-
-def clear_active_series():
-    _set_setting("active_series_id", "")
-
-
-async def on_series_test_finished(bot: Bot, test_id: int, chat_id: int):
+async def join_player(bot: Bot, group_quiz_id: int, user) -> tuple[bool, str]:
     """
-    Вызывается когда групповой тест завершился.
-    Если это тест из активной серии — запустить следующий через 20 сек,
-    либо (если последний) открыть чат с поздравлением.
+    Игрок нажал «Пройти тест». user — aiogram User.
+    Возвращает (ok, message_key).
     """
-    state = get_active_series()
-    if not state:
-        # Нет активной серии — просто открыть чат если был закрыт
-        return
-    test_ids = state.get('test_ids') or []
-    cur_idx = state.get('current_index', 0)
+    gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (group_quiz_id,))
+    if not gq:
+        return False, "not_found"
+    if gq['status'] != 'lobby':
+        if gq['status'] == 'running':
+            return False, "already_running"
+        return False, "finished"
 
-    # Проверяем что завершившийся тест — это текущий в серии
-    if cur_idx >= len(test_ids):
-        clear_active_series()
-        return
-    # Сверяем (учёт mix — там test_id может отличаться, поэтому просто двигаем)
-    is_last = (cur_idx >= len(test_ids) - 1)
+    # Уже в списке?
+    existing = db.fetchone(
+        "SELECT id FROM group_quiz_players WHERE group_quiz_id=? AND tg_id=?",
+        (group_quiz_id, user.id))
+    if existing:
+        return False, "already_in"
 
-    if is_last:
-        # Последний тест серии — открываем чат с поздравлением
-        await _finish_series_open_chat(bot, chat_id)
-        clear_active_series()
-    else:
-        # Двигаем индекс и запускаем следующий
-        next_idx = cur_idx + 1
-        state['current_index'] = next_idx
-        _update_series_state(state)
-        next_test_id = test_ids[next_idx]
-        next_test = db.fetchone("SELECT * FROM tests WHERE id=?", (next_test_id,))
-        if not next_test:
-            await _finish_series_open_chat(bot, chat_id)
-            clear_active_series()
-            return
-        # Анонс «через 20 сек новый тест» — В ЧАТ, сразу
+    full_name = " ".join(filter(None, [user.first_name, user.last_name])) or "Игрок"
+    db.execute(
+        """INSERT INTO group_quiz_players (group_quiz_id, tg_id, username, full_name)
+           VALUES (?,?,?,?)""",
+        (group_quiz_id, user.id, user.username or "", full_name))
+
+    # Обновим карточку лобби
+    await _refresh_lobby_card(bot, group_quiz_id)
+
+    # Проверяем достаточно ли игроков
+    cnt = _count_players(group_quiz_id)
+    if cnt >= MIN_PLAYERS and gq['status'] == 'lobby':
+        # Перепроверим — вдруг countdown уже запущен
+        cur = db.fetchone("SELECT status FROM group_quizzes WHERE id=?", (group_quiz_id,))
+        if cur and cur['status'] == 'lobby' and group_quiz_id not in _countdown_tasks:
+            _countdown_tasks[group_quiz_id] = asyncio.create_task(
+                _countdown_and_start(bot, group_quiz_id))
+
+    return True, "joined"
+
+
+async def stop_quiz(bot: Bot, chat_id: int, requester_tg_id: int) -> tuple[bool, str]:
+    """
+    /stop — остановить тест в группе.
+    Возвращает (ok, key).
+    """
+    gq = db.fetchone(
+        "SELECT * FROM group_quizzes WHERE chat_id=? AND status IN ('lobby','running')",
+        (chat_id,))
+    if not gq:
+        return False, "no_active"
+
+    # Проверка прав: админ бота (хардкод + рантайм) или тот, кто запускал
+    import utils as _utils
+    is_admin_bot = _utils.is_admin(requester_tg_id)
+    is_starter = gq['started_by'] == requester_tg_id
+
+    can_stop = is_admin_bot or is_starter
+    if not can_stop:
+        # Запрос от имени канала/чата — requester_tg_id может быть None или ID канала.
+        # Разрешаем если сообщение пришло из самого чата (sender_chat).
+        # Проверим, админ ли в группе
         try:
-            await announce_single_reminder(bot, dict(next_test))
+            member = await bot.get_chat_member(chat_id, requester_tg_id)
+            if member.status in ("creator", "administrator"):
+                can_stop = True
         except Exception:
             pass
-        # Ждём 20 сек и запускаем следующий
-        import asyncio as _asyncio
-        _asyncio.create_task(
-            _launch_next_after_delay(bot, next_test_id, 20))
 
+    if not can_stop:
+        return False, "no_rights"
 
-async def _launch_next_after_delay(bot: Bot, test_id: int, delay: int):
-    import asyncio as _asyncio
-    try:
-        await _asyncio.sleep(delay)
-        await publish_test_to_chat(bot, test_id)
-    except _asyncio.CancelledError:
-        return
-    except Exception as e:
-        log.warning("launch next: %s", e)
+    await _cancel_quiz_timers(gq['id'])
 
-
-async def _finish_series_open_chat(bot: Bot, chat_id: int):
-    """Открыть чат и поздравить после последнего теста серии."""
-    try:
-        await _unlock_chat_congrats(bot, chat_id)
-    except Exception as e:
-        log.warning("finish series open: %s", e)
-
-
-async def announce_batch_short(bot: Bot, count: int, when_str: str) -> bool:
-    """Короткий ПРЕД-анонс: только когда начнётся, без тем."""
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
-    if not channel_id:
-        return False
-    invite = cfg.get('invite_link') or ''
-    text = (
-        f"🔔 <b>СКОРО ТЕСТ В ЧАТЕ</b>\n\n"
-        f"⏰ Начинаем: <b>{when_str}</b>\n"
-        f"📚 Тестов в серии: <b>{count}</b>\n\n"
-        f"📩 Когда время подойдёт — пришлю темы и ссылку.\n\n"
-        f"🔗 Чат: {invite}"
-    )
-    try:
-        await bot.send_message(int(channel_id), text,
-                                 parse_mode="HTML",
-                                 disable_web_page_preview=False)
-        return True
-    except Exception as e:
-        log.warning("short announce: %s", e)
-        return False
-
-
-async def announce_batch_reminder(bot: Bot, tests: list[dict]) -> bool:
-    """Краткое напоминание когда время подошло — темы + ссылка."""
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
-    if not channel_id:
-        return False
-    invite = cfg.get('invite_link') or ''
-    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
-    text = (
-        f"⏰ <b>НАЧИНАЕМ!</b>\n\n"
-        f"📚 Темы:\n{topics}\n\n"
-        f"👇 Заходи в чат:\n{invite}"
-    )
-    try:
-        await bot.send_message(int(channel_id), text,
-                                 parse_mode="HTML",
-                                 disable_web_page_preview=False)
-        return True
-    except Exception as e:
-        log.warning("reminder: %s", e)
-        return False
-
-
-async def _lock_chat(bot: Bot, chat_id: int) -> bool:
-    """Закрыть чат — только админы пишут."""
-    try:
-        from aiogram.types import ChatPermissions
-        perms = ChatPermissions(
-            can_send_messages=False,
-            can_send_audios=False,
-            can_send_documents=False,
-            can_send_photos=False,
-            can_send_videos=False,
-            can_send_video_notes=False,
-            can_send_voice_notes=False,
-            can_send_polls=False,
-            can_send_other_messages=False,
-            can_add_web_page_previews=False,
-        )
-        await bot.set_chat_permissions(chat_id, permissions=perms)
-        await bot.send_message(
-            chat_id,
-            "🔒 <b>Чат закрыт на время тестов</b>\n\n"
-            "Писать могут только админы.\n"
-            "После окончания серии тестов чат откроется автоматически.",
-            parse_mode="HTML")
-        return True
-    except Exception as e:
-        log.warning("lock chat failed: %s", e)
-        return False
-
-
-async def _unlock_chat(bot: Bot, chat_id: int) -> bool:
-    """Открыть чат обратно."""
-    try:
-        from aiogram.types import ChatPermissions
-        perms = ChatPermissions(
-            can_send_messages=True,
-            can_send_audios=True,
-            can_send_documents=True,
-            can_send_photos=True,
-            can_send_videos=True,
-            can_send_video_notes=True,
-            can_send_voice_notes=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-        )
-        await bot.set_chat_permissions(chat_id, permissions=perms)
-        await bot.send_message(
-            chat_id,
-            "🔓 <b>Чат открыт!</b>\n\n"
-            "Серия тестов окончена. Можно писать.\n"
-            "Спасибо всем участникам! 🎉",
-            parse_mode="HTML")
-        return True
-    except Exception as e:
-        log.warning("unlock chat failed: %s", e)
-        return False
-
-
-async def _unlock_chat_congrats(bot: Bot, chat_id: int) -> bool:
-    """Открыть чат после ВСЕЙ серии + большое поздравление."""
-    try:
-        from aiogram.types import ChatPermissions
-        perms = ChatPermissions(
-            can_send_messages=True,
-            can_send_audios=True,
-            can_send_documents=True,
-            can_send_photos=True,
-            can_send_videos=True,
-            can_send_video_notes=True,
-            can_send_voice_notes=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-        )
-        await bot.set_chat_permissions(chat_id, permissions=perms)
-    except Exception as e:
-        log.warning("unlock congrats perms: %s", e)
-    try:
-        await bot.send_message(
-            chat_id,
-            "🎉 <b>ВСЕ ТЕСТЫ ПРОЙДЕНЫ!</b>\n\n"
-            "Вы большие молодцы! 💪\n"
-            "Каждый тест — это шаг к высокому баллу на ЕНТ.\n\n"
-            "Надеюсь, вы получите <b>140/140</b>! 🏆\n\n"
-            "🔓 Чат снова открыт — общайтесь, обсуждайте вопросы.\n"
-            "До новых тестов! 🚀",
-            parse_mode="HTML")
-        return True
-    except Exception as e:
-        log.warning("unlock congrats msg: %s", e)
-        return False
-
-
-async def announce_single_reminder(bot: Bot, test: dict) -> bool:
-    """Короткое напоминание про следующий тест — в ЧАТЕ где идут тесты, не на канале."""
-    cfg = get_autopub_config()
-    chat_id = cfg.get('chat_id')
-    if not chat_id:
-        return False
-    text = (
-        f"⏳ <b>Через 20 сек — новый тест!</b>\n\n"
-        f"📚 <b>{test['title']}</b>\n\n"
-        f"Готовься! 🚀"
-    )
-    try:
-        await bot.send_message(int(chat_id), text,
-                                 parse_mode="HTML")
-        return True
-    except Exception as e:
-        log.warning("single reminder: %s", e)
-        return False
-
-
-async def announce_batch_now(bot: Bot, tests: list[dict],
-                                template_id: int = 0) -> bool:
-    """ОДИН анонс «уже идёт» для нескольких тестов сразу."""
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
-    if not channel_id:
-        return False
-    invite = cfg.get('invite_link') or ''
-    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
-    total_q = 0
-    for t in tests:
-        r = db.fetchone(
-            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (t['id'],))
-        total_q += (r['c'] if r else 0)
-    text = (
-        f"🟢 <b>ТЕСТЫ УЖЕ ИДУТ В ЧАТЕ!</b>\n\n"
-        f"📚 <b>Темы:</b>\n{topics}\n\n"
-        f"❓ Всего вопросов: {total_q}\n\n"
-        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{invite}\n\n"
-        f"Успей ответить! ⏳"
-    )
-    try:
-        await bot.send_message(int(channel_id), text,
-                                 parse_mode="HTML",
-                                 disable_web_page_preview=False)
-        return True
-    except Exception as e:
-        log.warning("batch announce now: %s", e)
-        return False
-
-
-BATCH_TEMPLATES = [
-    {
-        "name": "🔥 Зажигательный",
-        "build": lambda topics, n, qc, when, link: (
-            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
-            f"📚 <b>Темы ({n}):</b>\n{topics}\n\n"
-            f"⏰ Старт: <b>{when}</b>\n"
-            f"❓ Всего вопросов: <b>{qc}</b>\n\n"
-            f"💪 Проверь знания перед ЕНТ!\n"
-            f"⚡️ Соревнуйся в реальном времени!\n"
-            f"🏆 Покажи кто тут лучший!\n\n"
-            f"👇 ЗАХОДИ В ЧАТ:\n{link}\n\n"
-            f"⏳ Места ограничены!"
-        ),
-    },
-    {
-        "name": "🎯 Деловой",
-        "build": lambda topics, n, qc, when, link: (
-            f"🎯 <b>СЕРИЯ ОНЛАЙН-ТЕСТОВ В ЧАТЕ</b>\n\n"
-            f"📖 <b>Разделы ({n}):</b>\n{topics}\n\n"
-            f"🕐 Старт: <b>{when}</b>\n"
-            f"📝 Всего вопросов: {qc}\n\n"
-            f"Отличная возможность проверить подготовку к ЕНТ "
-            f"в формате живого соревнования.\n\n"
-            f"🔗 Чат:\n{link}"
-        ),
-    },
-    {
-        "name": "🚀 Мотивационный",
-        "build": lambda topics, n, qc, when, link: (
-            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
-            f"Сегодня разбираем <b>{n}</b> темы:\n{topics}\n\n"
-            f"⏰ Начинаем: <b>{when}</b>\n"
-            f"❓ Вопросов: {qc}\n\n"
-            f"Каждый тест — шаг к высокому баллу! 📈\n"
-            f"Не учи в одиночку — соревнуйся! 🧠\n\n"
-            f"👇 Чат:\n{link}\n\n"
-            f"Увидимся! 😎"
-        ),
-    },
-    {
-        "name": "⚡️ Краткий",
-        "build": lambda topics, n, qc, when, link: (
-            f"⚡️ <b>СЕРИЯ ТЕСТОВ ({n})</b>\n\n"
-            f"{topics}\n\n"
-            f"⏰ {when} · {qc} вопросов\n\n"
-            f"Заходи 👇\n{link}"
-        ),
-    },
-]
-
-
-def build_batch_announce_text(template_id: int, topics: str, n: int,
-                                qc: int, when: str, link: str) -> str:
-    if template_id < 0 or template_id >= len(BATCH_TEMPLATES):
-        template_id = 0
-    return BATCH_TEMPLATES[template_id]["build"](topics, n, qc, when, link)
-
-
-# ===================== МИКС ВОПРОСОВ ИЗ НЕСКОЛЬКИХ ТЕСТОВ =====================
-
-def create_mixed_test(test_ids: list[int], created_by: int,
-                       total: int = 10,
-                       language: str = 'ru') -> Optional[int]:
-    """
-    Создаёт временный тест-микс: берёт поровну вопросов из каждого теста,
-    добор рандомом до total. Вернёт id нового теста.
-    """
-    import random
-    if not test_ids:
-        return None
-    n = len(test_ids)
-    per = total // n        # поровну
-    remainder = total - per * n  # добор рандомом
-
-    selected_qids = []
-    pools = {}  # test_id -> список оставшихся вопросов
-
-    for tid in test_ids:
-        qs = db.fetchall(
-            "SELECT id FROM questions WHERE test_id=? ORDER BY RANDOM()", (tid,))
-        pool = [q['id'] for q in qs]
-        pools[tid] = pool
-        take = pool[:per]
-        selected_qids.extend(take)
-        pools[tid] = pool[per:]  # остаток для добора
-
-    # Добор остатка рандомом из всех оставшихся
-    leftover = []
-    for tid in test_ids:
-        leftover.extend(pools[tid])
-    random.shuffle(leftover)
-    selected_qids.extend(leftover[:remainder])
-
-    if not selected_qids:
-        return None
-
-    # Название микса
-    titles = []
-    for tid in test_ids:
-        tr = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
-        if tr:
-            titles.append(tr['title'])
-    mix_title = " + ".join(titles[:3])
-    if len(mix_title) > 120:
-        mix_title = mix_title[:117] + "..."
-
-    # Берём время на вопрос из первого теста
-    first = db.fetchone("SELECT time_per_question FROM tests WHERE id=?",
-                         (test_ids[0],))
-    tpq = (first.get('time_per_question') if first else 30) or 30
-
-    # Создаём временный тест (помечаем is_mix=1, не показываем в каталоге)
-    cur = db.execute("""
-        INSERT INTO tests (title, description, language, time_per_question,
-                            is_paid, price, test_type, status, created_by,
-                            is_private)
-        VALUES (?, '', ?, ?, 0, 0, 'mix', 'mix_temp', ?, 1)
-    """, (f"🎲 {mix_title}", language, tpq, created_by))
-    mix_test_id = cur.lastrowid
-
-    # Копируем выбранные вопросы в новый тест
-    random.shuffle(selected_qids)
-    for order, qid in enumerate(selected_qids[:total]):
-        q = db.fetchone("SELECT * FROM questions WHERE id=?", (qid,))
-        if not q:
-            continue
-        qcur = db.execute("""
-            INSERT INTO questions (test_id, text, explanation, order_num, source_type)
-            VALUES (?, ?, ?, ?, 'mix')
-        """, (mix_test_id, q['text'], q.get('explanation') or '', order))
-        new_qid = qcur.lastrowid
-        opts = db.fetchall(
-            "SELECT * FROM question_options WHERE question_id=? ORDER BY order_num, id",
-            (qid,))
-        for j, o in enumerate(opts):
-            db.execute("""
-                INSERT INTO question_options (question_id, text, is_correct, order_num)
-                VALUES (?, ?, ?, ?)
-            """, (new_qid, o['text'], o['is_correct'], j))
-
-    return mix_test_id
-
-
-def cleanup_mix_test(test_id: int):
-    """Удалить временный микс-тест после использования."""
-    try:
-        qs = db.fetchall("SELECT id FROM questions WHERE test_id=?", (test_id,))
-        for q in qs:
-            db.execute("DELETE FROM question_options WHERE question_id=?", (q['id'],))
-        db.execute("DELETE FROM questions WHERE test_id=?", (test_id,))
-        db.execute("DELETE FROM tests WHERE id=? AND status='mix_temp'", (test_id,))
-    except Exception as e:
-        log.warning("cleanup_mix: %s", e)
-
-
-# ===================== ВОРКЕР =====================
-
-_worker_task: Optional[asyncio.Task] = None
-
-
-async def _worker_loop(bot: Bot):
-    log.info("autopub worker started")
-    while True:
+    if gq['status'] == 'lobby':
+        # Тест ещё не начался — просто отмена
+        db.execute("UPDATE group_quizzes SET status='cancelled', finished_at=? WHERE id=?",
+                    (now_iso(), gq['id']))
         try:
-            await asyncio.sleep(10)
-            now = datetime.utcnow().isoformat()
-            rows = db.fetchall(
-                "SELECT * FROM autopub_queue "
-                "WHERE status='pending' AND run_at <= ? "
-                "ORDER BY run_at LIMIT 5", (now,))
-            for r in rows:
-                qid = r['id']
-                test_id = r['test_id']
-                series_pos = r.get('series_pos') or 0
-                series_total = r.get('series_total') or 1
-                series_ids_str = r.get('series_test_ids') or ''
+            await bot.send_message(chat_id, "⏹ <b>Тест отменён администратором.</b>",
+                                    parse_mode="HTML")
+        except Exception:
+            pass
+        return True, "cancelled"
 
-                db.execute("UPDATE autopub_queue SET status='running' WHERE id=?", (qid,))
-                try:
-                    posted_full_announce = False
-                    # Полный анонс с темами (для первого/единственного теста)
-                    if series_ids_str:
-                        try:
-                            ids = [int(x) for x in series_ids_str.split(',') if x.strip().isdigit()]
-                            tests_obj = []
-                            for tid in ids:
-                                t = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
-                                if t:
-                                    tests_obj.append(dict(t))
-                            if tests_obj:
-                                if len(tests_obj) == 1:
-                                    test = tests_obj[0]
-                                    cfg = get_autopub_config()
-                                    chan = cfg.get('channel_id')
-                                    invite = cfg.get('invite_link') or ''
-                                    qc = db.fetchone(
-                                        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
-                                        (test['id'],))['c']
-                                    if chan:
-                                        try:
-                                            await bot.send_message(
-                                                int(chan),
-                                                announce_now_text(0, test['title'], qc, invite),
-                                                parse_mode="HTML",
-                                                disable_web_page_preview=False)
-                                            posted_full_announce = True
-                                        except Exception as e:
-                                            log.warning("now announce: %s", e)
-                                else:
-                                    ok = await announce_batch_reminder(bot, tests_obj)
-                                    if ok:
-                                        posted_full_announce = True
-                        except Exception as e:
-                            log.warning("series head reminder: %s", e)
+    # Идёт тест — финализируем
+    await _finalize(bot, gq['id'], aborted=True)
+    return True, "stopped"
 
-                    # Пауза чтобы юзеры успели зайти в чат
-                    if posted_full_announce:
-                        await asyncio.sleep(15)
 
-                    # Закрываем чат перед первым тестом серии
-                    cfg = get_autopub_config()
-                    chat_id_cfg = cfg.get('chat_id')
-                    if chat_id_cfg:
-                        try:
-                            await _lock_chat(bot, int(chat_id_cfg))
-                        except Exception as e:
-                            log.warning("lock on first: %s", e)
+# ============ ВНУТРЕННИЕ ============
 
-                    # Запуск лобби. Цепочка следующих — через on_series_test_finished
-                    ok = await publish_test_to_chat(bot, test_id)
-                    if ok:
-                        db.execute("UPDATE autopub_queue SET status='done' WHERE id=?",
-                                    (qid,))
-                    else:
-                        db.execute(
-                            "UPDATE autopub_queue SET status='failed', error=? WHERE id=?",
-                            ('publish returned False', qid))
-                except Exception as e:
-                    log.exception("worker publish: %s", e)
-                    db.execute(
-                        "UPDATE autopub_queue SET status='failed', error=? WHERE id=?",
-                        (str(e)[:200], qid))
-        except asyncio.CancelledError:
-            log.info("autopub worker cancelled")
+def _lobby_kb(gq_id: int, ready_count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=f"▶️ Пройти тест ({ready_count})",
+            callback_data=f"gq:join:{gq_id}",
+        )
+    ]])
+
+
+def _count_players(gq_id: int) -> int:
+    row = db.fetchone(
+        "SELECT COUNT(*) AS c FROM group_quiz_players WHERE group_quiz_id=?", (gq_id,))
+    return row['c'] if row else 0
+
+
+async def _refresh_lobby_card(bot: Bot, gq_id: int) -> None:
+    gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
+    if not gq or gq['status'] != 'lobby':
+        return
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (gq['test_id'],))
+    if not test:
+        return
+    qcount = db.fetchone(
+        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test['id'],))['c']
+    players = db.fetchall(
+        "SELECT username, full_name FROM group_quiz_players WHERE group_quiz_id=? ORDER BY id",
+        (gq_id,))
+    cnt = len(players)
+    title = escape_html(test['title'] or '—')
+    author = escape_html(config.SHARE_AUTHOR_LABEL or "—")
+    time_per_q = test.get('time_per_question') or 30
+
+    players_list = ""
+    if players:
+        rendered = []
+        for p in players[:10]:
+            if p['username']:
+                rendered.append(f"• @{p['username']}")
+            else:
+                rendered.append(f"• {escape_html(p['full_name'] or 'Игрок')}")
+        players_list = "\n" + "\n".join(rendered)
+        if len(players) > 10:
+            players_list += f"\n• …ещё {len(players) - 10}"
+
+    text = (
+        f"🎲 <b>Приготовьтесь пройти тест «{title}»</b>\n\n"
+        f"Автор: {author}\n"
+        f"🖊 {qcount} вопросов\n"
+        f"⏱ {time_per_q} секунд на вопрос\n"
+        f"📄 Ответы видны участникам группы и автору теста\n\n"
+        f"🏁 Вопросы появятся, когда хотя бы {MIN_PLAYERS} человека будут готовы. "
+        f"Чтобы остановить — /stop\n\n"
+        f"👥 <b>Готовы: {cnt}/{MIN_PLAYERS}</b>"
+        f"{players_list}"
+    )
+    try:
+        await bot.edit_message_text(
+            text,
+            chat_id=gq['chat_id'],
+            message_id=gq['lobby_message_id'],
+            reply_markup=_lobby_kb(gq_id, cnt),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+async def _lobby_timeout(bot: Bot, gq_id: int):
+    """Если за 5 мин не набралось игроков — отмена."""
+    try:
+        await asyncio.sleep(LOBBY_TIMEOUT_SECONDS)
+        gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
+        if not gq or gq['status'] != 'lobby':
             return
-        except Exception as e:
-            log.exception("worker loop: %s", e)
-
-
-async def _delayed_unlock(bot: Bot, chat_id: int, delay_sec: int):
-    """Отложенно открыть чат (резервный механизм)."""
-    try:
-        await asyncio.sleep(delay_sec)
-        await _unlock_chat(bot, chat_id)
-    except asyncio.CancelledError:
-        return
-    except Exception as e:
-        log.warning("delayed unlock: %s", e)
-
-
-def start_worker(bot: Bot):
-    global _worker_task
-    if _worker_task and not _worker_task.done():
-        return
-    ensure_schedule_table()
-    _worker_task = asyncio.create_task(_worker_loop(bot))
-
-
-# ===================== РАНДОМНЫЕ ВОПРОСЫ НА КАНАЛ =====================
-
-async def post_random_quiz_polls_to_channel(
-        bot: Bot, count: int = 10,
-        category_id: Optional[int] = None,
-        language: str = 'ru') -> tuple[int, int]:
-    """
-    Опубликовать N рандомных Quiz Poll на канале из бесплатных НЕприватных тестов.
-    Вернёт (отправлено, ошибок).
-    """
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
-    if not channel_id:
-        return 0, 0
-
-    # Собираем кандидатов
-    sql = """SELECT q.id, q.text, q.explanation, q.test_id, t.time_per_question
-             FROM questions q JOIN tests t ON t.id=q.test_id
-             WHERE t.status='active' AND t.is_paid=0
-               AND COALESCE(t.is_private,0)=0
-               AND t.language=?"""
-    args = [language]
-    if category_id is not None:
-        sql += " AND t.category_id=?"
-        args.append(category_id)
-    rows = db.fetchall(sql, tuple(args))
-    if not rows:
-        return 0, 0
-    sample = random.sample(rows, min(count, len(rows)))
-
-    sent = 0
-    failed = 0
-    for q in sample:
-        opts = db.fetchall(
-            "SELECT * FROM question_options WHERE question_id=? "
-            "ORDER BY order_num, id", (q['id'],))
-        if len(opts) < 2:
-            continue
-        correct_idx = 0
-        for i, o in enumerate(opts):
-            if o['is_correct']:
-                correct_idx = i
-                break
+        # Авто-отмена
+        db.execute("UPDATE group_quizzes SET status='cancelled', finished_at=? WHERE id=?",
+                    (now_iso(), gq_id))
         try:
-            await bot.send_poll(
-                int(channel_id),
-                question=q['text'][:300],
-                options=[o['text'][:100] for o in opts[:10]],
-                type='quiz',
-                correct_option_id=correct_idx,
-                is_anonymous=True,
-                open_period=q.get('time_per_question') or 30,
-                explanation=(q.get('explanation') or '')[:200] or None,
-            )
-            sent += 1
-            await asyncio.sleep(0.7)
-        except Exception as e:
-            log.warning("post random poll: %s", e)
-            failed += 1
-    return sent, failed
+            await bot.delete_message(gq['chat_id'], gq['lobby_message_id'])
+        except Exception:
+            pass
+        try:
+            await bot.send_message(
+                gq['chat_id'],
+                f"😴 Тест отменён — за {LOBBY_TIMEOUT_SECONDS // 60} мин не набралось "
+                f"≥{MIN_PLAYERS} игроков.")
+        except Exception:
+            pass
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _lobby_timers.pop(gq_id, None)
+
+
+async def _cancel_quiz_timers(gq_id: int):
+    for d in (_lobby_timers, _question_timers, _countdown_tasks):
+        task = d.pop(gq_id, None)
+        if task and not task.done():
+            task.cancel()
+
+
+async def _countdown_and_start(bot: Bot, gq_id: int):
+    """Обратный отсчёт и старт первого вопроса."""
+    try:
+        gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
+        if not gq or gq['status'] != 'lobby':
+            return
+
+        # Отменяем lobby timeout
+        lobby_task = _lobby_timers.pop(gq_id, None)
+        if lobby_task and not lobby_task.done():
+            lobby_task.cancel()
+
+        chat_id = gq['chat_id']
+
+        # Шлём countdown
+        countdown_msgs = []
+        for n in range(COUNTDOWN_SECONDS, 0, -1):
+            try:
+                m = await bot.send_message(chat_id, f"⏳ <b>{n}...</b>", parse_mode="HTML")
+                countdown_msgs.append(m.message_id)
+            except Exception:
+                break
+            await asyncio.sleep(1)
+
+        # Удаляем лобби и countdown
+        try:
+            await bot.delete_message(chat_id, gq['lobby_message_id'])
+        except Exception:
+            pass
+        for mid in countdown_msgs:
+            try:
+                await bot.delete_message(chat_id, mid)
+            except Exception:
+                pass
+
+        # Сообщение о старте
+        try:
+            await bot.send_message(
+                chat_id,
+                f"🚀 <b>Тест начался!</b> Удачи всем участникам.",
+                parse_mode="HTML")
+        except Exception:
+            pass
+
+        # Переводим в running, обнуляем индекс
+        db.execute(
+            "UPDATE group_quizzes SET status='running', started_at=?, current_question_index=0 WHERE id=?",
+            (now_iso(), gq_id))
+
+        await _send_question(bot, gq_id)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _countdown_tasks.pop(gq_id, None)
+
+
+def _list_question_ids(test_id: int) -> list[int]:
+    rows = db.fetchall(
+        "SELECT id FROM questions WHERE test_id=? ORDER BY COALESCE(order_num, id)",
+        (test_id,))
+    return [r['id'] for r in rows]
+
+
+async def _send_question(bot: Bot, gq_id: int):
+    """Отправить текущий вопрос как Quiz Poll."""
+    gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
+    if not gq or gq['status'] != 'running':
+        return
+
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (gq['test_id'],))
+    if not test:
+        return
+
+    qids = _list_question_ids(test['id'])
+    idx = gq['current_question_index']
+
+    if idx >= len(qids):
+        await _finalize(bot, gq_id, aborted=False)
+        return
+
+    qid = qids[idx]
+    question = db.fetchone("SELECT * FROM questions WHERE id=?", (qid,))
+    if not question:
+        # Пропуск битого вопроса
+        db.execute(
+            "UPDATE group_quizzes SET current_question_index=current_question_index+1 WHERE id=?",
+            (gq_id,))
+        await _send_question(bot, gq_id)
+        return
+
+    options_rows = db.fetchall(
+        "SELECT id, text, is_correct FROM question_options WHERE question_id=? "
+        "ORDER BY COALESCE(order_num, id)",
+        (qid,))
+    options = [o['text'] for o in options_rows]
+    correct_idx = next((i for i, o in enumerate(options_rows) if o['is_correct']), 0)
+
+    time_per_q = test['time_per_question'] or 30
+    open_period = max(5, min(600, time_per_q))
+
+    total = len(qids)
+    qtext = (question['text'] or "")[:290]
+    if len(qtext) > 290:
+        qtext = qtext[:287] + "..."
+
+    poll_question = f"[{idx + 1}/{total}] {qtext}"
+    if len(poll_question) > 300:
+        poll_question = poll_question[:297] + "..."
+
+    # Telegram лимиты: вопрос ≤ 300, варианты ≤ 100
+    if any(len(o) > 100 for o in options) or not (2 <= len(options) <= 10):
+        # Этот вопрос нельзя отправить как Quiz Poll — пропускаем
+        try:
+            await bot.send_message(
+                gq['chat_id'],
+                f"⚠️ Вопрос {idx + 1}/{total} пропущен (не подходит под формат Quiz Poll).")
+        except Exception:
+            pass
+        db.execute(
+            "UPDATE group_quizzes SET current_question_index=current_question_index+1 WHERE id=?",
+            (gq_id,))
+        await _send_question(bot, gq_id)
+        return
+
+    try:
+        msg = await bot.send_poll(
+            chat_id=gq['chat_id'],
+            question=poll_question,
+            options=options,
+            type="quiz",
+            correct_option_id=correct_idx,
+            is_anonymous=False,
+            open_period=open_period,
+            explanation=(question.get('explanation') or "")[:200] or None,
+        )
+    except Exception as e:
+        logger.warning("Не удалось отправить poll: %s", e)
+        # Пропускаем вопрос
+        db.execute(
+            "UPDATE group_quizzes SET current_question_index=current_question_index+1 WHERE id=?",
+            (gq_id,))
+        await _send_question(bot, gq_id)
+        return
+
+    poll_id = msg.poll.id
+    _poll_to_gq[poll_id] = gq_id
+
+    db.execute(
+        """UPDATE group_quizzes SET
+              current_poll_id=?,
+              current_poll_message_id=?,
+              current_poll_correct_index=?,
+              current_poll_options=?,
+              current_question_started_at=?
+           WHERE id=?""",
+        (poll_id, msg.message_id, correct_idx,
+         json.dumps(options, ensure_ascii=False),
+         now_iso(), gq_id))
+
+    # Запускаем таймер на следующий вопрос
+    existing = _question_timers.pop(gq_id, None)
+    if existing and not existing.done():
+        existing.cancel()
+    _question_timers[gq_id] = asyncio.create_task(
+        _question_timeout(bot, gq_id, open_period + 1))
+
+
+async def _question_timeout(bot: Bot, gq_id: int, sleep_seconds: int):
+    """После open_period шлём следующий вопрос."""
+    try:
+        await asyncio.sleep(sleep_seconds)
+        gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
+        if not gq or gq['status'] != 'running':
+            return
+        # Чистим маппинг старого poll
+        if gq['current_poll_id']:
+            _poll_to_gq.pop(gq['current_poll_id'], None)
+        # Следующий
+        db.execute(
+            "UPDATE group_quizzes SET current_question_index=current_question_index+1 WHERE id=?",
+            (gq_id,))
+        await _send_question(bot, gq_id)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _question_timers.pop(gq_id, None)
+
+
+async def on_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
+                          user) -> None:
+    """
+    Обработка poll_answer для групповых квизов.
+    """
+    gq_id = _poll_to_gq.get(poll_id)
+    if not gq_id:
+        return  # это не групповой
+    gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
+    if not gq or gq['status'] != 'running':
+        return
+    # Игрок зарегистрирован?
+    player = db.fetchone(
+        "SELECT * FROM group_quiz_players WHERE group_quiz_id=? AND tg_id=?",
+        (gq_id, user.id))
+    if not player:
+        return  # не нажал «Пройти тест» — ответ не засчитывается
+
+    if not option_ids:
+        # Сняли голос — игнор
+        return
+
+    chosen = option_ids[0]
+    correct_idx = gq['current_poll_correct_index']
+
+    # Время ответа
+    answer_time = 0
+    if gq['current_question_started_at']:
+        try:
+            started = datetime.fromisoformat(gq['current_question_started_at'])
+            answer_time = int((datetime.utcnow() - started).total_seconds())
+        except Exception:
+            pass
+
+    if chosen == correct_idx:
+        db.execute(
+            "UPDATE group_quiz_players SET correct_answers=correct_answers+1, "
+            "total_time_seconds=total_time_seconds+? WHERE id=?",
+            (answer_time, player['id']))
+    else:
+        db.execute(
+            "UPDATE group_quiz_players SET wrong_answers=wrong_answers+1, "
+            "total_time_seconds=total_time_seconds+? WHERE id=?",
+            (answer_time, player['id']))
+
+
+async def _finalize(bot: Bot, gq_id: int, aborted: bool = False):
+    """Завершить групповой тест: лидерборд + сохранение в test_statistics."""
+    gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
+    if not gq or gq['status'] == 'finished':
+        return
+
+    # Чистим таймеры
+    await _cancel_quiz_timers(gq_id)
+    if gq['current_poll_id']:
+        _poll_to_gq.pop(gq['current_poll_id'], None)
+
+    db.execute(
+        "UPDATE group_quizzes SET status='finished', finished_at=? WHERE id=?",
+        (now_iso(), gq_id))
+
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (gq['test_id'],))
+    title = escape_html((test['title'] if test else '—'))
+    qids_count = db.fetchone(
+        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (gq['test_id'],))['c']
+
+    # Считаем skipped для всех игроков (qids - answered)
+    answered_count = gq['current_question_index']
+    players = db.fetchall(
+        """SELECT * FROM group_quiz_players
+           WHERE group_quiz_id=?
+           ORDER BY correct_answers DESC, total_time_seconds ASC""",
+        (gq_id,))
+
+    # Записываем skipped
+    for p in players:
+        ans = p['correct_answers'] + p['wrong_answers']
+        skipped = max(0, answered_count - ans)
+        if skipped != p['skipped_answers']:
+            db.execute("UPDATE group_quiz_players SET skipped_answers=? WHERE id=?",
+                        (skipped, p['id']))
+
+    # Сохраняем в test_statistics
+    _save_to_statistics(gq, players, qids_count, source_type='group')
+
+    # Лидерборд
+    text = _build_leaderboard_text(title, qids_count, players, aborted=aborted)
+    kb = _final_kb(test['id'] if test else None)
+
+    try:
+        await bot.send_message(gq['chat_id'], text, reply_markup=kb,
+                                parse_mode="HTML",
+                                disable_web_page_preview=True)
+    except Exception as e:
+        logger.warning("Не удалось отправить лидерборд: %s", e)
+
+    # Хук: уведомляем автопубликацию что тест из серии завершён —
+    # чтобы СРАЗУ запустить следующий тест серии или открыть чат.
+    try:
+        from services import autopub_service
+        await autopub_service.on_series_test_finished(bot, gq['test_id'],
+                                                       gq['chat_id'])
+    except Exception as e:
+        logger.warning("autopub hook: %s", e)
+
+
+def _build_leaderboard_text(title: str, qcount: int, players: list[dict],
+                              aborted: bool = False, limit: int = 20) -> str:
+    lines = []
+    if aborted:
+        lines.append(f"⏹ Тест <b>«{title}»</b> остановлен.")
+    else:
+        lines.append(f"🏁 Тест <b>«{title}»</b> завершён!")
+    lines.append("")
+    lines.append(f"📚 {qcount} вопросов · 👥 Участников: {len(players)}")
+    lines.append("")
+
+    medals = ["🥇", "🥈", "🥉"]
+    for i, p in enumerate(players[:limit]):
+        if i < 3:
+            prefix = medals[i]
+        else:
+            prefix = f"{i + 1}."
+        name = ("@" + p['username']) if p['username'] else (p['full_name'] or 'Игрок')
+        name = escape_html(name)
+        time_str = _format_time(p['total_time_seconds'])
+        lines.append(f"{prefix} {name} — <b>{p['correct_answers']}</b> ({time_str})")
+
+    lines.append("")
+    if players:
+        lines.append("🏆 <b>Поздравляем победителей!</b>")
+    else:
+        lines.append("Никто не успел ответить.")
+    return "\n".join(lines)
+
+
+def _final_kb(test_id: Optional[int]) -> InlineKeyboardMarkup:
+    bu = config.BOT_USERNAME or "bot"
+    rows = []
+    if test_id:
+        rows.append([InlineKeyboardButton(
+            text="▶️ Пройти тест в ЛС",
+            url=f"https://t.me/{bu}?start=test_{test_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="📤 Поделиться тестом",
+            switch_inline_query=f"test:{test_id}",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_time(seconds: int) -> str:
+    if not seconds or seconds <= 0:
+        return "0 сек"
+    mins, secs = divmod(int(seconds), 60)
+    if mins > 0:
+        return f"{mins} мин {secs} сек"
+    return f"{secs} сек"
+
+
+def _save_to_statistics(gq: dict, players: list[dict], qcount: int, source_type: str):
+    """Сохраняет результат каждого игрока в test_statistics."""
+    for p in players:
+        user_row = db.fetchone("SELECT id FROM users WHERE tg_id=?", (p['tg_id'],))
+        if not user_row:
+            continue
+        user_id = user_row['id']
+        total_answered = p['correct_answers'] + p['wrong_answers'] + p['skipped_answers']
+        if total_answered == 0:
+            continue  # не учитываем тех, кто не ответил
+        percentage = round(p['correct_answers'] * 100 / qcount, 1) if qcount else 0
+        avg_time = round(p['total_time_seconds'] / total_answered, 2) if total_answered else 0
+
+        # is_first_attempt: первая ли это попытка по этому тесту?
+        prev = db.fetchone(
+            "SELECT id FROM test_statistics WHERE test_id=? AND user_id=?",
+            (gq['test_id'], user_id))
+        is_first = 0 if prev else 1
+
+        db.execute(
+            """INSERT INTO test_statistics
+                (test_id, user_id, tg_id, username, full_name, score,
+                 total_questions, correct_answers, wrong_answers, skipped_answers,
+                 percentage, total_time_seconds, average_answer_time,
+                 source_type, group_chat_id, group_quiz_id,
+                 started_at, finished_at, is_first_attempt)
+               VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?, ?,?,?)""",
+            (gq['test_id'], user_id, p['tg_id'], p['username'], p['full_name'],
+             p['correct_answers'],
+             qcount, p['correct_answers'], p['wrong_answers'], p['skipped_answers'],
+             percentage, p['total_time_seconds'], avg_time,
+             source_type, gq['chat_id'], gq['id'],
+             gq['started_at'], gq['finished_at'] or now_iso(), is_first))
+
+
+def save_private_attempt_to_statistics(test_id: int, user_id: int, tg_id: int,
+                                         username: str, full_name: str,
+                                         correct: int, wrong: int, skipped: int,
+                                         total_questions: int,
+                                         total_time_seconds: int,
+                                         started_at: str, finished_at: str):
+    """Внешний API: сохранить результат личного прохождения."""
+    if (correct + wrong + skipped) == 0:
+        return
+    percentage = round(correct * 100 / total_questions, 1) if total_questions else 0
+    avg_time = round(total_time_seconds / max(1, correct + wrong + skipped), 2)
+    prev = db.fetchone(
+        "SELECT id FROM test_statistics WHERE test_id=? AND user_id=?",
+        (test_id, user_id))
+    is_first = 0 if prev else 1
+    db.execute(
+        """INSERT INTO test_statistics
+            (test_id, user_id, tg_id, username, full_name, score,
+             total_questions, correct_answers, wrong_answers, skipped_answers,
+             percentage, total_time_seconds, average_answer_time,
+             source_type, started_at, finished_at, is_first_attempt)
+           VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?)""",
+        (test_id, user_id, tg_id, username or "", full_name or "",
+         correct,
+         total_questions, correct, wrong, skipped,
+         percentage, total_time_seconds, avg_time,
+         'private', started_at, finished_at, is_first))
+
+
+# ============ ПАГИНАЦИЯ ЛИДЕРБОРДА ============
+
+PAGE_SIZE = 20
+
+
+def get_leaderboard_page(test_id: int, page: int = 1) -> tuple[list[dict], int, int]:
+    """
+    Возвращает (rows, total_users, total_pages).
+    Только first_attempt, отсортировано по score DESC, total_time ASC.
+    """
+    total_row = db.fetchone(
+        "SELECT COUNT(*) AS c FROM test_statistics "
+        "WHERE test_id=? AND is_first_attempt=1",
+        (test_id,))
+    total = total_row['c'] if total_row else 0
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * PAGE_SIZE
+
+    rows = db.fetchall(
+        """SELECT username, full_name, score, total_time_seconds, finished_at
+           FROM test_statistics
+           WHERE test_id=? AND is_first_attempt=1
+           ORDER BY score DESC, total_time_seconds ASC
+           LIMIT ? OFFSET ?""",
+        (test_id, PAGE_SIZE, offset))
+    return [dict(r) for r in rows], total, total_pages
+
+
+def build_stats_text(test: dict, page: int = 1) -> tuple[str, InlineKeyboardMarkup]:
+    """Собирает текст и клавиатуру для страницы статистики."""
+    rows, total_users, total_pages = get_leaderboard_page(test['id'], page)
+    qcount_row = db.fetchone(
+        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test['id'],))
+    qcount = qcount_row['c'] if qcount_row else 0
+
+    title = escape_html(test.get('title') or '—')
+    time_per_q = test.get('time_per_question') or 30
+
+    lines = [
+        f"🏆 <b>Список лучших результатов для теста «{title}»</b>",
+        "",
+        f"🖊 {qcount} вопросов",
+        f"⏱ {time_per_q} секунд на вопрос",
+        f"🤓 тест прошли {total_users} человек",
+        "",
+    ]
+
+    medals = ["🥇", "🥈", "🥉"]
+    offset = (page - 1) * PAGE_SIZE
+    for i, r in enumerate(rows):
+        rank = offset + i + 1
+        if rank <= 3:
+            prefix = medals[rank - 1]
+        else:
+            prefix = f"{rank}."
+        name = ("@" + r['username']) if r['username'] else (r['full_name'] or 'Игрок')
+        name = escape_html(name)
+        t_str = _format_time(r['total_time_seconds'])
+        lines.append(f"{prefix} {name} — <b>{r['score']}</b> ({t_str})")
+
+    if not rows:
+        lines.append("<i>Пока никто не проходил тест.</i>")
+
+    text = "\n".join(lines)
+
+    # Пагинация
+    kb_rows = []
+    if total_pages > 1:
+        nav = _build_pagination_buttons(test['id'], page, total_pages)
+        kb_rows.append(nav)
+    kb_rows.append([InlineKeyboardButton(
+        text="« К тесту", callback_data=f"opentest:{test['id']}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+def _build_pagination_buttons(test_id: int, page: int, total: int) -> list[InlineKeyboardButton]:
+    """Pagination: <prev> 1 ·2· 3 4 last>"""
+    buttons = []
+    # Стрелка влево
+    if page > 1:
+        buttons.append(InlineKeyboardButton(
+            text="«", callback_data=f"stats:{test_id}:{page - 1}"))
+    # Номера страниц — показываем максимум 5
+    if total <= 5:
+        page_nums = list(range(1, total + 1))
+    else:
+        if page <= 3:
+            page_nums = [1, 2, 3, 4, 5]
+        elif page >= total - 2:
+            page_nums = list(range(total - 4, total + 1))
+        else:
+            page_nums = [page - 2, page - 1, page, page + 1, page + 2]
+
+    for p in page_nums:
+        text = f"·{p}·" if p == page else str(p)
+        buttons.append(InlineKeyboardButton(
+            text=text, callback_data=f"stats:{test_id}:{p}"))
+
+    if page < total:
+        buttons.append(InlineKeyboardButton(
+            text="»", callback_data=f"stats:{test_id}:{total}"))
+    return buttons
