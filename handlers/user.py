@@ -78,22 +78,53 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
         kb.button(text=f"🔐 Мои закрытые тесты ({len(private_tests)})",
                   callback_data="m:private_tests")
 
-    # Категории
-    for c in cats:
-        cnt = db.fetchone(
+    # Категории: обязательные (всем) + профильные юзера
+    profile_ids = set(utils.get_profile_subjects(call.from_user.id))
+
+    def _cnt(cat_id):
+        return db.fetchone(
             """SELECT COUNT(*) AS c FROM tests
                WHERE category_id=? AND status='active'
                  AND COALESCE(is_private,0)=0 AND language=?""",
-            (c['id'], lang))['c']
-        if cnt > 0:
+            (cat_id, lang))['c']
+
+    required_cats = [c for c in cats if c.get('is_required')]
+    profile_cats = [c for c in cats
+                    if not c.get('is_required') and c['id'] in profile_ids]
+
+    has_any = False
+    # Обязательные
+    shown_required = [(c, _cnt(c['id'])) for c in required_cats]
+    shown_required = [(c, n) for c, n in shown_required if n > 0]
+    if shown_required:
+        has_any = True
+        text += ("\n\n⭐️ <b>Міндетті:</b>" if lang == "kz"
+                 else "\n\n⭐️ <b>Обязательные:</b>")
+        for c, n in shown_required:
             emoji = c.get('emoji') or '📚'
-            kb.button(text=f"{emoji} {c['name']} ({cnt})",
+            kb.button(text=f"{emoji} {c['name']} ({n})",
                       callback_data=f"m:cat:{c['id']}")
 
-    # Тесты без раздела
-    if tests_no_cat:
-        kb.button(text=f"📭 Без раздела ({len(tests_no_cat)})",
-                  callback_data="m:cat:none")
+    # Профильные юзера
+    shown_profile = [(c, _cnt(c['id'])) for c in profile_cats]
+    shown_profile = [(c, n) for c, n in shown_profile if n > 0]
+    if shown_profile:
+        has_any = True
+        text += ("\n\n🎓 <b>Сенің бейіндік:</b>" if lang == "kz"
+                 else "\n\n🎓 <b>Твои профильные:</b>")
+        for c, n in shown_profile:
+            emoji = c.get('emoji') or '📚'
+            kb.button(text=f"{emoji} {c['name']} ({n})",
+                      callback_data=f"m:cat:{c['id']}")
+
+    # Если у юзера ещё не выбраны профильные — предложим выбрать
+    if not profile_ids:
+        optional_exist = any(not c.get('is_required') for c in cats)
+        if optional_exist:
+            kb.button(
+                text=("🎓 Бейіндік пәндерді таңда" if lang == "kz"
+                      else "🎓 Выбрать профильные предметы"),
+                callback_data="m:change_subjects")
 
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
