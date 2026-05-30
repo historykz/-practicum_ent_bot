@@ -117,6 +117,29 @@ def is_blocked(tg_id: int) -> bool:
     return bool(row and row["is_blocked"])
 
 
+def get_profile_subjects(tg_id: int) -> list[int]:
+    """Вернуть список category_id профильных предметов юзера."""
+    row = db.fetchone("SELECT profile_subjects FROM users WHERE tg_id=?", (tg_id,))
+    if not row or not row.get('profile_subjects'):
+        return []
+    try:
+        return [int(x) for x in str(row['profile_subjects']).split(',')
+                if x.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def set_profile_subjects(tg_id: int, category_ids: list[int]) -> None:
+    """Сохранить профильные предметы юзера (список category_id)."""
+    csv = ",".join(str(int(x)) for x in category_ids)
+    db.execute("UPDATE users SET profile_subjects=? WHERE tg_id=?",
+                (csv, tg_id))
+
+
+def has_profile_subjects(tg_id: int) -> bool:
+    return len(get_profile_subjects(tg_id)) > 0
+
+
 def set_blocked(user_id: int, blocked: bool) -> None:
     db.execute("UPDATE users SET is_blocked=? WHERE id=?", (1 if blocked else 0, user_id))
 
