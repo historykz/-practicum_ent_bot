@@ -62,6 +62,10 @@ def cancel_kb(lang: str, callback: str = "cancel") -> InlineKeyboardMarkup:
 def profile_kb(lang: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t("btn_change_lang", lang), callback_data="profile:lang")
+    kb.button(
+        text=("🎓 Бейіндік пәндерді ауыстыру" if lang == "kz"
+              else "🎓 Сменить профильные предметы"),
+        callback_data="m:change_subjects")
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
     return kb.as_markup()
