@@ -804,6 +804,18 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # --- Обязательный предмет (виден всем) ---
+        try:
+            cur.execute("ALTER TABLE test_categories ADD COLUMN is_required INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        # --- Профильные предметы юзера (CSV из category_id) ---
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN profile_subjects TEXT")
+        except Exception:
+            pass
+
         # --- Флаг прохождения онбординга ---
         try:
             cur.execute("ALTER TABLE users ADD COLUMN onboarded_at TEXT")
