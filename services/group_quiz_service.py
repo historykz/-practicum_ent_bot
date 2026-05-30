@@ -577,6 +577,15 @@ async def _finalize(bot: Bot, gq_id: int, aborted: bool = False):
     except Exception as e:
         logger.warning("Не удалось отправить лидерборд: %s", e)
 
+    # Хук: уведомляем автопубликацию что тест из серии завершён —
+    # чтобы СРАЗУ запустить следующий тест серии или открыть чат.
+    try:
+        from services import autopub_service
+        await autopub_service.on_series_test_finished(bot, gq['test_id'],
+                                                       gq['chat_id'])
+    except Exception as e:
+        logger.warning("autopub hook: %s", e)
+
 
 def _build_leaderboard_text(title: str, qcount: int, players: list[dict],
                               aborted: bool = False, limit: int = 20) -> str:
