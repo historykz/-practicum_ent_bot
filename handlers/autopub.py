@@ -37,6 +37,11 @@ async def cmd_stop_series(message: Message, bot: Bot):
             cancelled += 1
     except Exception as e:
         log.warning("stop cancel pending: %s", e)
+    # Чистим активную серию (цепочку)
+    try:
+        autopub_service.clear_active_series()
+    except Exception:
+        pass
     # Останавливаем активный групповой квиз
     finalized = False
     try:
@@ -645,17 +650,21 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
         run_at = datetime.utcnow() + timedelta(minutes=minutes)
         import time as _time
         series_id = f"s{int(_time.time())}"
-        # Один тест в серии, series_test_ids = только mix_id
+        # Один тест в серии (микс)
         autopub_service.enqueue_test(
             mix_id, run_at, call.from_user.id,
             series_id=series_id, series_pos=0, series_total=1,
             series_test_ids=str(mix_id))
-        # Если время в будущем — короткий пре-анонс
+        # Состояние серии — чтобы после finish открылся чат
+        autopub_service.save_series_state(
+            series_id, str(mix_id), 1, call.from_user.id)
+        # Если время в будущем — анонс СРАЗУ С ТЕМАМИ
         if minutes > 0:
             when_str = _humanize_minutes(minutes)
+            mix_test = db.fetchone("SELECT * FROM tests WHERE id=?", (mix_id,))
             try:
-                await autopub_service.announce_batch_short(
-                    call.bot, count=1, when_str=when_str)
+                await autopub_service.announce_batch_with_topics(
+                    call.bot, [dict(mix_test)], when_str)
             except Exception:
                 pass
         # minutes == 0 — worker сам отправит полный анонс «уже идёт»
@@ -671,43 +680,40 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
               f"🚀 Стартуем! Бот сейчас отправит анонс и откроет лобби в чате.\n")
             + f"\nНужно <b>2 человека</b> в чате, чтобы нажали «Пройти тест».")
     else:
-        # По очереди — целиком. КОРОТКИЙ пре-анонс + worker делает напоминалки.
+        # По очереди — ЦЕПОЧКОЙ. В очередь ставим только ПЕРВЫЙ тест.
+        # Остальные запускаются по факту завершения предыдущего.
         import random as _r
         import time as _time
         _r.shuffle(selected)
         base = datetime.utcnow() + timedelta(minutes=minutes)
-        GAP_SEC = 20  # 20 секунд между тестами
-        enqueued = 0
-        cursor = base
         series_id = f"s{int(_time.time())}"
         series_test_ids = ",".join(str(t) for t in selected)
 
-        for pos, tid in enumerate(selected):
-            run_at = cursor
-            autopub_service.enqueue_test(
-                tid, run_at, call.from_user.id,
-                series_id=series_id, series_pos=pos,
-                series_total=len(selected),
-                series_test_ids=series_test_ids)
-            enqueued += 1
-            test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
-            qcount = db.fetchone(
-                "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
-                (tid,))['c']
-            tpq = (test.get('time_per_question') if test else 30) or 30
-            # Длительность теста + 60 сек на лобби + 20 сек на анонс следующего
-            test_duration_sec = qcount * tpq + 60
-            cursor = cursor + timedelta(seconds=test_duration_sec) \
-                     + timedelta(seconds=GAP_SEC)
+        first_tid = selected[0]
+        autopub_service.enqueue_test(
+            first_tid, base, call.from_user.id,
+            series_id=series_id, series_pos=0,
+            series_total=len(selected),
+            series_test_ids=series_test_ids)
+        # Сохраняем «состояние серии» для цепочки
+        autopub_service.save_series_state(
+            series_id, series_test_ids, len(selected),
+            call.from_user.id)
+        enqueued = len(selected)
 
-        # Пре-анонс если время в будущем (короткий, без тем)
+        # Пре-анонс СРАЗУ С ТЕМАМИ если время в будущем
         if minutes > 0:
             when_str = _humanize_minutes(minutes)
+            tests_obj = []
+            for tid in selected:
+                t = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+                if t:
+                    tests_obj.append(dict(t))
             try:
-                await autopub_service.announce_batch_short(
-                    call.bot, count=len(selected), when_str=when_str)
+                await autopub_service.announce_batch_with_topics(
+                    call.bot, tests_obj, when_str)
             except Exception as e:
-                log.warning("short announce: %s", e)
+                log.warning("pre-announce topics: %s", e)
         # При minutes == 0 worker сам отправит полный анонс с темами
 
         await state.clear()
@@ -715,9 +721,8 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
         summary = (
             f"✅ <b>Запланировано {enqueued} тестов!</b>\n\n"
             f"Первый — <b>{when_human}</b>\n"
-            f"Следующие — после окончания предыдущего + 20 сек\n\n"
-            + (f"📢 Короткий анонс отправлен. Когда время подойдёт — "
-              f"бот пришлёт полный анонс с темами." if minutes > 0
+            f"Следующие — сразу после результатов предыдущего (через 20 сек)\n\n"
+            + (f"📢 Анонс с темами отправлен на канал." if minutes > 0
               else "🚀 Стартуем! Бот сейчас отправит анонс."))
 
     try:
