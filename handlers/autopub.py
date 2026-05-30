@@ -1,856 +1,1069 @@
 """
-UI для авто-публикации тестов.
+Сервис автоматической публикации тестов в чат + анонсы на канал.
+
+Админ:
+  /admin → «📅 Авто-публикация тестов»
+  → выбирает раздел
+  → выбирает тесты галочками
+  → ставит время старта
+  → бот по очереди публикует каждый тест в нужный чат
+  → перед каждым шлёт анонс на канал со ссылкой на чат
+
+Сохраняем настройки в БД: target_chat_id, channel_id, invite_link.
 """
+import asyncio
 import logging
+import random
 from datetime import datetime, timedelta
 from typing import Optional
 
-from aiogram import Router, F, Bot
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import (CallbackQuery, Message, InlineKeyboardMarkup)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram import Bot
 
 import database as db
-import utils
-from filters import IsAdmin
-from services import autopub_service
 
-router = Router(name="autopub")
 log = logging.getLogger(__name__)
 
 
-@router.message(Command("stop"))
-async def cmd_stop_series(message: Message, bot: Bot):
-    """Команда /stop в чате — остановить серию тестов. Только для админов бота."""
-    if not utils.is_admin(message.from_user.id):
-        return
-    cfg = autopub_service.get_autopub_config()
-    target_chat_id = cfg.get('chat_id')
-    # Отменяем все pending
-    cancelled = 0
+# Имя settings-ключей
+S_CHAT_ID = "autopub_chat_id"          # куда публиковать сами тесты
+S_CHAT_TITLE = "autopub_chat_title"    # для отображения
+S_CHANNEL_ID = "autopub_channel_id"    # канал для анонсов
+S_INVITE_LINK = "autopub_invite_link"  # ссылка-приглашение на чат
+
+
+def _get_setting(key: str) -> Optional[str]:
+    r = db.fetchone("SELECT value FROM settings WHERE key=?", (key,))
+    return r['value'] if r else None
+
+
+def _set_setting(key: str, value: str):
+    db.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value))
+
+
+def get_autopub_config() -> dict:
+    return {
+        'chat_id': _get_setting(S_CHAT_ID),
+        'chat_title': _get_setting(S_CHAT_TITLE) or '',
+        'channel_id': _get_setting(S_CHANNEL_ID),
+        'invite_link': _get_setting(S_INVITE_LINK) or '',
+    }
+
+
+def set_autopub_config(chat_id: str = None, chat_title: str = None,
+                        channel_id: str = None, invite_link: str = None):
+    if chat_id is not None:
+        _set_setting(S_CHAT_ID, str(chat_id))
+    if chat_title is not None:
+        _set_setting(S_CHAT_TITLE, str(chat_title))
+    if channel_id is not None:
+        _set_setting(S_CHANNEL_ID, str(channel_id))
+    if invite_link is not None:
+        _set_setting(S_INVITE_LINK, str(invite_link))
+
+
+# ===================== ТАБЛИЦА РАСПИСАНИЯ =====================
+
+def ensure_schedule_table():
+    """Создаёт таблицу для запланированных публикаций (если её нет)."""
     try:
-        rows = autopub_service.list_pending()
-        for r in rows:
-            autopub_service.cancel_pending(r['id'])
-            cancelled += 1
-    except Exception as e:
-        log.warning("stop cancel pending: %s", e)
-    # Чистим активную серию (цепочку)
-    try:
-        autopub_service.clear_active_series()
-    except Exception:
-        pass
-    # Останавливаем активный групповой квиз
-    finalized = False
-    try:
-        from services import group_quiz_service
-        if target_chat_id:
-            gq = db.fetchone(
-                "SELECT id FROM group_quizzes WHERE chat_id=? "
-                "AND status IN ('lobby','running')",
-                (int(target_chat_id),))
-            if gq:
-                await group_quiz_service.stop_quiz(bot, int(target_chat_id), 0)
-                finalized = True
-    except Exception as e:
-        log.warning("stop active quiz: %s", e)
-    # Открываем чат
-    unlocked = False
-    if target_chat_id:
-        try:
-            unlocked = await autopub_service._unlock_chat(bot, int(target_chat_id))
-        except Exception as e:
-            log.warning("stop unlock: %s", e)
-    await message.reply(
-        f"🛑 <b>Серия тестов остановлена</b>\n\n"
-        f"• Отменено запланированных: <b>{cancelled}</b>\n"
-        f"• Активный квиз: <b>{'завершён' if finalized else 'не было'}</b>\n"
-        f"• Чат: <b>{'открыт' if unlocked else 'без изменений'}</b>",
-        parse_mode="HTML")
-
-
-def _humanize_minutes(minutes: int) -> str:
-    """Превращает минуты в человекочитаемый текст."""
-    if minutes <= 0:
-        return "прямо сейчас"
-    if minutes == 1:
-        return "через 1 минуту"
-    if minutes < 5:
-        return f"через {minutes} минуты"
-    if minutes < 60:
-        return f"через {minutes} минут"
-    hours = minutes // 60
-    rem = minutes % 60
-    if rem == 0:
-        if hours == 1:
-            return "через 1 час"
-        if 2 <= hours <= 4:
-            return f"через {hours} часа"
-        return f"через {hours} часов"
-    return f"через {hours} ч {rem} мин"
-
-
-class AutoPubStates(StatesGroup):
-    waiting_chat_id = State()
-    waiting_channel_id = State()
-    waiting_invite_link = State()
-    waiting_custom_time = State()
-
-
-def _settings_card_text() -> str:
-    cfg = autopub_service.get_autopub_config()
-    chat = cfg.get('chat_id') or '<i>не задан</i>'
-    chat_title = cfg.get('chat_title') or ''
-    channel = cfg.get('channel_id') or '<i>не задан</i>'
-    link = cfg.get('invite_link') or '<i>не задана</i>'
-    return (
-        f"📅 <b>Авто-публикация тестов</b>\n\n"
-        f"<b>Настройки:</b>\n"
-        f"💬 Чат для тестов: <code>{chat}</code>"
-        + (f" ({chat_title})" if chat_title else "") + "\n"
-        f"📢 Канал для анонсов: <code>{channel}</code>\n"
-        f"🔗 Пригласительная ссылка: {link}\n\n"
-        f"<i>Бот будет публиковать тесты в чат, а на канале — "
-        f"анонсировать со ссылкой.</i>"
-    )
-
-
-def _main_menu_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🚀 Запустить серию тестов", callback_data="apub:start")
-    kb.button(text="🎲 10 случайных вопросов на канал",
-              callback_data="apub:random_canal")
-    kb.button(text="📋 Очередь публикаций", callback_data="apub:queue")
-    kb.button(text="⚙️ Настройки чата/канала", callback_data="apub:settings")
-    kb.button(text="↩️ В админ-меню", callback_data="m:admin")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-@router.callback_query(F.data == "adm:autopub", IsAdmin())
-async def cb_autopub_menu(call: CallbackQuery):
-    autopub_service.ensure_schedule_table()
-    try:
-        await call.message.edit_text(_settings_card_text(),
-                                       reply_markup=_main_menu_kb(),
-                                       parse_mode="HTML")
-    except Exception:
-        await call.message.answer(_settings_card_text(),
-                                    reply_markup=_main_menu_kb(),
-                                    parse_mode="HTML")
-    await call.answer()
-
-
-# ===================== НАСТРОЙКИ =====================
-
-@router.callback_query(F.data == "apub:settings", IsAdmin())
-async def cb_settings_menu(call: CallbackQuery):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="💬 Задать чат (ID или @username)", callback_data="apub:set_chat")
-    kb.button(text="📢 Задать канал для анонсов", callback_data="apub:set_channel")
-    kb.button(text="🔗 Задать пригласительную ссылку",
-              callback_data="apub:set_link")
-    kb.button(text="↩️ Назад", callback_data="adm:autopub")
-    kb.adjust(1)
-    try:
-        await call.message.edit_text(
-            _settings_card_text() +
-            "\n\n<b>Выбери что хочешь изменить:</b>",
-            reply_markup=kb.as_markup(), parse_mode="HTML")
-    except Exception:
-        pass
-    await call.answer()
-
-
-@router.callback_query(F.data == "apub:set_chat", IsAdmin())
-async def cb_set_chat(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AutoPubStates.waiting_chat_id)
-    await call.message.answer(
-        "💬 <b>Куда публиковать тесты?</b>\n\n"
-        "Перешли любое сообщение из чата СЮДА (можно из канала-чата) "
-        "— я возьму ID автоматически.\n\n"
-        "Или отправь:\n"
-        "• <code>@username</code> чата (если он публичный)\n"
-        "• <code>-100xxxxxxxxxx</code> (ID супергруппы)\n\n"
-        "Важно: бот должен быть админом в этом чате!\n\n"
-        "/cancel для отмены.")
-    await call.answer()
-
-
-@router.message(AutoPubStates.waiting_chat_id, IsAdmin())
-async def msg_set_chat(message: Message, state: FSMContext):
-    if message.text and message.text.startswith('/cancel'):
-        await state.clear()
-        await message.answer("❌ Отменено.")
-        return
-
-    chat_id = None
-    chat_title = None
-    # Пересланное сообщение
-    if message.forward_from_chat:
-        chat_id = message.forward_from_chat.id
-        chat_title = message.forward_from_chat.title or ''
-    elif message.text:
-        txt = message.text.strip()
-        if txt.startswith('@'):
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS autopub_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_id INTEGER NOT NULL,
+                run_at TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                error TEXT DEFAULT '',
+                created_by INTEGER,
+                series_id TEXT DEFAULT '',
+                series_pos INTEGER DEFAULT 0,
+                series_total INTEGER DEFAULT 1,
+                series_test_ids TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_autopub_status_time "
+                    "ON autopub_queue(status, run_at)")
+        # Миграции
+        for sql in (
+            "ALTER TABLE autopub_queue ADD COLUMN series_id TEXT DEFAULT ''",
+            "ALTER TABLE autopub_queue ADD COLUMN series_pos INTEGER DEFAULT 0",
+            "ALTER TABLE autopub_queue ADD COLUMN series_total INTEGER DEFAULT 1",
+            "ALTER TABLE autopub_queue ADD COLUMN series_test_ids TEXT DEFAULT ''",
+        ):
             try:
-                ch = await message.bot.get_chat(txt)
-                chat_id = ch.id
-                chat_title = ch.title or txt
-            except Exception as e:
-                await message.answer(f"Не нашёл такой чат: {e}")
-                return
-        elif txt.startswith('-') or txt.isdigit():
-            try:
-                chat_id = int(txt)
-                try:
-                    ch = await message.bot.get_chat(chat_id)
-                    chat_title = ch.title or str(chat_id)
-                except Exception:
-                    chat_title = str(chat_id)
-            except ValueError:
-                await message.answer("Не похоже на ID. Пришли число или @username или перешли сообщение.")
-                return
-    if chat_id is None:
-        await message.answer("Не понял. Перешли сообщение из чата или дай @username/ID.")
-        return
-
-    autopub_service.set_autopub_config(chat_id=chat_id, chat_title=chat_title or '')
-    await state.clear()
-    await message.answer(
-        f"✅ Чат сохранён: <code>{chat_id}</code>"
-        + (f" ({chat_title})" if chat_title else ""))
-
-
-@router.callback_query(F.data == "apub:set_channel", IsAdmin())
-async def cb_set_channel(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AutoPubStates.waiting_channel_id)
-    await call.message.answer(
-        "📢 <b>На какой канал слать анонсы?</b>\n\n"
-        "Перешли пост с канала, или отправь <code>@username</code> "
-        "или ID <code>-100xxxxxxxxxx</code>.\n\n"
-        "Бот должен быть админом канала!\n\n"
-        "/cancel для отмены.")
-    await call.answer()
-
-
-@router.message(AutoPubStates.waiting_channel_id, IsAdmin())
-async def msg_set_channel(message: Message, state: FSMContext):
-    if message.text and message.text.startswith('/cancel'):
-        await state.clear()
-        await message.answer("❌ Отменено.")
-        return
-    channel_id = None
-    title = None
-    if message.forward_from_chat:
-        channel_id = message.forward_from_chat.id
-        title = message.forward_from_chat.title or ''
-    elif message.text:
-        txt = message.text.strip()
-        if txt.startswith('@'):
-            try:
-                ch = await message.bot.get_chat(txt)
-                channel_id = ch.id
-                title = ch.title or txt
-            except Exception as e:
-                await message.answer(f"Не нашёл канал: {e}")
-                return
-        elif txt.startswith('-') or txt.isdigit():
-            try:
-                channel_id = int(txt)
-            except ValueError:
-                await message.answer("Не похоже на ID.")
-                return
-    if channel_id is None:
-        await message.answer("Не понял. Перешли пост, или дай @username/ID.")
-        return
-    autopub_service.set_autopub_config(channel_id=channel_id)
-    await state.clear()
-    await message.answer(
-        f"✅ Канал сохранён: <code>{channel_id}</code>"
-        + (f" ({title})" if title else ""))
-
-
-@router.callback_query(F.data == "apub:set_link", IsAdmin())
-async def cb_set_link(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AutoPubStates.waiting_invite_link)
-    await call.message.answer(
-        "🔗 <b>Пригласительная ссылка на чат</b>\n\n"
-        "Отправь полную ссылку, по которой юзеры зайдут в чат с тестами.\n\n"
-        "Например:\n"
-        "<code>https://t.me/+fo17_e1XrBAzZTEy</code>\n\n"
-        "/cancel для отмены.")
-    await call.answer()
-
-
-@router.message(AutoPubStates.waiting_invite_link, IsAdmin())
-async def msg_set_link(message: Message, state: FSMContext):
-    if message.text and message.text.startswith('/cancel'):
-        await state.clear()
-        await message.answer("❌ Отменено.")
-        return
-    link = (message.text or "").strip()
-    if not link.startswith(('http://', 'https://', 't.me/')):
-        await message.answer("Не похоже на ссылку. Отправь полный URL.")
-        return
-    autopub_service.set_autopub_config(invite_link=link)
-    await state.clear()
-    await message.answer(f"✅ Ссылка сохранена: {link}")
-
-
-# ===================== ЗАПУСК СЕРИИ =====================
-# Сценарий: выбрал раздел → отметил тесты галочками →
-# выбрал время → бот публикует по очереди
-
-@router.callback_query(F.data == "apub:start", IsAdmin())
-async def cb_start_series(call: CallbackQuery, state: FSMContext):
-    """Шаг 1: показываем разделы для выбора тестов."""
-    cfg = autopub_service.get_autopub_config()
-    if not cfg.get('chat_id'):
-        await call.answer(
-            "Сначала задай чат для публикации в Настройках!",
-            show_alert=True)
-        return
-    await state.update_data(apub_selected=[])
-    await _show_categories(call.message, state)
-    await call.answer()
-
-
-async def _show_categories(msg_obj, state: FSMContext):
-    data = await state.get_data()
-    selected = set(data.get('apub_selected') or [])
-
-    from collections import defaultdict
-    by_cat = defaultdict(list)
-    tests = db.fetchall(
-        "SELECT id, title, category_id FROM tests "
-        "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-        "AND COALESCE(is_private,0)=0")
-    for tst in tests:
-        by_cat[tst.get('category_id')].append(tst)
-
-    if not tests:
-        await msg_obj.answer("⚠️ Нет ни одного бесплатного теста.")
-        return
-
-    text = (f"🚀 <b>Запуск серии тестов</b>\n\n"
-            f"✅ Выбрано: <b>{len(selected)}</b>\n\n"
-            f"👇 Выбери раздел — внутри отметишь тесты галочками.")
-
-    kb = InlineKeyboardBuilder()
-    cats = db.fetchall("SELECT * FROM test_categories ORDER BY id")
-    for c in cats:
-        cat_tests = by_cat.get(c['id'], [])
-        if not cat_tests:
-            continue
-        sel_cnt = sum(1 for t in cat_tests if t['id'] in selected)
-        emoji = c.get('emoji') or '📚'
-        kb.button(text=f"{emoji} {c['name']} ({sel_cnt}/{len(cat_tests)})",
-                  callback_data=f"apubcat:{c['id']}")
-    no_cat = by_cat.get(None, [])
-    if no_cat:
-        sel_cnt = sum(1 for t in no_cat if t['id'] in selected)
-        kb.button(text=f"📭 Без раздела ({sel_cnt}/{len(no_cat)})",
-                  callback_data="apubcat:none")
-    if selected:
-        kb.button(text=f"➡️ Далее ({len(selected)} тестов)",
-                  callback_data="apub:choose_mode")
-    kb.button(text="❌ Отмена", callback_data="adm:autopub")
-    kb.adjust(1)
-    try:
-        await msg_obj.edit_text(text, reply_markup=kb.as_markup(),
-                                  parse_mode="HTML")
-    except Exception:
-        await msg_obj.answer(text, reply_markup=kb.as_markup(),
-                               parse_mode="HTML")
-
-
-@router.callback_query(F.data.startswith("apubcat:"), IsAdmin())
-async def cb_apub_category(call: CallbackQuery, state: FSMContext):
-    arg = call.data.split(":")[1]
-    data = await state.get_data()
-    selected = set(data.get('apub_selected') or [])
-    if arg == "none":
-        tests = db.fetchall(
-            "SELECT id, title FROM tests "
-            "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id IS NULL "
-            "ORDER BY id DESC")
-        cat_title = "📭 Без раздела"
-    else:
-        try:
-            cat_id = int(arg)
-        except ValueError:
-            await call.answer()
-            return
-        cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
-        tests = db.fetchall(
-            "SELECT id, title FROM tests "
-            "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id=? "
-            "ORDER BY id DESC", (cat_id,))
-        cat_title = f"{cat.get('emoji') or '📚'} {cat['name']}"
-
-    if not tests:
-        await call.answer("Нет тестов в разделе.", show_alert=True)
-        return
-
-    in_sel = sum(1 for t in tests if t['id'] in selected)
-    text = (f"<b>{cat_title}</b>\n\n"
-            f"✅ Отмечено: <b>{in_sel}/{len(tests)}</b>\n\n"
-            f"Тапни тест чтобы отметить/снять галочку.")
-    kb = InlineKeyboardBuilder()
-    for t in tests:
-        mark = "✅" if t['id'] in selected else "▫️"
-        kb.button(text=f"{mark} {t['title'][:40]}",
-                  callback_data=f"apubtog:{t['id']}:{arg}")
-    if in_sel == len(tests):
-        kb.button(text="◻️ Снять все в разделе",
-                  callback_data=f"apuball:{arg}:off")
-    else:
-        kb.button(text="☑️ Отметить все в разделе",
-                  callback_data=f"apuball:{arg}:on")
-    kb.button(text="↩️ К разделам", callback_data="apub:back_cats")
-    kb.adjust(1)
-    try:
-        await call.message.edit_text(text, reply_markup=kb.as_markup(),
-                                       parse_mode="HTML")
-    except Exception:
-        await call.message.answer(text, reply_markup=kb.as_markup(),
-                                    parse_mode="HTML")
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("apubtog:"), IsAdmin())
-async def cb_apub_toggle(call: CallbackQuery, state: FSMContext):
-    try:
-        _, tid, cat_arg = call.data.split(":")
-        tid = int(tid)
-    except (ValueError, IndexError):
-        await call.answer()
-        return
-    data = await state.get_data()
-    selected = set(data.get('apub_selected') or [])
-    if tid in selected:
-        selected.discard(tid)
-    else:
-        selected.add(tid)
-    await state.update_data(apub_selected=list(selected))
-    fake = type('F', (), {
-        'data': f"apubcat:{cat_arg}", 'message': call.message,
-        'from_user': call.from_user, 'bot': call.bot, 'answer': call.answer})()
-    await cb_apub_category(fake, state)
-
-
-@router.callback_query(F.data.startswith("apuball:"), IsAdmin())
-async def cb_apub_all(call: CallbackQuery, state: FSMContext):
-    try:
-        _, arg, action = call.data.split(":")
-    except ValueError:
-        await call.answer()
-        return
-    if arg == "none":
-        tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id IS NULL")
-    else:
-        try:
-            cat_id = int(arg)
-        except ValueError:
-            await call.answer()
-            return
-        tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id=?", (cat_id,))
-    data = await state.get_data()
-    selected = set(data.get('apub_selected') or [])
-    if action == "on":
-        for t in tests:
-            selected.add(t['id'])
-    else:
-        for t in tests:
-            selected.discard(t['id'])
-    await state.update_data(apub_selected=list(selected))
-    fake = type('F', (), {
-        'data': f"apubcat:{arg}", 'message': call.message,
-        'from_user': call.from_user, 'bot': call.bot, 'answer': call.answer})()
-    await cb_apub_category(fake, state)
-
-
-@router.callback_query(F.data == "apub:back_cats", IsAdmin())
-async def cb_apub_back_cats(call: CallbackQuery, state: FSMContext):
-    await _show_categories(call.message, state)
-    await call.answer()
-
-
-@router.callback_query(F.data == "apub:choose_mode", IsAdmin())
-async def cb_choose_mode(call: CallbackQuery, state: FSMContext):
-    """Шаг 2: выбор режима — микс или по очереди."""
-    data = await state.get_data()
-    selected = list(data.get('apub_selected') or [])
-    if not selected:
-        await call.answer("Ничего не выбрано.", show_alert=True)
-        return
-    if len(selected) > 4:
-        await call.answer(
-            "Для микса максимум 4 теста. Сними галочки лишних.",
-            show_alert=True)
-        return
-    kb = InlineKeyboardBuilder()
-    if len(selected) >= 2:
-        kb.button(text=f"🎲 МИКС: 10 вопросов из всех",
-                  callback_data="apub:mode:mix")
-    kb.button(text=f"📚 По очереди (целиком)",
-              callback_data="apub:mode:full")
-    kb.button(text="↩️ Назад", callback_data="apub:back_cats")
-    kb.adjust(1)
-    text = (
-        f"⚙️ <b>Как публиковать?</b>\n\n"
-        f"Выбрано тестов: <b>{len(selected)}</b>\n\n"
-        f"🎲 <b>МИКС</b> — бот возьмёт <b>10 вопросов</b>, поделит "
-        f"поровну из каждого теста, добавит рандом для добора. "
-        f"В чате один большой квиз.\n\n"
-        f"📚 <b>По очереди</b> — публикует тесты целиком, каждый отдельным лобби."
-    )
-    try:
-        await call.message.edit_text(text, reply_markup=kb.as_markup(),
-                                       parse_mode="HTML")
-    except Exception:
-        pass
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("apub:mode:"), IsAdmin())
-async def cb_set_mode(call: CallbackQuery, state: FSMContext):
-    mode = call.data.split(":")[2]
-    if mode not in ("mix", "full"):
-        await call.answer()
-        return
-    await state.update_data(apub_mode=mode)
-    await _show_template_picker(call, state)
-
-
-async def _show_template_picker(call: CallbackQuery, state: FSMContext):
-    """Шаг 3: выбор шаблона анонса."""
-    from services import autopub_service
-    kb = InlineKeyboardBuilder()
-    for i, tpl in enumerate(autopub_service.ANNOUNCE_TEMPLATES):
-        kb.button(text=tpl['name'], callback_data=f"apub:tpl:{i}")
-    kb.button(text="↩️ Назад", callback_data="apub:choose_mode")
-    kb.adjust(1)
-    # Превью первого шаблона
-    cfg = autopub_service.get_autopub_config()
-    invite = cfg.get('invite_link') or 'https://t.me/...'
-    preview = autopub_service.ANNOUNCE_TEMPLATES[0]['build'](
-        "Казахское ханство", "сейчас", 10, invite)
-    text = (f"📝 <b>Выбери шаблон анонса</b>\n\n"
-            f"<i>Превью «{autopub_service.ANNOUNCE_TEMPLATES[0]['name']}»:</i>\n"
-            f"━━━━━━━━━━\n{preview}\n━━━━━━━━━━")
-    try:
-        await call.message.edit_text(text, reply_markup=kb.as_markup(),
-                                       parse_mode="HTML",
-                                       disable_web_page_preview=True)
-    except Exception:
-        pass
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("apub:tpl:"), IsAdmin())
-async def cb_set_template(call: CallbackQuery, state: FSMContext):
-    try:
-        tpl_id = int(call.data.split(":")[2])
-    except (ValueError, IndexError):
-        await call.answer()
-        return
-    await state.update_data(apub_template=tpl_id)
-    # Шаг 4: время
-    await _show_time_picker(call, state)
-
-
-async def _show_time_picker(call: CallbackQuery, state: FSMContext):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🚀 Прямо сейчас", callback_data="apub:when:0")
-    kb.button(text="⏰ Через 5 мин", callback_data="apub:when:5")
-    kb.button(text="⏰ Через 15 мин", callback_data="apub:when:15")
-    kb.button(text="⏰ Через 30 мин", callback_data="apub:when:30")
-    kb.button(text="⏰ Через 1 час", callback_data="apub:when:60")
-    kb.button(text="⏰ Через 3 часа", callback_data="apub:when:180")
-    kb.button(text="✏️ Ввести минуты вручную", callback_data="apub:when:manual")
-    kb.button(text="↩️ Назад", callback_data="apub:choose_mode")
-    kb.adjust(2, 2, 2, 1, 1)
-    data = await state.get_data()
-    mode = data.get('apub_mode', 'mix')
-    mode_label = "🎲 Микс из 10 вопросов" if mode == "mix" else "📚 По очереди"
-    text = (f"⏰ <b>Когда запустить?</b>\n\n"
-            f"Режим: {mode_label}\n\n"
-            f"<i>«Прямо сейчас» — бот сразу запустит лобби. "
-            f"В чате появится карточка теста, нужно 2 человека "
-            f"чтобы нажали «Пройти тест» — потом вопросы.</i>")
-    try:
-        await call.message.edit_text(text, reply_markup=kb.as_markup(),
-                                       parse_mode="HTML")
-    except Exception:
-        pass
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("apub:when:"), IsAdmin())
-async def cb_when_chosen(call: CallbackQuery, state: FSMContext):
-    arg = call.data.split(":")[2]
-    if arg == "manual":
-        await state.set_state(AutoPubStates.waiting_custom_time)
-        await call.message.answer(
-            "✏️ Введи через сколько минут запустить (от 0 до 10080):")
-        await call.answer()
-        return
-    try:
-        minutes = int(arg)
-    except ValueError:
-        await call.answer()
-        return
-    await _enqueue_series(call, state, minutes)
-
-
-@router.message(AutoPubStates.waiting_custom_time, IsAdmin())
-async def msg_custom_time(message: Message, state: FSMContext):
-    if message.text and message.text.startswith('/cancel'):
-        await state.clear()
-        await message.answer("❌ Отменено.")
-        return
-    txt = (message.text or "").strip()
-    if not txt.isdigit():
-        await message.answer("Введи число (минуты).")
-        return
-    minutes = int(txt)
-    if not 0 <= minutes <= 10080:
-        await message.answer("От 0 до 10080 минут (7 дней).")
-        return
-    await _enqueue_series_msg(message, state, minutes)
-
-
-async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
-    data = await state.get_data()
-    selected = list(data.get('apub_selected') or [])
-    mode = data.get('apub_mode', 'mix')
-    tpl_id = data.get('apub_template', 0)
-    lang = 'ru'  # язык по умолчанию для микса
-    if not selected:
-        await call.answer("Список пуст.", show_alert=True)
-        return
-
-    if mode == 'mix' and len(selected) >= 2:
-        # Создаём один большой микс
-        mix_id = autopub_service.create_mixed_test(
-            selected, call.from_user.id, total=10, language=lang)
-        if not mix_id:
-            await call.answer("Не смог собрать микс.", show_alert=True)
-            return
-        run_at = datetime.utcnow() + timedelta(minutes=minutes)
-        import time as _time
-        series_id = f"s{int(_time.time())}"
-        # Один тест в серии (микс)
-        autopub_service.enqueue_test(
-            mix_id, run_at, call.from_user.id,
-            series_id=series_id, series_pos=0, series_total=1,
-            series_test_ids=str(mix_id))
-        # Состояние серии — чтобы после finish открылся чат
-        autopub_service.save_series_state(
-            series_id, str(mix_id), 1, call.from_user.id)
-        # Если время в будущем — анонс СРАЗУ С ТЕМАМИ
-        if minutes > 0:
-            when_str = _humanize_minutes(minutes)
-            mix_test = db.fetchone("SELECT * FROM tests WHERE id=?", (mix_id,))
-            try:
-                await autopub_service.announce_batch_with_topics(
-                    call.bot, [dict(mix_test)], when_str)
+                db.execute(sql)
             except Exception:
                 pass
-        # minutes == 0 — worker сам отправит полный анонс «уже идёт»
+    except Exception as e:
+        log.exception("ensure_schedule_table: %s", e)
 
-        await state.clear()
-        when_human = _humanize_minutes(minutes)
-        summary = (
-            f"✅ <b>МИКС из 10 вопросов создан!</b>\n\n"
-            f"Использовано тестов: <b>{len(selected)}</b>\n"
-            f"Запуск: <b>{when_human}</b>\n\n"
-            + (f"📢 Короткий анонс отправлен. Когда время подойдёт — "
-              f"бот отправит полный анонс с темой.\n" if minutes > 0 else
-              f"🚀 Стартуем! Бот сейчас отправит анонс и откроет лобби в чате.\n")
-            + f"\nНужно <b>2 человека</b> в чате, чтобы нажали «Пройти тест».")
-    else:
-        # По очереди — ЦЕПОЧКОЙ. В очередь ставим только ПЕРВЫЙ тест.
-        # Остальные запускаются по факту завершения предыдущего.
-        import random as _r
-        import time as _time
-        _r.shuffle(selected)
-        base = datetime.utcnow() + timedelta(minutes=minutes)
-        series_id = f"s{int(_time.time())}"
-        series_test_ids = ",".join(str(t) for t in selected)
 
-        first_tid = selected[0]
-        autopub_service.enqueue_test(
-            first_tid, base, call.from_user.id,
-            series_id=series_id, series_pos=0,
-            series_total=len(selected),
-            series_test_ids=series_test_ids)
-        # Сохраняем «состояние серии» для цепочки
-        autopub_service.save_series_state(
-            series_id, series_test_ids, len(selected),
-            call.from_user.id)
-        enqueued = len(selected)
+def enqueue_test(test_id: int, run_at: datetime, created_by: int,
+                  series_id: str = '', series_pos: int = 0,
+                  series_total: int = 1, series_test_ids: str = '') -> int:
+    """Поставить тест в очередь на публикацию."""
+    cur = db.execute(
+        "INSERT INTO autopub_queue (test_id, run_at, created_by, "
+        "series_id, series_pos, series_total, series_test_ids) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (test_id, run_at.isoformat(), created_by,
+          series_id, series_pos, series_total, series_test_ids))
+    return cur.lastrowid
 
-        # Пре-анонс СРАЗУ С ТЕМАМИ если время в будущем
-        if minutes > 0:
-            when_str = _humanize_minutes(minutes)
-            tests_obj = []
-            for tid in selected:
-                t = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
-                if t:
-                    tests_obj.append(dict(t))
-            try:
-                await autopub_service.announce_batch_with_topics(
-                    call.bot, tests_obj, when_str)
-            except Exception as e:
-                log.warning("pre-announce topics: %s", e)
-        # При minutes == 0 worker сам отправит полный анонс с темами
 
-        await state.clear()
-        when_human = _humanize_minutes(minutes)
-        summary = (
-            f"✅ <b>Запланировано {enqueued} тестов!</b>\n\n"
-            f"Первый — <b>{when_human}</b>\n"
-            f"Следующие — сразу после результатов предыдущего (через 20 сек)\n\n"
-            + (f"📢 Анонс с темами отправлен на канал." if minutes > 0
-              else "🚀 Стартуем! Бот сейчас отправит анонс."))
+def list_pending() -> list:
+    return db.fetchall(
+        "SELECT * FROM autopub_queue WHERE status='pending' "
+        "ORDER BY run_at LIMIT 100")
 
+
+def cancel_pending(qid: int):
+    db.execute("UPDATE autopub_queue SET status='cancelled' WHERE id=?", (qid,))
+
+
+# ===================== ПУБЛИКАЦИЯ =====================
+
+async def publish_test_to_chat(bot: Bot, test_id: int) -> bool:
+    """Запустить лобби теста в чате (как групповой квиз, ждёт 2 игроков)."""
+    cfg = get_autopub_config()
+    chat_id = cfg['chat_id']
+    if not chat_id:
+        log.warning("publish_test_to_chat: chat_id не задан")
+        return False
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+    if not test:
+        return False
+    questions = db.fetchall(
+        "SELECT id FROM questions WHERE test_id=?", (test_id,))
+    if not questions:
+        return False
+    # Запускаем лобби через group_quiz_service
+    from services import group_quiz_service
+    # Прорчищаем потенциально зависшие лобби в этом чате
     try:
-        await call.message.edit_text(summary, reply_markup=_main_menu_kb(),
-                                       parse_mode="HTML")
+        existing = db.fetchone(
+            "SELECT id FROM group_quizzes WHERE chat_id=? AND status IN ('lobby','running')",
+            (int(chat_id),))
+        if existing:
+            await group_quiz_service.stop_quiz(bot, int(chat_id), 0)
+            await asyncio.sleep(1)
     except Exception:
-        await call.message.answer(summary, reply_markup=_main_menu_kb(),
-                                    parse_mode="HTML")
-    await call.answer("✅")
+        pass
+    try:
+        # admin_tg_id = 0 — системный запуск
+        await group_quiz_service.start_lobby(
+            bot, dict(test), int(chat_id),
+            admin_tg_id=0,
+            language=test.get('language') or 'ru')
+        return True
+    except Exception as e:
+        log.exception("publish_test_to_chat lobby: %s", e)
+        return False
 
 
-async def _noop_answer(*a, **k):
-    pass
-
-
-async def _enqueue_series_msg(message: Message, state: FSMContext, minutes: int):
-    """Ручной ввод минут — переиспользуем логику через fake-call."""
-    fake_call = type('F', (), {
-        'data': '',
-        'message': message,
-        'from_user': message.from_user,
-        'bot': message.bot,
-        'answer': _noop_answer
-    })()
-    await _enqueue_series(fake_call, state, minutes)
-
-
-# ===================== ОЧЕРЕДЬ =====================
-
-@router.callback_query(F.data == "apub:queue", IsAdmin())
-async def cb_show_queue(call: CallbackQuery):
-    rows = autopub_service.list_pending()
-    if not rows:
-        text = "📋 <b>Очередь пуста.</b>"
-        kb = InlineKeyboardBuilder()
-        kb.button(text="↩️ Назад", callback_data="adm:autopub")
-        kb.adjust(1)
+async def publish_now_with_announce(bot: Bot, test_id: int,
+                                      template_id: int = 0) -> bool:
+    """
+    Опубликовать тест прямо сейчас:
+      1. Анонс на канале (без таймера, текст «уже идёт»)
+      2. Лобби в чате
+    """
+    cfg = get_autopub_config()
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+    if not test:
+        return False
+    channel_id = cfg.get('channel_id')
+    invite = cfg.get('invite_link') or ''
+    qc = db.fetchone(
+        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test_id,))['c']
+    if channel_id:
         try:
-            await call.message.edit_text(text, reply_markup=kb.as_markup(),
-                                           parse_mode="HTML")
+            await bot.send_message(
+                int(channel_id),
+                announce_now_text(template_id, test['title'], qc, invite),
+                parse_mode="HTML",
+                disable_web_page_preview=False)
+        except Exception as e:
+            log.warning("announce_now: %s", e)
+    return await publish_test_to_chat(bot, test_id)
+
+
+async def announce_test_on_channel(bot: Bot, test: dict, when_str: str,
+                                     template_id: int = 0) -> bool:
+    """Анонс на канале со ссылкой на чат. template_id — какой шаблон текста."""
+    cfg = get_autopub_config()
+    channel_id = cfg['channel_id']
+    if not channel_id:
+        log.warning("announce: channel_id не задан")
+        return False
+    invite = cfg.get('invite_link') or ''
+    qcount = db.fetchone(
+        'SELECT COUNT(*) AS c FROM questions WHERE test_id=?',
+        (test['id'],))['c']
+    title = test['title']
+
+    text = build_announce_text(template_id, title, when_str, qcount, invite)
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("announce: %s", e)
+        return False
+
+
+# ===================== ШАБЛОНЫ АНОНСА =====================
+
+ANNOUNCE_TEMPLATES = [
+    {
+        "name": "🔥 Зажигательный",
+        "build": lambda title, when, qc, link: (
+            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
+            f"📚 Тема: <b>«{title}»</b>\n"
+            f"⏰ Старт: <b>{when}</b>\n"
+            f"❓ {qc} вопросов на скорость\n\n"
+            f"💪 Проверь свои знания перед ЕНТ!\n"
+            f"⚡️ Соревнуйся с другими в реальном времени!\n"
+            f"🏆 Покажи кто тут лучший!\n\n"
+            f"👇 ЗАХОДИ В ЧАТ ПРЯМО СЕЙЧАС:\n{link}\n\n"
+            f"⏳ Не пропусти — места ограничены!"
+        ),
+    },
+    {
+        "name": "🎯 Деловой",
+        "build": lambda title, when, qc, link: (
+            f"🎯 <b>ОНЛАЙН-ТЕСТ В ЧАТЕ</b>\n\n"
+            f"📖 Раздел: <b>{title}</b>\n"
+            f"🕐 Время: <b>{when}</b>\n"
+            f"📝 Количество вопросов: {qc}\n\n"
+            f"Отличная возможность проверить подготовку к ЕНТ "
+            f"в формате живого соревнования.\n\n"
+            f"🔗 Присоединяйся к чату:\n{link}"
+        ),
+    },
+    {
+        "name": "🚀 Мотивационный",
+        "build": lambda title, when, qc, link: (
+            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
+            f"Сегодня разбираем: <b>«{title}»</b>\n"
+            f"⏰ Начинаем: <b>{when}</b>\n"
+            f"❓ Вопросов: {qc}\n\n"
+            f"Каждый тест — шаг к высокому баллу на ЕНТ! 📈\n"
+            f"Не учи в одиночку — соревнуйся и запоминай лучше! 🧠\n\n"
+            f"👇 Жми и заходи:\n{link}\n\n"
+            f"Увидимся в чате! 😎"
+        ),
+    },
+    {
+        "name": "⚡️ Краткий",
+        "build": lambda title, when, qc, link: (
+            f"⚡️ <b>ТЕСТ: {title}</b>\n"
+            f"⏰ {when} · {qc} вопросов\n\n"
+            f"Заходи в чат 👇\n{link}"
+        ),
+    },
+]
+
+
+def build_announce_text(template_id: int, title: str, when: str,
+                         qc: int, link: str) -> str:
+    if template_id < 0 or template_id >= len(ANNOUNCE_TEMPLATES):
+        template_id = 0
+    return ANNOUNCE_TEMPLATES[template_id]["build"](title, when, qc, link)
+
+
+def build_series_announce_text(template_id: int, titles: list[str],
+                                  when: str, link: str) -> str:
+    """Анонс серии нескольких тестов одним сообщением."""
+    if template_id < 0 or template_id >= len(ANNOUNCE_TEMPLATES):
+        template_id = 0
+
+    # Список тем красивым списком
+    topics = "\n".join(f"• <b>{t}</b>" for t in titles)
+    count = len(titles)
+
+    if template_id == 0:  # Зажигательный
+        return (
+            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
+            f"📚 Сегодня нас ждёт <b>серия из {count} тестов</b>:\n\n"
+            f"{topics}\n\n"
+            f"⏰ Старт: <b>{when}</b>\n\n"
+            f"💪 Проверь свои знания перед ЕНТ!\n"
+            f"⚡️ Соревнуйся с другими в реальном времени!\n"
+            f"🏆 Покажи кто тут лучший!\n\n"
+            f"👇 ЗАХОДИ В ЧАТ ПРЯМО СЕЙЧАС:\n{link}\n\n"
+            f"⏳ Не пропусти!")
+    elif template_id == 1:  # Деловой
+        return (
+            f"🎯 <b>СЕРИЯ ОНЛАЙН-ТЕСТОВ</b>\n\n"
+            f"📖 Темы ({count}):\n\n{topics}\n\n"
+            f"🕐 Время начала: <b>{when}</b>\n\n"
+            f"Отличная возможность проверить подготовку к ЕНТ "
+            f"в формате живого соревнования.\n\n"
+            f"🔗 Присоединяйся к чату:\n{link}")
+    elif template_id == 2:  # Мотивационный
+        return (
+            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
+            f"Сегодня разбираем <b>{count} тем</b>:\n\n{topics}\n\n"
+            f"⏰ Начинаем: <b>{when}</b>\n\n"
+            f"Каждый тест — шаг к высокому баллу на ЕНТ! 📈\n"
+            f"Не учи в одиночку — соревнуйся и запоминай лучше! 🧠\n\n"
+            f"👇 Жми и заходи:\n{link}\n\n"
+            f"Увидимся в чате! 😎")
+    else:  # Краткий
+        return (
+            f"⚡️ <b>СЕРИЯ ТЕСТОВ</b>\n\n"
+            f"{topics}\n\n"
+            f"⏰ {when}\n\n"
+            f"Заходи в чат 👇\n{link}")
+
+
+def build_series_now_text(template_id: int, titles: list[str], link: str) -> str:
+    """Анонс серии когда стартует прямо сейчас."""
+    topics = "\n".join(f"• <b>{t}</b>" for t in titles)
+    count = len(titles)
+    return (
+        f"🟢 <b>СЕРИЯ ТЕСТОВ УЖЕ ИДЁТ!</b>\n\n"
+        f"📚 Сейчас в чате <b>{count} тестов</b>:\n\n{topics}\n\n"
+        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{link}\n\n"
+        f"Успей! ⏳")
+
+
+def announce_now_text(template_id: int, title: str, qc: int, link: str) -> str:
+    """Текст когда тест НАЧИНАЕТСЯ прямо сейчас (без таймера)."""
+    return (
+        f"🟢 <b>ТЕСТ УЖЕ ИДЁТ!</b>\n\n"
+        f"📚 <b>«{title}»</b>\n"
+        f"❓ {qc} вопросов\n\n"
+        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{link}\n\n"
+        f"Успей ответить! ⏳"
+    )
+
+
+async def announce_batch_on_channel(bot: Bot, tests: list[dict],
+                                      when_str: str,
+                                      template_id: int = 0) -> bool:
+    """ОДИН общий анонс на канале для нескольких тестов сразу."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    # Список тем
+    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
+    total_q = 0
+    for t in tests:
+        r = db.fetchone(
+            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (t['id'],))
+        total_q += (r['c'] if r else 0)
+
+    text = build_batch_announce_text(template_id, topics, len(tests),
+                                       total_q, when_str, invite)
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("batch announce: %s", e)
+        return False
+
+
+async def announce_batch_with_topics(bot: Bot, tests: list[dict],
+                                       when_str: str) -> bool:
+    """ПРЕД-анонс СРАЗУ С ТЕМАМИ (когда планируем на будущее)."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
+    total_q = 0
+    for t in tests:
+        r = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
+                         (t['id'],))
+        total_q += (r['c'] if r else 0)
+    text = (
+        f"🔥 <b>СКОРО ТЕСТЫ В ЧАТЕ!</b>\n\n"
+        f"📚 <b>Темы ({len(tests)}):</b>\n{topics}\n\n"
+        f"⏰ Начинаем: <b>{when_str}</b>\n"
+        f"❓ Всего вопросов: <b>{total_q}</b>\n\n"
+        f"👇 Заходи в чат заранее, чтобы успеть:\n{invite}"
+    )
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("announce with topics: %s", e)
+        return False
+
+
+# ===================== СОСТОЯНИЕ СЕРИИ (ЦЕПОЧКА) =====================
+
+def save_series_state(series_id: str, test_ids_csv: str,
+                       total: int, created_by: int):
+    """Сохранить состояние серии для запуска цепочкой."""
+    import json as _json
+    state = {
+        "series_id": series_id,
+        "test_ids": [int(x) for x in test_ids_csv.split(',') if x.strip().isdigit()],
+        "total": total,
+        "created_by": created_by,
+        "current_index": 0,
+    }
+    _set_setting(f"series_state:{series_id}", _json.dumps(state))
+    # Запомним «активную» серию для чата
+    _set_setting("active_series_id", series_id)
+
+
+def get_active_series() -> Optional[dict]:
+    import json as _json
+    sid = _get_setting("active_series_id")
+    if not sid:
+        return None
+    raw = _get_setting(f"series_state:{sid}")
+    if not raw:
+        return None
+    try:
+        return _json.loads(raw)
+    except Exception:
+        return None
+
+
+def _update_series_state(state: dict):
+    import json as _json
+    _set_setting(f"series_state:{state['series_id']}", _json.dumps(state))
+
+
+def clear_active_series():
+    _set_setting("active_series_id", "")
+
+
+async def on_series_test_finished(bot: Bot, test_id: int, chat_id: int):
+    """
+    Вызывается когда групповой тест завершился.
+    Если это тест из активной серии — запустить следующий через 20 сек,
+    либо (если последний) открыть чат с поздравлением.
+    """
+    state = get_active_series()
+    if not state:
+        # Нет активной серии — просто открыть чат если был закрыт
+        return
+    test_ids = state.get('test_ids') or []
+    cur_idx = state.get('current_index', 0)
+
+    # Проверяем что завершившийся тест — это текущий в серии
+    if cur_idx >= len(test_ids):
+        clear_active_series()
+        return
+    # Сверяем (учёт mix — там test_id может отличаться, поэтому просто двигаем)
+    is_last = (cur_idx >= len(test_ids) - 1)
+
+    if is_last:
+        # Последний тест серии — открываем чат с поздравлением
+        await _finish_series_open_chat(bot, chat_id)
+        clear_active_series()
+    else:
+        # Двигаем индекс и запускаем следующий
+        next_idx = cur_idx + 1
+        state['current_index'] = next_idx
+        _update_series_state(state)
+        next_test_id = test_ids[next_idx]
+        next_test = db.fetchone("SELECT * FROM tests WHERE id=?", (next_test_id,))
+        if not next_test:
+            await _finish_series_open_chat(bot, chat_id)
+            clear_active_series()
+            return
+        # Анонс «через 20 сек новый тест» — В ЧАТ, сразу
+        try:
+            await announce_single_reminder(bot, dict(next_test))
         except Exception:
             pass
-        await call.answer()
+        # Ждём 20 сек и запускаем следующий
+        import asyncio as _asyncio
+        _asyncio.create_task(
+            _launch_next_after_delay(bot, next_test_id, 20))
+
+
+async def _launch_next_after_delay(bot: Bot, test_id: int, delay: int):
+    import asyncio as _asyncio
+    try:
+        await _asyncio.sleep(delay)
+        await publish_test_to_chat(bot, test_id)
+    except _asyncio.CancelledError:
         return
-    lines = ["📋 <b>Очередь публикаций:</b>\n"]
-    kb = InlineKeyboardBuilder()
-    for r in rows[:20]:
-        test = db.fetchone("SELECT title FROM tests WHERE id=?", (r['test_id'],))
-        title = (test.get('title') if test else f"#{r['test_id']}")[:40]
+    except Exception as e:
+        log.warning("launch next: %s", e)
+
+
+async def _finish_series_open_chat(bot: Bot, chat_id: int):
+    """Открыть чат и поздравить после последнего теста серии."""
+    try:
+        await _unlock_chat_congrats(bot, chat_id)
+    except Exception as e:
+        log.warning("finish series open: %s", e)
+
+
+async def announce_batch_short(bot: Bot, count: int, when_str: str) -> bool:
+    """Короткий ПРЕД-анонс: только когда начнётся, без тем."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    text = (
+        f"🔔 <b>СКОРО ТЕСТ В ЧАТЕ</b>\n\n"
+        f"⏰ Начинаем: <b>{when_str}</b>\n"
+        f"📚 Тестов в серии: <b>{count}</b>\n\n"
+        f"📩 Когда время подойдёт — пришлю темы и ссылку.\n\n"
+        f"🔗 Чат: {invite}"
+    )
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("short announce: %s", e)
+        return False
+
+
+async def announce_batch_reminder(bot: Bot, tests: list[dict]) -> bool:
+    """Краткое напоминание когда время подошло — темы + ссылка."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
+    text = (
+        f"⏰ <b>НАЧИНАЕМ!</b>\n\n"
+        f"📚 Темы:\n{topics}\n\n"
+        f"👇 Заходи в чат:\n{invite}"
+    )
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("reminder: %s", e)
+        return False
+
+
+async def _lock_chat(bot: Bot, chat_id: int) -> bool:
+    """Закрыть чат — только админы пишут."""
+    try:
+        from aiogram.types import ChatPermissions
+        perms = ChatPermissions(
+            can_send_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+        )
+        await bot.set_chat_permissions(chat_id, permissions=perms)
+        await bot.send_message(
+            chat_id,
+            "🔒 <b>Чат закрыт на время тестов</b>\n\n"
+            "Писать могут только админы.\n"
+            "После окончания серии тестов чат откроется автоматически.",
+            parse_mode="HTML")
+        return True
+    except Exception as e:
+        log.warning("lock chat failed: %s", e)
+        return False
+
+
+async def _unlock_chat(bot: Bot, chat_id: int) -> bool:
+    """Открыть чат обратно."""
+    try:
+        from aiogram.types import ChatPermissions
+        perms = ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+        )
+        await bot.set_chat_permissions(chat_id, permissions=perms)
+        await bot.send_message(
+            chat_id,
+            "🔓 <b>Чат открыт!</b>\n\n"
+            "Серия тестов окончена. Можно писать.\n"
+            "Спасибо всем участникам! 🎉",
+            parse_mode="HTML")
+        return True
+    except Exception as e:
+        log.warning("unlock chat failed: %s", e)
+        return False
+
+
+async def _unlock_chat_congrats(bot: Bot, chat_id: int) -> bool:
+    """Открыть чат после ВСЕЙ серии + большое поздравление."""
+    try:
+        from aiogram.types import ChatPermissions
+        perms = ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+        )
+        await bot.set_chat_permissions(chat_id, permissions=perms)
+    except Exception as e:
+        log.warning("unlock congrats perms: %s", e)
+    try:
+        await bot.send_message(
+            chat_id,
+            "🎉 <b>ВСЕ ТЕСТЫ ПРОЙДЕНЫ!</b>\n\n"
+            "Вы большие молодцы! 💪\n"
+            "Каждый тест — это шаг к высокому баллу на ЕНТ.\n\n"
+            "Надеюсь, вы получите <b>140/140</b>! 🏆\n\n"
+            "🔓 Чат снова открыт — общайтесь, обсуждайте вопросы.\n"
+            "До новых тестов! 🚀",
+            parse_mode="HTML")
+        return True
+    except Exception as e:
+        log.warning("unlock congrats msg: %s", e)
+        return False
+
+
+async def announce_single_reminder(bot: Bot, test: dict) -> bool:
+    """Короткое напоминание про следующий тест — в ЧАТЕ где идут тесты, не на канале."""
+    cfg = get_autopub_config()
+    chat_id = cfg.get('chat_id')
+    if not chat_id:
+        return False
+    text = (
+        f"⏳ <b>Через 20 сек — новый тест!</b>\n\n"
+        f"📚 <b>{test['title']}</b>\n\n"
+        f"Готовься! 🚀"
+    )
+    try:
+        await bot.send_message(int(chat_id), text,
+                                 parse_mode="HTML")
+        return True
+    except Exception as e:
+        log.warning("single reminder: %s", e)
+        return False
+
+
+async def announce_batch_now(bot: Bot, tests: list[dict],
+                                template_id: int = 0) -> bool:
+    """ОДИН анонс «уже идёт» для нескольких тестов сразу."""
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return False
+    invite = cfg.get('invite_link') or ''
+    topics = "\n".join(f"• {t['title']}" for t in tests[:10])
+    total_q = 0
+    for t in tests:
+        r = db.fetchone(
+            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (t['id'],))
+        total_q += (r['c'] if r else 0)
+    text = (
+        f"🟢 <b>ТЕСТЫ УЖЕ ИДУТ В ЧАТЕ!</b>\n\n"
+        f"📚 <b>Темы:</b>\n{topics}\n\n"
+        f"❓ Всего вопросов: {total_q}\n\n"
+        f"⚡️ Заходи в чат и участвуй прямо сейчас:\n{invite}\n\n"
+        f"Успей ответить! ⏳"
+    )
+    try:
+        await bot.send_message(int(channel_id), text,
+                                 parse_mode="HTML",
+                                 disable_web_page_preview=False)
+        return True
+    except Exception as e:
+        log.warning("batch announce now: %s", e)
+        return False
+
+
+BATCH_TEMPLATES = [
+    {
+        "name": "🔥 Зажигательный",
+        "build": lambda topics, n, qc, when, link: (
+            f"🔥🔥🔥 <b>ВНИМАНИЕ, БУДУЩИЕ СТУДЕНТЫ!</b> 🔥🔥🔥\n\n"
+            f"📚 <b>Темы ({n}):</b>\n{topics}\n\n"
+            f"⏰ Старт: <b>{when}</b>\n"
+            f"❓ Всего вопросов: <b>{qc}</b>\n\n"
+            f"💪 Проверь знания перед ЕНТ!\n"
+            f"⚡️ Соревнуйся в реальном времени!\n"
+            f"🏆 Покажи кто тут лучший!\n\n"
+            f"👇 ЗАХОДИ В ЧАТ:\n{link}\n\n"
+            f"⏳ Места ограничены!"
+        ),
+    },
+    {
+        "name": "🎯 Деловой",
+        "build": lambda topics, n, qc, when, link: (
+            f"🎯 <b>СЕРИЯ ОНЛАЙН-ТЕСТОВ В ЧАТЕ</b>\n\n"
+            f"📖 <b>Разделы ({n}):</b>\n{topics}\n\n"
+            f"🕐 Старт: <b>{when}</b>\n"
+            f"📝 Всего вопросов: {qc}\n\n"
+            f"Отличная возможность проверить подготовку к ЕНТ "
+            f"в формате живого соревнования.\n\n"
+            f"🔗 Чат:\n{link}"
+        ),
+    },
+    {
+        "name": "🚀 Мотивационный",
+        "build": lambda topics, n, qc, when, link: (
+            f"🚀 <b>ГОТОВ ПРОВЕРИТЬ СЕБЯ?</b>\n\n"
+            f"Сегодня разбираем <b>{n}</b> темы:\n{topics}\n\n"
+            f"⏰ Начинаем: <b>{when}</b>\n"
+            f"❓ Вопросов: {qc}\n\n"
+            f"Каждый тест — шаг к высокому баллу! 📈\n"
+            f"Не учи в одиночку — соревнуйся! 🧠\n\n"
+            f"👇 Чат:\n{link}\n\n"
+            f"Увидимся! 😎"
+        ),
+    },
+    {
+        "name": "⚡️ Краткий",
+        "build": lambda topics, n, qc, when, link: (
+            f"⚡️ <b>СЕРИЯ ТЕСТОВ ({n})</b>\n\n"
+            f"{topics}\n\n"
+            f"⏰ {when} · {qc} вопросов\n\n"
+            f"Заходи 👇\n{link}"
+        ),
+    },
+]
+
+
+def build_batch_announce_text(template_id: int, topics: str, n: int,
+                                qc: int, when: str, link: str) -> str:
+    if template_id < 0 or template_id >= len(BATCH_TEMPLATES):
+        template_id = 0
+    return BATCH_TEMPLATES[template_id]["build"](topics, n, qc, when, link)
+
+
+# ===================== МИКС ВОПРОСОВ ИЗ НЕСКОЛЬКИХ ТЕСТОВ =====================
+
+def create_mixed_test(test_ids: list[int], created_by: int,
+                       total: int = 10,
+                       language: str = 'ru') -> Optional[int]:
+    """
+    Создаёт временный тест-микс: берёт поровну вопросов из каждого теста,
+    добор рандомом до total. Вернёт id нового теста.
+    """
+    import random
+    if not test_ids:
+        return None
+    n = len(test_ids)
+    per = total // n        # поровну
+    remainder = total - per * n  # добор рандомом
+
+    selected_qids = []
+    pools = {}  # test_id -> список оставшихся вопросов
+
+    for tid in test_ids:
+        qs = db.fetchall(
+            "SELECT id FROM questions WHERE test_id=? ORDER BY RANDOM()", (tid,))
+        pool = [q['id'] for q in qs]
+        pools[tid] = pool
+        take = pool[:per]
+        selected_qids.extend(take)
+        pools[tid] = pool[per:]  # остаток для добора
+
+    # Добор остатка рандомом из всех оставшихся
+    leftover = []
+    for tid in test_ids:
+        leftover.extend(pools[tid])
+    random.shuffle(leftover)
+    selected_qids.extend(leftover[:remainder])
+
+    if not selected_qids:
+        return None
+
+    # Название микса
+    titles = []
+    for tid in test_ids:
+        tr = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+        if tr:
+            titles.append(tr['title'])
+    mix_title = " + ".join(titles[:3])
+    if len(mix_title) > 120:
+        mix_title = mix_title[:117] + "..."
+
+    # Берём время на вопрос из первого теста
+    first = db.fetchone("SELECT time_per_question FROM tests WHERE id=?",
+                         (test_ids[0],))
+    tpq = (first.get('time_per_question') if first else 30) or 30
+
+    # Создаём временный тест (помечаем is_mix=1, не показываем в каталоге)
+    cur = db.execute("""
+        INSERT INTO tests (title, description, language, time_per_question,
+                            is_paid, price, test_type, status, created_by,
+                            is_private)
+        VALUES (?, '', ?, ?, 0, 0, 'mix', 'mix_temp', ?, 1)
+    """, (f"🎲 {mix_title}", language, tpq, created_by))
+    mix_test_id = cur.lastrowid
+
+    # Копируем выбранные вопросы в новый тест
+    random.shuffle(selected_qids)
+    for order, qid in enumerate(selected_qids[:total]):
+        q = db.fetchone("SELECT * FROM questions WHERE id=?", (qid,))
+        if not q:
+            continue
+        qcur = db.execute("""
+            INSERT INTO questions (test_id, text, explanation, order_num, source_type)
+            VALUES (?, ?, ?, ?, 'mix')
+        """, (mix_test_id, q['text'], q.get('explanation') or '', order))
+        new_qid = qcur.lastrowid
+        opts = db.fetchall(
+            "SELECT * FROM question_options WHERE question_id=? ORDER BY order_num, id",
+            (qid,))
+        for j, o in enumerate(opts):
+            db.execute("""
+                INSERT INTO question_options (question_id, text, is_correct, order_num)
+                VALUES (?, ?, ?, ?)
+            """, (new_qid, o['text'], o['is_correct'], j))
+
+    return mix_test_id
+
+
+def cleanup_mix_test(test_id: int):
+    """Удалить временный микс-тест после использования."""
+    try:
+        qs = db.fetchall("SELECT id FROM questions WHERE test_id=?", (test_id,))
+        for q in qs:
+            db.execute("DELETE FROM question_options WHERE question_id=?", (q['id'],))
+        db.execute("DELETE FROM questions WHERE test_id=?", (test_id,))
+        db.execute("DELETE FROM tests WHERE id=? AND status='mix_temp'", (test_id,))
+    except Exception as e:
+        log.warning("cleanup_mix: %s", e)
+
+
+# ===================== ВОРКЕР =====================
+
+_worker_task: Optional[asyncio.Task] = None
+
+
+async def _worker_loop(bot: Bot):
+    log.info("autopub worker started")
+    while True:
         try:
-            dt = datetime.fromisoformat(r['run_at']).strftime('%d.%m %H:%M')
-        except Exception:
-            dt = r['run_at']
-        lines.append(f"• {dt} UTC — {utils.escape_html(title)}")
-        kb.button(text=f"❌ Отменить: {title[:25]} ({dt})",
-                  callback_data=f"apubcancel:{r['id']}")
-    kb.button(text="↩️ Назад", callback_data="adm:autopub")
-    kb.adjust(1)
-    text = "\n".join(lines)
-    try:
-        await call.message.edit_text(text, reply_markup=kb.as_markup(),
-                                       parse_mode="HTML")
-    except Exception:
-        pass
-    await call.answer()
+            await asyncio.sleep(10)
+            now = datetime.utcnow().isoformat()
+            rows = db.fetchall(
+                "SELECT * FROM autopub_queue "
+                "WHERE status='pending' AND run_at <= ? "
+                "ORDER BY run_at LIMIT 5", (now,))
+            for r in rows:
+                qid = r['id']
+                test_id = r['test_id']
+                series_pos = r.get('series_pos') or 0
+                series_total = r.get('series_total') or 1
+                series_ids_str = r.get('series_test_ids') or ''
+
+                db.execute("UPDATE autopub_queue SET status='running' WHERE id=?", (qid,))
+                try:
+                    posted_full_announce = False
+                    # Полный анонс с темами (для первого/единственного теста)
+                    if series_ids_str:
+                        try:
+                            ids = [int(x) for x in series_ids_str.split(',') if x.strip().isdigit()]
+                            tests_obj = []
+                            for tid in ids:
+                                t = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+                                if t:
+                                    tests_obj.append(dict(t))
+                            if tests_obj:
+                                if len(tests_obj) == 1:
+                                    test = tests_obj[0]
+                                    cfg = get_autopub_config()
+                                    chan = cfg.get('channel_id')
+                                    invite = cfg.get('invite_link') or ''
+                                    qc = db.fetchone(
+                                        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
+                                        (test['id'],))['c']
+                                    if chan:
+                                        try:
+                                            await bot.send_message(
+                                                int(chan),
+                                                announce_now_text(0, test['title'], qc, invite),
+                                                parse_mode="HTML",
+                                                disable_web_page_preview=False)
+                                            posted_full_announce = True
+                                        except Exception as e:
+                                            log.warning("now announce: %s", e)
+                                else:
+                                    ok = await announce_batch_reminder(bot, tests_obj)
+                                    if ok:
+                                        posted_full_announce = True
+                        except Exception as e:
+                            log.warning("series head reminder: %s", e)
+
+                    # Пауза чтобы юзеры успели зайти в чат
+                    if posted_full_announce:
+                        await asyncio.sleep(15)
+
+                    # Закрываем чат перед первым тестом серии
+                    cfg = get_autopub_config()
+                    chat_id_cfg = cfg.get('chat_id')
+                    if chat_id_cfg:
+                        try:
+                            await _lock_chat(bot, int(chat_id_cfg))
+                        except Exception as e:
+                            log.warning("lock on first: %s", e)
+
+                    # Запуск лобби. Цепочка следующих — через on_series_test_finished
+                    ok = await publish_test_to_chat(bot, test_id)
+                    if ok:
+                        db.execute("UPDATE autopub_queue SET status='done' WHERE id=?",
+                                    (qid,))
+                    else:
+                        db.execute(
+                            "UPDATE autopub_queue SET status='failed', error=? WHERE id=?",
+                            ('publish returned False', qid))
+                except Exception as e:
+                    log.exception("worker publish: %s", e)
+                    db.execute(
+                        "UPDATE autopub_queue SET status='failed', error=? WHERE id=?",
+                        (str(e)[:200], qid))
+        except asyncio.CancelledError:
+            log.info("autopub worker cancelled")
+            return
+        except Exception as e:
+            log.exception("worker loop: %s", e)
 
 
-@router.callback_query(F.data.startswith("apubcancel:"), IsAdmin())
-async def cb_cancel_queue(call: CallbackQuery):
+async def _delayed_unlock(bot: Bot, chat_id: int, delay_sec: int):
+    """Отложенно открыть чат (резервный механизм)."""
     try:
-        qid = int(call.data.split(":")[1])
-    except (ValueError, IndexError):
-        await call.answer()
+        await asyncio.sleep(delay_sec)
+        await _unlock_chat(bot, chat_id)
+    except asyncio.CancelledError:
         return
-    autopub_service.cancel_pending(qid)
-    await call.answer("✅ Отменено")
-    # Перерисуем
-    await cb_show_queue(call)
+    except Exception as e:
+        log.warning("delayed unlock: %s", e)
 
 
-# ===================== 10 СЛУЧАЙНЫХ ВОПРОСОВ НА КАНАЛ =====================
-
-@router.callback_query(F.data == "apub:random_canal", IsAdmin())
-async def cb_random_canal(call: CallbackQuery, state: FSMContext):
-    cfg = autopub_service.get_autopub_config()
-    if not cfg.get('channel_id'):
-        await call.answer("Сначала задай канал в Настройках!", show_alert=True)
+def start_worker(bot: Bot):
+    global _worker_task
+    if _worker_task and not _worker_task.done():
         return
-    # Выбор раздела для выборки вопросов
-    cats = db.fetchall("SELECT * FROM test_categories ORDER BY id")
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🎲 Из ВСЕХ разделов", callback_data="apubrnd:all:ru")
-    kb.button(text="🎲 Из ВСЕХ (қазақ)", callback_data="apubrnd:all:kz")
-    for c in cats:
-        emoji = c.get('emoji') or '📚'
-        kb.button(text=f"{emoji} {c['name']} (RU)",
-                  callback_data=f"apubrnd:{c['id']}:ru")
-        kb.button(text=f"{emoji} {c['name']} (KZ)",
-                  callback_data=f"apubrnd:{c['id']}:kz")
-    kb.button(text="↩️ Назад", callback_data="adm:autopub")
-    kb.adjust(2)
-    text = ("🎲 <b>10 случайных вопросов на канал</b>\n\n"
-            "Выбери из какого раздела взять вопросы.\n"
-            "Бот пришлёт 10 случайных Quiz Poll на канал.\n\n"
-            "<i>Берутся только из бесплатных и публичных тестов.</i>")
-    try:
-        await call.message.edit_text(text, reply_markup=kb.as_markup(),
-                                       parse_mode="HTML")
-    except Exception:
-        pass
-    await call.answer()
+    ensure_schedule_table()
+    _worker_task = asyncio.create_task(_worker_loop(bot))
 
 
-@router.callback_query(F.data.startswith("apubrnd:"), IsAdmin())
-async def cb_random_canal_do(call: CallbackQuery):
-    try:
-        _, arg, lang = call.data.split(":")
-    except ValueError:
-        await call.answer()
-        return
-    cat_id = None if arg == "all" else int(arg)
-    await call.answer("Публикую…")
-    sent, failed = await autopub_service.post_random_quiz_polls_to_channel(
-        call.bot, count=10, category_id=cat_id, language=lang)
-    msg = (f"✅ <b>Готово!</b>\n\n"
-            f"Отправлено вопросов: <b>{sent}</b>\n"
-            f"Ошибок: {failed}")
-    try:
-        await call.message.answer(msg, parse_mode="HTML")
-    except Exception:
-        pass
+# ===================== РАНДОМНЫЕ ВОПРОСЫ НА КАНАЛ =====================
+
+async def post_random_quiz_polls_to_channel(
+        bot: Bot, count: int = 10,
+        category_id: Optional[int] = None,
+        topic_id: Optional[int] = None,
+        language: str = 'ru',
+        bot_username: str = '') -> tuple[int, int]:
+    """
+    Опубликовать N рандомных Quiz Poll на канале БЕЗ таймера.
+    topic_id — если задан, берём вопросы только из этого теста.
+    Между вопросами задержка 10 сек. В конце — пост с кнопкой «Начать тестирование».
+    """
+    cfg = get_autopub_config()
+    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        return 0, 0
+
+    sql = """SELECT q.id, q.text, q.explanation, q.test_id
+             FROM questions q JOIN tests t ON t.id=q.test_id
+             WHERE t.status='active' AND t.is_paid=0
+               AND COALESCE(t.is_private,0)=0
+               AND t.language=?"""
+    args = [language]
+    if topic_id is not None:
+        sql += " AND t.id=?"
+        args.append(topic_id)
+    elif category_id is not None:
+        sql += " AND t.category_id=?"
+        args.append(category_id)
+    rows = db.fetchall(sql, tuple(args))
+    if not rows:
+        return 0, 0
+    sample = random.sample(rows, min(count, len(rows)))
+
+    sent = 0
+    failed = 0
+    for q in sample:
+        opts = db.fetchall(
+            "SELECT * FROM question_options WHERE question_id=? "
+            "ORDER BY order_num, id", (q['id'],))
+        if len(opts) < 2:
+            continue
+        correct_idx = 0
+        for i, o in enumerate(opts):
+            if o['is_correct']:
+                correct_idx = i
+                break
+        try:
+            await bot.send_poll(
+                int(channel_id),
+                question=q['text'][:300],
+                options=[o['text'][:100] for o in opts[:10]],
+                type='quiz',
+                correct_option_id=correct_idx,
+                is_anonymous=True,
+                # БЕЗ open_period — опрос без таймера
+                explanation=(q.get('explanation') or '')[:200] or None,
+            )
+            sent += 1
+            # Задержка 10 сек между вопросами
+            await asyncio.sleep(10)
+        except Exception as e:
+            log.warning("post random poll: %s", e)
+            failed += 1
+
+    # Финальный пост с призывом и кнопкой «Начать тестирование»
+    if sent > 0:
+        try:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            uname = bot_username.lstrip('@') if bot_username else ''
+            start_url = f"https://t.me/{uname}?start=quiz" if uname else None
+            kb = None
+            if start_url:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="🚀 Начать тестирование",
+                                         url=start_url)
+                ]])
+            await bot.send_message(
+                int(channel_id),
+                "📚 <b>Понравились вопросы?</b>\n\n"
+                "В нашем боте <b>намного больше тестов</b> по всем предметам ЕНТ!\n\n"
+                "✅ Проходи тесты в удобное время\n"
+                "⚔️ Соревнуйся в дуэлях с другими\n"
+                "🏆 Поднимайся в рейтинге\n"
+                "📊 Отслеживай свой прогресс\n\n"
+                "👇 <b>Как начать:</b>\n"
+                "1. Нажми кнопку ниже\n"
+                "2. Выбери язык\n"
+                "3. Тапни «📚 Пройти тест» и выбери тему\n\n"
+                "Удачи на ЕНТ! 💪",
+                reply_markup=kb,
+                parse_mode="HTML")
+        except Exception as e:
+            log.warning("final CTA: %s", e)
+
+    return sent, failed
