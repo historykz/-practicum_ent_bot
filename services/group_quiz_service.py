@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Конфиг
 MIN_PLAYERS = 2
 COUNTDOWN_SECONDS = 3
-LOBBY_TIMEOUT_SECONDS = 5 * 60  # 5 минут
+LOBBY_TIMEOUT_SECONDS = 10 * 60  # 10 минут
 
 # Активные таймеры на следующий вопрос: group_quiz_id -> Task
 _question_timers: dict[int, asyncio.Task] = {}
@@ -76,9 +76,10 @@ async def start_lobby(bot: Bot, test: dict, chat_id: int,
         f"🎲 <b>Приготовьтесь пройти тест «{title}»</b>\n\n"
         f"Автор: {escape_html(author)}\n"
         f"🖊 {qcount} вопросов\n"
-        f"⏱ {time_per_q} секунд на вопрос\n"
-        f"📄 Ответы видны участникам группы и автору теста\n\n"
-        f"🏁 Вопросы появятся, когда хотя бы {MIN_PLAYERS} человека будут готовы отвечать. "
+        f"⏱ {time_per_q} секунд на вопрос\n\n"
+        f"🏁 Вопросы появятся, когда хотя бы {MIN_PLAYERS} человека нажмут «Пройти тест».\n"
+        f"💡 <b>Важно:</b> отвечать может каждый! Даже если не нажал «Пройти тест» — "
+        f"твои ответы засчитаются, и ты попадёшь в топ-20.\n\n"
         f"Чтобы остановить тест, отправьте /stop\n\n"
         f"👥 <b>Готовы: 0/{MIN_PLAYERS}</b>"
     )
@@ -260,13 +261,12 @@ async def _refresh_lobby_card(bot: Bot, gq_id: int) -> None:
 
 
 async def _lobby_timeout(bot: Bot, gq_id: int):
-    """Если за 5 мин не набралось игроков — отмена."""
+    """Если за 10 мин не набралось игроков — отмена + открыть чат."""
     try:
         await asyncio.sleep(LOBBY_TIMEOUT_SECONDS)
         gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
         if not gq or gq['status'] != 'lobby':
             return
-        # Авто-отмена
         db.execute("UPDATE group_quizzes SET status='cancelled', finished_at=? WHERE id=?",
                     (now_iso(), gq_id))
         try:
@@ -280,6 +280,13 @@ async def _lobby_timeout(bot: Bot, gq_id: int):
                 f"≥{MIN_PLAYERS} игроков.")
         except Exception:
             pass
+        # Открываем чат если был закрыт сериями + двигаем серию
+        try:
+            from services import autopub_service
+            await autopub_service.on_series_test_finished(
+                bot, gq['test_id'], gq['chat_id'])
+        except Exception as e:
+            logger.warning("cancel open chat: %s", e)
     except asyncio.CancelledError:
         pass
     finally:
@@ -485,6 +492,8 @@ async def on_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
                           user) -> None:
     """
     Обработка poll_answer для групповых квизов.
+    Игрок засчитывается АВТОМАТИЧЕСКИ при первом ответе,
+    даже если не нажимал «Пройти тест».
     """
     gq_id = _poll_to_gq.get(poll_id)
     if not gq_id:
@@ -492,16 +501,32 @@ async def on_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
     gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
     if not gq or gq['status'] != 'running':
         return
-    # Игрок зарегистрирован?
+    if not option_ids:
+        # Сняли голос — игнор
+        return
+
+    # Игрок зарегистрирован? Если нет — регистрируем на лету
     player = db.fetchone(
         "SELECT * FROM group_quiz_players WHERE group_quiz_id=? AND tg_id=?",
         (gq_id, user.id))
     if not player:
-        return  # не нажал «Пройти тест» — ответ не засчитывается
-
-    if not option_ids:
-        # Сняли голос — игнор
-        return
+        # Авто-регистрация на лету с правильными полями
+        fname = getattr(user, 'first_name', None) or ''
+        lname = getattr(user, 'last_name', None) or ''
+        full_name = " ".join(filter(None, [fname, lname])) or "Игрок"
+        uname = getattr(user, 'username', None) or ""
+        try:
+            db.execute(
+                "INSERT INTO group_quiz_players "
+                "(group_quiz_id, tg_id, username, full_name) VALUES (?,?,?,?)",
+                (gq_id, user.id, uname, full_name))
+        except Exception as e:
+            logger.warning("auto-register player: %s", e)
+        player = db.fetchone(
+            "SELECT * FROM group_quiz_players WHERE group_quiz_id=? AND tg_id=?",
+            (gq_id, user.id))
+        if not player:
+            return
 
     chosen = option_ids[0]
     correct_idx = gq['current_poll_correct_index']
