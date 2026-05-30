@@ -255,6 +255,15 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext, user: dict):
     except Exception:
         pass
 
+    # Если профильные предметы ещё не выбраны и есть профильные категории —
+    # показываем экран выбора. Иначе сразу меню.
+    from handlers import profile_subjects as _ps
+    has_subjects = utils.has_profile_subjects(call.from_user.id)
+    optional_cats = _ps.get_optional_categories()
+    if not has_subjects and optional_cats:
+        await _ps.show_subjects_screen(call, state, from_profile=False)
+        return
+
     await call.message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
