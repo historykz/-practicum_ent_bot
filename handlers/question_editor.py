@@ -27,6 +27,7 @@ class QEditStates(StatesGroup):
     waiting_explanation = State()    # ввод объяснения
     waiting_pretext = State()        # ввод текста перед вопросом
     waiting_correct_answer = State() # ожидание ответа через Poll
+    waiting_photo = State()          # ожидание фото для вопроса
 
 
 # ===================== ХЕЛПЕРЫ =====================
@@ -194,11 +195,16 @@ def _question_card_kb(q: dict, test_id: int, pos: int, total: int) -> InlineKeyb
     kb.button(text="✏️ Заменить вопрос", callback_data=f"qe:edit:{q['id']}")
     kb.button(text="🔄 Изменить прав. ответ", callback_data=f"qe:correct:{q['id']}")
     kb.button(text="💡 Добавить объяснение", callback_data=f"qe:expl:{q['id']}")
+    # Фото
+    if q.get('photo_file_id'):
+        kb.button(text="🖼 Заменить фото", callback_data=f"qe:photo:{q['id']}")
+        kb.button(text="🗑 Удалить фото", callback_data=f"qe:delphoto:{q['id']}")
+    else:
+        kb.button(text="🖼 Добавить фото", callback_data=f"qe:photo:{q['id']}")
     kb.button(text="🗑 Удалить вопрос", callback_data=f"qe:del:{q['id']}")
     # Низ
     kb.button(text="📋 К списку вопросов", callback_data=f"qe:list:{test_id}")
-    # Расставляем: 3 в навигации, 2 в перемещении, по 1 в действиях
-    kb.adjust(3, 2, 1, 1, 1, 1, 1)
+    kb.adjust(3, 2, 1, 1, 1, 1, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -439,6 +445,69 @@ async def msg_edit_question(message: Message, state: FSMContext):
 
 
 # ===================== ДОБАВИТЬ ОБЪЯСНЕНИЕ =====================
+
+@router.callback_query(F.data.startswith("qe:photo:"), IsAdmin())
+async def cb_photo_ask(call: CallbackQuery, state: FSMContext):
+    try:
+        qid = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    q = _get_question(qid)
+    if not q:
+        await call.answer()
+        return
+    await state.set_state(QEditStates.waiting_photo)
+    await state.update_data(qid=qid)
+    await call.message.answer(
+        "📷 <b>Отправь фото для этого вопроса.</b>\n\n"
+        "Оно будет показано перед вариантами ответа "
+        "(и в личных, и в групповых тестах).\n\n"
+        "/cancel — отмена.", parse_mode="HTML")
+    await call.answer()
+
+
+@router.message(QEditStates.waiting_photo, IsAdmin())
+async def msg_set_photo(message: Message, state: FSMContext):
+    if message.text and message.text.startswith('/cancel'):
+        await state.clear()
+        await message.answer("❌ Отменено.")
+        return
+    if not message.photo:
+        await message.answer("Это не фото. Отправь изображение или /cancel.")
+        return
+    # Берём самое крупное фото
+    file_id = message.photo[-1].file_id
+    data = await state.get_data()
+    qid = data.get('qid')
+    await state.clear()
+    db.execute("UPDATE questions SET photo_file_id=? WHERE id=?", (file_id, qid))
+    await message.answer(
+        "✅ Фото добавлено к вопросу!\n"
+        "Открой вопрос заново чтобы увидеть кнопки управления фото.")
+
+
+@router.callback_query(F.data.startswith("qe:delphoto:"), IsAdmin())
+async def cb_del_photo(call: CallbackQuery, state: FSMContext):
+    try:
+        qid = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    db.execute("UPDATE questions SET photo_file_id=NULL WHERE id=?", (qid,))
+    await call.answer("🗑 Фото удалено", show_alert=True)
+    # Перерисуем карточку
+    q = _get_question(qid)
+    if q:
+        fake = type('F', (), {
+            'data': f"qe:view:{qid}", 'message': call.message,
+            'from_user': call.from_user, 'bot': call.bot,
+            'answer': call.answer})()
+        try:
+            await cb_view_question(fake, state)
+        except Exception:
+            pass
+
 
 @router.callback_query(F.data.startswith("qe:expl:"), IsAdmin())
 async def cb_explanation_ask(call: CallbackQuery, state: FSMContext):
