@@ -855,4 +855,23 @@ def init_db() -> None:
             )
         """)
 
+        # --- Очередь автопубликации (дублируем тут для надёжности) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS autopub_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_id INTEGER NOT NULL,
+                run_at TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                error TEXT DEFAULT '',
+                created_by INTEGER,
+                series_id TEXT DEFAULT '',
+                series_pos INTEGER DEFAULT 0,
+                series_total INTEGER DEFAULT 1,
+                series_test_ids TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_autopub_status_time "
+                    "ON autopub_queue(status, run_at)")
+
         logger.info("База данных инициализирована")
