@@ -167,7 +167,47 @@ def create_attempt(user_id: int, test_id: int, language: str,
     return row["id"] if row else None
 
 
-def _get_ordered_options(question_id: int, attempt: dict) -> list[dict]:
+def create_redo_attempt(prev_attempt_id: int) -> Optional[int]:
+    """
+    Создать попытку ТОЛЬКО из вопросов где юзер ошибся в prev_attempt_id.
+    Не засчитывается в статистику (is_counted=0).
+    """
+    prev = get_attempt(prev_attempt_id)
+    if not prev:
+        return None
+    # Ошибочные вопросы (неправильные, не пропущенные)
+    wrong_rows = db.fetchall(
+        "SELECT DISTINCT question_id FROM attempt_answers "
+        "WHERE attempt_id=? AND is_correct=0 AND COALESCE(skipped,0)=0",
+        (prev_attempt_id,))
+    qids = [r['question_id'] for r in wrong_rows]
+    if not qids:
+        return None
+    test = get_test(prev['test_id'])
+    if not test:
+        return None
+    random.shuffle(qids)
+    # Перемешать варианты
+    options_order = {}
+    if test["shuffle_options"]:
+        for qid in qids:
+            opts = get_question_options(qid)
+            ids = [o["id"] for o in opts]
+            random.shuffle(ids)
+            options_order[str(qid)] = ids
+    db.execute(
+        """INSERT INTO test_attempts
+        (user_id, test_id, current_question_index, question_order, options_order,
+         start_time, status, language, attempt_num, is_first_attempt, is_counted,
+         group_id, started_by_user_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (prev['user_id'], prev['test_id'], 0,
+          json.dumps(qids), json.dumps(options_order),
+          now_iso(), "in_progress", prev['language'] or 'ru',
+          999, 0, 0,  # attempt_num=999, не первая, НЕ засчитывается
+          None, prev['user_id']))
+    row = db.fetchone("SELECT last_insert_rowid() AS id")
+    return row["id"] if row else None
     """Возвращает варианты в нужном для пользователя порядке."""
     opts = get_question_options(question_id)
     try:
@@ -634,25 +674,33 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
     )
     result_text += f"\n\n<b>{t('weak_topics_label', lang)}:</b>\n{weak_text}"
 
-    # Кнопка «Поделиться результатом» (личный публичный тест, не aborted)
-    share_kb = None
+    # Кнопки в результате
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    # Сколько ошибок было
+    wrong_count = db.fetchone(
+        "SELECT COUNT(*) AS c FROM attempt_answers "
+        "WHERE attempt_id=? AND is_correct=0 AND COALESCE(skipped,0)=0",
+        (attempt_id,))
+    n_wrong = (wrong_count['c'] if wrong_count else 0) or 0
+    if not aborted and n_wrong > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"🔁 Повторить ошибки ({n_wrong})",
+            callback_data=f"redoerr:{attempt_id}")])
+    # Поделиться
     if not aborted and not test.get('is_private'):
-        try:
-            from aiogram.types import (InlineKeyboardMarkup,
-                                        InlineKeyboardButton)
-            # Передаём данные через инлайн-запрос: share_<testid>_<correct>_<total>
-            share_query = f"share_{test['id']}_{correct}_{total}"
-            share_kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="📤 Поделиться результатом",
-                    switch_inline_query=share_query)
-            ]])
-        except Exception:
-            share_kb = None
+        share_query = f"share_{test['id']}_{correct}_{total}"
+        rows.append([InlineKeyboardButton(
+            text="📤 Поделиться результатом",
+            switch_inline_query=share_query)])
+    # Каталог тестов
+    rows.append([InlineKeyboardButton(
+        text="📚 Каталог тестов", callback_data="m:tests")])
+    result_kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
     try:
         await bot.send_message(chat_id=chat_id, text=result_text, parse_mode="HTML",
-                               reply_markup=share_kb,
+                               reply_markup=result_kb,
                                protect_content=PROTECT_CONTENT)
     except Exception:
         try:
@@ -688,6 +736,26 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
                 except Exception:
                     pass
             asyncio.create_task(_delete_after_delay())
+
+    # Если идёт анонс тестирования в чате — предложить перейти (после личного теста)
+    if not aborted and not attempt.get("group_id"):
+        try:
+            from services import autopub_service as _aps
+            ann = _aps.get_bot_announce()
+            if ann and ann.get('invite'):
+                from aiogram.types import (InlineKeyboardMarkup,
+                                            InlineKeyboardButton)
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🚀 Перейти к тестированию",
+                        url=ann['invite'])
+                ]])
+                txt = ("📣 Сейчас идёт тестирование в чате!\n"
+                       "Присоединяйся 👇" if lang == "ru"
+                       else "📣 Қазір чатта тестілеу жүріп жатыр!\nҚосыл 👇")
+                await bot.send_message(chat_id, txt, reply_markup=kb)
+        except Exception as e:
+            logger.warning("post-test announce offer: %s", e)
 
 
 def compute_weak_topics(attempt_id: int) -> list[str]:
