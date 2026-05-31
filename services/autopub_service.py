@@ -64,6 +64,114 @@ def set_autopub_config(chat_id: str = None, chat_title: str = None,
         _set_setting(S_INVITE_LINK, str(invite_link))
 
 
+# ===================== СПИСКИ КАНАЛОВ И ЧАТОВ =====================
+# Хранятся как JSON-массивы в settings.
+#   channels: [{"id": -100..., "title": "..."}]
+#   chats:    [{"id": -100..., "title": "...", "invite": "https://t.me/..."}]
+
+S_CHANNELS = "autopub_channels"
+S_CHATS = "autopub_chats"
+
+
+def get_channels() -> list[dict]:
+    import json as _json
+    raw = _get_setting(S_CHANNELS)
+    out = []
+    if raw:
+        try:
+            out = _json.loads(raw)
+        except Exception:
+            out = []
+    # Подмешаем старый одиночный канал если списка ещё нет
+    if not out:
+        old = _get_setting(S_CHANNEL_ID)
+        if old:
+            out = [{"id": old, "title": "Канал"}]
+    return out
+
+
+def get_chats() -> list[dict]:
+    import json as _json
+    raw = _get_setting(S_CHATS)
+    out = []
+    if raw:
+        try:
+            out = _json.loads(raw)
+        except Exception:
+            out = []
+    if not out:
+        old = _get_setting(S_CHAT_ID)
+        if old:
+            out = [{"id": old,
+                    "title": _get_setting(S_CHAT_TITLE) or "Чат",
+                    "invite": _get_setting(S_INVITE_LINK) or ""}]
+    return out
+
+
+def add_channel(channel_id, title: str = ""):
+    import json as _json
+    chans = get_channels()
+    # Не дублируем
+    for c in chans:
+        if str(c.get('id')) == str(channel_id):
+            c['title'] = title or c.get('title') or ''
+            _set_setting(S_CHANNELS, _json.dumps(chans, ensure_ascii=False))
+            return
+    chans.append({"id": str(channel_id), "title": title or "Канал"})
+    _set_setting(S_CHANNELS, _json.dumps(chans, ensure_ascii=False))
+
+
+def remove_channel(channel_id):
+    import json as _json
+    chans = [c for c in get_channels() if str(c.get('id')) != str(channel_id)]
+    _set_setting(S_CHANNELS, _json.dumps(chans, ensure_ascii=False))
+
+
+def add_chat(chat_id, title: str = "", invite: str = ""):
+    import json as _json
+    chats = get_chats()
+    for c in chats:
+        if str(c.get('id')) == str(chat_id):
+            c['title'] = title or c.get('title') or ''
+            if invite:
+                c['invite'] = invite
+            _set_setting(S_CHATS, _json.dumps(chats, ensure_ascii=False))
+            return
+    chats.append({"id": str(chat_id), "title": title or "Чат",
+                   "invite": invite or ""})
+    _set_setting(S_CHATS, _json.dumps(chats, ensure_ascii=False))
+
+
+def remove_chat(chat_id):
+    import json as _json
+    chats = [c for c in get_chats() if str(c.get('id')) != str(chat_id)]
+    _set_setting(S_CHATS, _json.dumps(chats, ensure_ascii=False))
+
+
+def set_chat_invite(chat_id, invite: str):
+    import json as _json
+    chats = get_chats()
+    for c in chats:
+        if str(c.get('id')) == str(chat_id):
+            c['invite'] = invite
+            _set_setting(S_CHATS, _json.dumps(chats, ensure_ascii=False))
+            return
+
+
+def get_chat_by_id(chat_id) -> Optional[dict]:
+    for c in get_chats():
+        if str(c.get('id')) == str(chat_id):
+            return c
+    return None
+
+
+def get_channel_by_id(channel_id) -> Optional[dict]:
+    for c in get_channels():
+        if str(c.get('id')) == str(channel_id):
+            return c
+    return None
+
+
 # ===================== ТАБЛИЦА РАСПИСАНИЯ =====================
 
 def ensure_schedule_table():
@@ -977,33 +1085,63 @@ async def post_random_quiz_polls_to_channel(
         category_id: Optional[int] = None,
         topic_id: Optional[int] = None,
         language: str = 'ru',
-        bot_username: str = '') -> tuple[int, int]:
+        bot_username: str = '',
+        test_ids: Optional[list] = None,
+        channel_id: Optional[str] = None) -> tuple[int, int]:
     """
-    Опубликовать N рандомных Quiz Poll на канале БЕЗ таймера.
-    topic_id — если задан, берём вопросы только из этого теста.
-    Между вопросами задержка 10 сек. В конце — пост с кнопкой «Начать тестирование».
+    Опубликовать 10 Quiz Poll на канале БЕЗ таймера, БЕЗ нумерации.
+    test_ids — если задан список, берём вопросы ПОРОВНУ из этих тестов.
+    channel_id — явный канал (если не задан, берём первый из списка).
+    Между вопросами задержка 10 сек. В конце — пост с кнопкой.
     """
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        chans = get_channels()
+        channel_id = chans[0]['id'] if chans else get_autopub_config().get('channel_id')
     if not channel_id:
         return 0, 0
 
-    sql = """SELECT q.id, q.text, q.explanation, q.test_id
-             FROM questions q JOIN tests t ON t.id=q.test_id
-             WHERE t.status='active' AND t.is_paid=0
-               AND COALESCE(t.is_private,0)=0
-               AND t.language=?"""
-    args = [language]
-    if topic_id is not None:
-        sql += " AND t.id=?"
-        args.append(topic_id)
-    elif category_id is not None:
-        sql += " AND t.category_id=?"
-        args.append(category_id)
-    rows = db.fetchall(sql, tuple(args))
-    if not rows:
+    sample = []
+    if test_ids:
+        # МИКС поровну из выбранных тестов
+        n = len(test_ids)
+        per = max(1, count // n)
+        pools = {}
+        for tid in test_ids:
+            qs = db.fetchall(
+                "SELECT q.id, q.text, q.explanation, q.test_id "
+                "FROM questions q WHERE q.test_id=? ORDER BY RANDOM()", (tid,))
+            pools[tid] = qs
+            sample.extend(qs[:per])
+        # Добор рандомом до count
+        if len(sample) < count:
+            leftover = []
+            for tid in test_ids:
+                leftover.extend(pools[tid][per:])
+            random.shuffle(leftover)
+            sample.extend(leftover[:count - len(sample)])
+        sample = sample[:count]
+        random.shuffle(sample)
+    else:
+        # Старый путь — по категории/теме
+        sql = """SELECT q.id, q.text, q.explanation, q.test_id
+                 FROM questions q JOIN tests t ON t.id=q.test_id
+                 WHERE t.status='active' AND t.is_paid=0
+                   AND COALESCE(t.is_private,0)=0
+                   AND t.language=?"""
+        args = [language]
+        if topic_id is not None:
+            sql += " AND t.id=?"
+            args.append(topic_id)
+        elif category_id is not None:
+            sql += " AND t.category_id=?"
+            args.append(category_id)
+        rows = db.fetchall(sql, tuple(args))
+        if not rows:
+            return 0, 0
+        sample = random.sample(rows, min(count, len(rows)))
+
+    if not sample:
         return 0, 0
-    sample = random.sample(rows, min(count, len(rows)))
 
     sent = 0
     failed = 0
