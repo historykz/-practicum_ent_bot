@@ -208,6 +208,9 @@ def create_redo_attempt(prev_attempt_id: int) -> Optional[int]:
           None, prev['user_id']))
     row = db.fetchone("SELECT last_insert_rowid() AS id")
     return row["id"] if row else None
+
+
+def _get_ordered_options(question_id: int, attempt: dict) -> list[dict]:
     """Возвращает варианты в нужном для пользователя порядке."""
     opts = get_question_options(question_id)
     try:
