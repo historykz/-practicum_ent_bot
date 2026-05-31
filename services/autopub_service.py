@@ -1195,6 +1195,15 @@ async def post_random_quiz_polls_to_channel(
             if o['is_correct']:
                 correct_idx = i
                 break
+        # Фото вопроса (если есть)
+        _qphoto = db.fetchone(
+            "SELECT photo_file_id FROM questions WHERE id=?", (q['id'],))
+        if _qphoto and _qphoto.get('photo_file_id'):
+            try:
+                await bot.send_photo(int(channel_id),
+                                      photo=_qphoto['photo_file_id'])
+            except Exception:
+                pass
         try:
             await bot.send_poll(
                 int(channel_id),
