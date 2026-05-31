@@ -84,8 +84,8 @@ async def on_my_chat_member(event: ChatMemberUpdated, bot: Bot):
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
-async def on_group_message(message: Message):
-    """Любое сообщение в группе — обновляем seen_at и добавляем если новая."""
+async def on_group_message(message: Message, bot: Bot):
+    """Любое сообщение в группе — обновляем seen_at + проверяем ссылки."""
     if not message.chat or message.chat.type not in ("group", "supergroup"):
         return
     chat = message.chat
@@ -99,6 +99,13 @@ async def on_group_message(message: Message):
         db.execute(
             "UPDATE known_groups SET title=?, seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
             (chat.title or "", chat.id))
+
+    # Антиссылки — проверяем чужие телеграм-ссылки
+    try:
+        from handlers.moderation import check_antilink
+        await check_antilink(message, bot)
+    except Exception as e:
+        log.warning("antilink check: %s", e)
 
 
 # ============ /stop в группе ============
