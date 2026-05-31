@@ -284,12 +284,13 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
             # Шлём заголовок С КНОПКОЙ СТОП
             await bot.send_message(chat_id=chat_id, text=prefix,
                                     parse_mode="HTML", reply_markup=stop_kb)
-            # Картинка, если есть
-            if q.get("image_file_id"):
+            # Картинка, если есть (photo_file_id или старое image_file_id)
+            _photo = q.get("photo_file_id") or q.get("image_file_id")
+            if _photo:
                 try:
                     await bot.send_photo(
                         chat_id=chat_id,
-                        photo=q["image_file_id"],
+                        photo=_photo,
                         protect_content=PROTECT_CONTENT,
                     )
                 except Exception:
@@ -342,10 +343,11 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
         else:
             # Fallback на inline-кнопки
             text = build_question_text(idx + 1, len(qids), q["text"], time_per_q, lang)
-            if q.get("image_file_id"):
+            _photo2 = q.get("photo_file_id") or q.get("image_file_id")
+            if _photo2:
                 msg = await bot.send_photo(
                     chat_id=chat_id,
-                    photo=q["image_file_id"],
+                    photo=_photo2,
                     caption=text,
                     reply_markup=options_kb(attempt_id, qid, options),
                     parse_mode="HTML",
