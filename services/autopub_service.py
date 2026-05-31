@@ -234,10 +234,17 @@ def cancel_pending(qid: int):
 
 # ===================== ПУБЛИКАЦИЯ =====================
 
-async def publish_test_to_chat(bot: Bot, test_id: int) -> bool:
-    """Запустить лобби теста в чате (как групповой квиз, ждёт 2 игроков)."""
-    cfg = get_autopub_config()
-    chat_id = cfg['chat_id']
+async def publish_test_to_chat(bot: Bot, test_id: int,
+                                chat_id=None) -> bool:
+    """Запустить лобби теста в чате. chat_id явный или берём активную серию/первый."""
+    if not chat_id:
+        # Берём из активной серии, иначе первый чат из списка
+        st = get_active_series()
+        if st and st.get('chat_id'):
+            chat_id = st['chat_id']
+        else:
+            chats = get_chats()
+            chat_id = chats[0]['id'] if chats else get_autopub_config().get('chat_id')
     if not chat_id:
         log.warning("publish_test_to_chat: chat_id не задан")
         return False
@@ -248,9 +255,7 @@ async def publish_test_to_chat(bot: Bot, test_id: int) -> bool:
         "SELECT id FROM questions WHERE test_id=?", (test_id,))
     if not questions:
         return False
-    # Запускаем лобби через group_quiz_service
     from services import group_quiz_service
-    # Прорчищаем потенциально зависшие лобби в этом чате
     try:
         existing = db.fetchone(
             "SELECT id FROM group_quizzes WHERE chat_id=? AND status IN ('lobby','running')",
@@ -261,7 +266,6 @@ async def publish_test_to_chat(bot: Bot, test_id: int) -> bool:
     except Exception:
         pass
     try:
-        # admin_tg_id = 0 — системный запуск
         await group_quiz_service.start_lobby(
             bot, dict(test), int(chat_id),
             admin_tg_id=0,
@@ -482,13 +486,24 @@ async def announce_batch_on_channel(bot: Bot, tests: list[dict],
 
 
 async def announce_batch_with_topics(bot: Bot, tests: list[dict],
-                                       when_str: str) -> bool:
+                                       when_str: str,
+                                       channel_id=None,
+                                       chat_id=None) -> bool:
     """ПРЕД-анонс СРАЗУ С ТЕМАМИ (когда планируем на будущее)."""
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        chans = get_channels()
+        channel_id = chans[0]['id'] if chans else get_autopub_config().get('channel_id')
     if not channel_id:
         return False
-    invite = cfg.get('invite_link') or ''
+    # Ссылка — из выбранного чата, иначе из первого
+    invite = ''
+    if chat_id:
+        c = get_chat_by_id(chat_id)
+        invite = (c.get('invite') if c else '') or ''
+    if not invite:
+        chats = get_chats()
+        invite = (chats[0].get('invite') if chats else '') or \
+                 get_autopub_config().get('invite_link') or ''
     topics = "\n".join(f"• {t['title']}" for t in tests[:10])
     total_q = 0
     for t in tests:
@@ -515,7 +530,8 @@ async def announce_batch_with_topics(bot: Bot, tests: list[dict],
 # ===================== СОСТОЯНИЕ СЕРИИ (ЦЕПОЧКА) =====================
 
 def save_series_state(series_id: str, test_ids_csv: str,
-                       total: int, created_by: int):
+                       total: int, created_by: int,
+                       chat_id=None, channel_id=None):
     """Сохранить состояние серии для запуска цепочкой."""
     import json as _json
     state = {
@@ -524,9 +540,10 @@ def save_series_state(series_id: str, test_ids_csv: str,
         "total": total,
         "created_by": created_by,
         "current_index": 0,
+        "chat_id": str(chat_id) if chat_id else None,
+        "channel_id": str(channel_id) if channel_id else None,
     }
     _set_setting(f"series_state:{series_id}", _json.dumps(state))
-    # Запомним «активную» серию для чата
     _set_setting("active_series_id", series_id)
 
 
@@ -642,13 +659,18 @@ async def announce_batch_short(bot: Bot, count: int, when_str: str) -> bool:
         return False
 
 
-async def announce_batch_reminder(bot: Bot, tests: list[dict]) -> bool:
+async def announce_batch_reminder(bot: Bot, tests: list[dict],
+                                    channel_id=None, invite='') -> bool:
     """Краткое напоминание когда время подошло — темы + ссылка."""
-    cfg = get_autopub_config()
-    channel_id = cfg.get('channel_id')
+    if not channel_id:
+        chans = get_channels()
+        channel_id = chans[0]['id'] if chans else get_autopub_config().get('channel_id')
     if not channel_id:
         return False
-    invite = cfg.get('invite_link') or ''
+    if not invite:
+        chats = get_chats()
+        invite = (chats[0].get('invite') if chats else '') or \
+                 get_autopub_config().get('invite_link') or ''
     topics = "\n".join(f"• {t['title']}" for t in tests[:10])
     text = (
         f"⏰ <b>НАЧИНАЕМ!</b>\n\n"
@@ -759,9 +781,12 @@ async def _unlock_chat_congrats(bot: Bot, chat_id: int) -> bool:
 
 
 async def announce_single_reminder(bot: Bot, test: dict) -> bool:
-    """Короткое напоминание про следующий тест — в ЧАТЕ где идут тесты, не на канале."""
-    cfg = get_autopub_config()
-    chat_id = cfg.get('chat_id')
+    """Короткое напоминание про следующий тест — в ЧАТЕ серии."""
+    st = get_active_series()
+    chat_id = (st.get('chat_id') if st else None)
+    if not chat_id:
+        chats = get_chats()
+        chat_id = chats[0]['id'] if chats else get_autopub_config().get('chat_id')
     if not chat_id:
         return False
     text = (
@@ -770,8 +795,7 @@ async def announce_single_reminder(bot: Bot, test: dict) -> bool:
         f"Готовься! 🚀"
     )
     try:
-        await bot.send_message(int(chat_id), text,
-                                 parse_mode="HTML")
+        await bot.send_message(int(chat_id), text, parse_mode="HTML")
         return True
     except Exception as e:
         log.warning("single reminder: %s", e)
@@ -989,8 +1013,23 @@ async def _worker_loop(bot: Bot):
 
                 db.execute("UPDATE autopub_queue SET status='running' WHERE id=?", (qid,))
                 try:
+                    # Берём чат/канал из активной серии
+                    st = get_active_series()
+                    series_chat = (st.get('chat_id') if st else None)
+                    series_chan = (st.get('channel_id') if st else None)
+                    if not series_chat:
+                        chats = get_chats()
+                        series_chat = chats[0]['id'] if chats else None
+                    if not series_chan:
+                        chans = get_channels()
+                        series_chan = chans[0]['id'] if chans else None
+                    # Ссылка чата
+                    invite = ''
+                    if series_chat:
+                        cc = get_chat_by_id(series_chat)
+                        invite = (cc.get('invite') if cc else '') or ''
+
                     posted_full_announce = False
-                    # Полный анонс с темами (для первого/единственного теста)
                     if series_ids_str:
                         try:
                             ids = [int(x) for x in series_ids_str.split(',') if x.strip().isdigit()]
@@ -999,47 +1038,42 @@ async def _worker_loop(bot: Bot):
                                 t = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
                                 if t:
                                     tests_obj.append(dict(t))
-                            if tests_obj:
+                            if tests_obj and series_chan:
                                 if len(tests_obj) == 1:
                                     test = tests_obj[0]
-                                    cfg = get_autopub_config()
-                                    chan = cfg.get('channel_id')
-                                    invite = cfg.get('invite_link') or ''
                                     qc = db.fetchone(
                                         "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
                                         (test['id'],))['c']
-                                    if chan:
-                                        try:
-                                            await bot.send_message(
-                                                int(chan),
-                                                announce_now_text(0, test['title'], qc, invite),
-                                                parse_mode="HTML",
-                                                disable_web_page_preview=False)
-                                            posted_full_announce = True
-                                        except Exception as e:
-                                            log.warning("now announce: %s", e)
+                                    try:
+                                        await bot.send_message(
+                                            int(series_chan),
+                                            announce_now_text(0, test['title'], qc, invite),
+                                            parse_mode="HTML",
+                                            disable_web_page_preview=False)
+                                        posted_full_announce = True
+                                    except Exception as e:
+                                        log.warning("now announce: %s", e)
                                 else:
-                                    ok = await announce_batch_reminder(bot, tests_obj)
+                                    ok = await announce_batch_reminder(
+                                        bot, tests_obj, channel_id=series_chan,
+                                        invite=invite)
                                     if ok:
                                         posted_full_announce = True
                         except Exception as e:
                             log.warning("series head reminder: %s", e)
 
-                    # Пауза чтобы юзеры успели зайти в чат
                     if posted_full_announce:
                         await asyncio.sleep(15)
 
-                    # Закрываем чат перед первым тестом серии
-                    cfg = get_autopub_config()
-                    chat_id_cfg = cfg.get('chat_id')
-                    if chat_id_cfg:
+                    # Закрываем чат серии перед первым тестом
+                    if series_chat:
                         try:
-                            await _lock_chat(bot, int(chat_id_cfg))
+                            await _lock_chat(bot, int(series_chat))
                         except Exception as e:
                             log.warning("lock on first: %s", e)
 
-                    # Запуск лобби. Цепочка следующих — через on_series_test_finished
-                    ok = await publish_test_to_chat(bot, test_id)
+                    # Запуск лобби в чат серии
+                    ok = await publish_test_to_chat(bot, test_id, chat_id=series_chat)
                     if ok:
                         db.execute("UPDATE autopub_queue SET status='done' WHERE id=?",
                                     (qid,))
