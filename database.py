@@ -822,4 +822,20 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # --- Модерация чата (баны/муты) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_moderation (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                user_tg_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                action TEXT NOT NULL,
+                until_ts TEXT,
+                created_by INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, user_tg_id, action)
+            )
+        """)
+
         logger.info("База данных инициализирована")
