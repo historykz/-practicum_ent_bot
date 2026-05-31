@@ -172,7 +172,7 @@ async def main() -> None:
     dp.include_router(common.router)
     dp.include_router(appeals.router)
     dp.include_router(profile_subjects.router)
-    dp.include_router(moderation.router)
+    dp.include_router(moderation.router)  # команды бан/мут — до group_quiz catch-all
     dp.include_router(profile.router)
     dp.include_router(user.router)
     dp.include_router(quiz.router)
