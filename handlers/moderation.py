@@ -401,10 +401,19 @@ def _message_has_foreign_link(message: Message) -> bool:
 
 async def check_antilink(message: Message, bot: Bot):
     """Проверка чужих телеграм-ссылок. Вызывается из group_quiz.on_group_message."""
-    # Сообщения от имени чата (анонимный админ) — не трогаем
+    # 1. Сообщения от имени чата (анонимный админ) — не трогаем
     if utils.is_anonymous_chat_admin(message):
         return
+    # 2. Авто-репост из привязанного канала (комментарии) — не трогаем
+    if getattr(message, 'is_automatic_forward', False):
+        return
+    # 3. Сообщение от имени любого канала/чата (sender_chat есть) — не трогаем
+    if getattr(message, 'sender_chat', None) is not None:
+        return
     if not message.from_user:
+        return
+    # 4. Бот сам себя не модерирует
+    if message.from_user.is_bot:
         return
     if not _message_has_foreign_link(message):
         return
