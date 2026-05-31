@@ -568,6 +568,11 @@ def _update_series_state(state: dict):
 
 def clear_active_series():
     _set_setting("active_series_id", "")
+    # Анонс в боте тоже больше не актуален
+    try:
+        clear_bot_announce()
+    except Exception:
+        pass
 
 
 async def on_series_test_finished(bot: Bot, test_id: int, chat_id: int):
@@ -1239,3 +1244,81 @@ async def post_random_quiz_polls_to_channel(
             log.warning("final CTA: %s", e)
 
     return sent, failed
+
+
+# ===================== АНОНС В БОТЕ =====================
+
+# Флаг активного анонса (чтобы после теста предложить снова)
+S_BOT_ANNOUNCE = "bot_announce_active"
+
+
+def set_bot_announce(chat_invite: str, titles: list, active: bool = True):
+    """Сохранить активный анонс для допоказа после теста."""
+    import json as _json
+    if active:
+        _set_setting(S_BOT_ANNOUNCE, _json.dumps({
+            "invite": chat_invite or "",
+            "titles": titles[:10],
+        }))
+    else:
+        _set_setting(S_BOT_ANNOUNCE, "")
+
+
+def get_bot_announce() -> Optional[dict]:
+    import json as _json
+    raw = _get_setting(S_BOT_ANNOUNCE)
+    if not raw:
+        return None
+    try:
+        return _json.loads(raw)
+    except Exception:
+        return None
+
+
+def clear_bot_announce():
+    _set_setting(S_BOT_ANNOUNCE, "")
+
+
+async def broadcast_test_announce(bot: Bot, titles: list,
+                                    chat_invite: str, when_str: str):
+    """
+    Разослать анонс теста ВСЕМ зарегистрированным юзерам, на их языке.
+    Если юзер сейчас проходит тест — помечаем чтобы прервать с выбором.
+    """
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+    users = db.fetchall("SELECT tg_id, language FROM users WHERE tg_id IS NOT NULL")
+    topics_ru = "\n".join(f"• {t}" for t in titles[:10])
+    sent = 0
+    for u in users:
+        tg = u['tg_id']
+        lang = u.get('language') or 'ru'
+        if lang == 'kz':
+            text = (
+                f"🔔 <b>Чатта тестілеу басталады!</b>\n\n"
+                f"📚 Тақырыптар:\n{topics_ru}\n\n"
+                f"⏰ {when_str}\n\n"
+                f"👇 Қатысу үшін чатқа кір:")
+            btn = "🚀 Тестілеуге өту"
+        else:
+            text = (
+                f"🔔 <b>Скоро тестирование в чате!</b>\n\n"
+                f"📚 Темы:\n{topics_ru}\n\n"
+                f"⏰ {when_str}\n\n"
+                f"👇 Заходи в чат чтобы участвовать:")
+            btn = "🚀 Перейти к тестированию"
+        kb = None
+        if chat_invite:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=btn, url=chat_invite)]])
+        try:
+            await bot.send_message(tg, text, parse_mode="HTML",
+                                     reply_markup=kb,
+                                     disable_web_page_preview=True)
+            sent += 1
+        except Exception:
+            pass
+        if sent % 25 == 0:
+            await asyncio.sleep(1)  # антифлуд
+    log.info("bot announce broadcast sent to %s users", sent)
+    return sent
