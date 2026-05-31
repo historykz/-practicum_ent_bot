@@ -35,11 +35,25 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
             test_id = int(arg[7:])
         except ValueError:
             return
-        # Проверяем что добавивший — админ
         import utils as _utils
-        if not _utils.is_admin(message.from_user.id):
+        # Разрешаем: админу бота, анонимному админу чата, или админу чата
+        allowed = False
+        if _utils.is_anonymous_chat_admin(message):
+            allowed = True
+        elif message.from_user and _utils.is_admin(message.from_user.id):
+            allowed = True
+        elif message.from_user:
             try:
-                await message.reply("⛔ Запустить тест может только администратор бота.")
+                member = await message.bot.get_chat_member(
+                    message.chat.id, message.from_user.id)
+                if member.status in ("administrator", "creator"):
+                    allowed = True
+            except Exception:
+                pass
+        if not allowed:
+            try:
+                await message.reply(
+                    "⛔ Запустить тест может только админ чата или бота.")
             except Exception:
                 pass
             return
@@ -54,13 +68,14 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
                 pass
             return
         # Записываем группу
+        _added_by = message.from_user.id if message.from_user else 0
         _db.execute(
             """INSERT OR IGNORE INTO known_groups (chat_id, title, type, added_by, seen_at)
                VALUES (?,?,?,?, CURRENT_TIMESTAMP)""",
             (message.chat.id, message.chat.title or "",
-             message.chat.type, message.from_user.id))
+             message.chat.type, _added_by))
         ok, key, gq_id = await group_quiz_service.start_lobby(
-            message.bot, dict(test), message.chat.id, message.from_user.id)
+            message.bot, dict(test), message.chat.id, _added_by)
         if not ok:
             try:
                 if key == "already_running":
