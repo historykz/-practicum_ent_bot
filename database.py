@@ -838,4 +838,15 @@ def init_db() -> None:
             )
         """)
 
+        # --- Предупреждения за ссылки ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS link_warnings (
+                chat_id INTEGER NOT NULL,
+                user_tg_id INTEGER NOT NULL,
+                warns INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, user_tg_id)
+            )
+        """)
+
         logger.info("База данных инициализирована")
