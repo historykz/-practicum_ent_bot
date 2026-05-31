@@ -357,6 +357,10 @@ async def _question_timeout(bot: Bot, attempt_id: int, question_id: int,
     )
     if answered:
         return
+    # ДВОЙНАЯ проверка статуса прямо перед действиями (защита от гонки с паузой)
+    re_check = get_attempt(attempt_id)
+    if not re_check or re_check["status"] != "in_progress":
+        return
     # Засчитываем пропуск
     db.execute(
         "INSERT INTO attempt_answers (attempt_id, question_id, skipped) VALUES (?,?,1)",
@@ -630,11 +634,32 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
     )
     result_text += f"\n\n<b>{t('weak_topics_label', lang)}:</b>\n{weak_text}"
 
+    # Кнопка «Поделиться результатом» (личный публичный тест, не aborted)
+    share_kb = None
+    if not aborted and not test.get('is_private'):
+        try:
+            from aiogram.types import (InlineKeyboardMarkup,
+                                        InlineKeyboardButton)
+            # Передаём данные через инлайн-запрос: share_<testid>_<correct>_<total>
+            share_query = f"share_{test['id']}_{correct}_{total}"
+            share_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="📤 Поделиться результатом",
+                    switch_inline_query=share_query)
+            ]])
+        except Exception:
+            share_kb = None
+
     try:
         await bot.send_message(chat_id=chat_id, text=result_text, parse_mode="HTML",
+                               reply_markup=share_kb,
                                protect_content=PROTECT_CONTENT)
     except Exception:
-        pass
+        try:
+            await bot.send_message(chat_id=chat_id, text=result_text,
+                                     parse_mode="HTML")
+        except Exception:
+            pass
 
     # Опционально: показать правильные ответы и объяснения
     if test["show_correct"] or test["show_explanation"]:
