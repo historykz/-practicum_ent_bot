@@ -266,13 +266,32 @@ async def publish_test_to_chat(bot: Bot, test_id: int,
     except Exception:
         pass
     try:
-        await group_quiz_service.start_lobby(
+        ok, key, gq_id = await group_quiz_service.start_lobby(
             bot, dict(test), int(chat_id),
             admin_tg_id=0,
             language=test.get('language') or 'ru')
+        if not ok:
+            log.warning("start_lobby не запустил лобби: %s (chat=%s)", key, chat_id)
+            # Сообщим в чат если уже идёт
+            if key == "already_running":
+                try:
+                    await bot.send_message(
+                        int(chat_id),
+                        "⚠️ В этом чате уже идёт тест. Дождитесь окончания или /stop.")
+                except Exception:
+                    pass
+            return False
         return True
     except Exception as e:
         log.exception("publish_test_to_chat lobby: %s", e)
+        # Попробуем сообщить об ошибке в чат
+        try:
+            await bot.send_message(
+                int(chat_id),
+                "⚠️ Не смог запустить тест в чате. "
+                "Проверьте что бот — администратор чата.")
+        except Exception:
+            pass
         return False
 
 
