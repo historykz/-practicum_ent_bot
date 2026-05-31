@@ -822,6 +822,12 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # --- Фото в вопросах ---
+        try:
+            cur.execute("ALTER TABLE questions ADD COLUMN photo_file_id TEXT")
+        except Exception:
+            pass
+
         # --- Модерация чата (баны/муты) ---
         cur.execute("""
             CREATE TABLE IF NOT EXISTS chat_moderation (
