@@ -100,20 +100,16 @@ class AutoPubStates(StatesGroup):
 
 
 def _settings_card_text() -> str:
-    cfg = autopub_service.get_autopub_config()
-    chat = cfg.get('chat_id') or '<i>не задан</i>'
-    chat_title = cfg.get('chat_title') or ''
-    channel = cfg.get('channel_id') or '<i>не задан</i>'
-    link = cfg.get('invite_link') or '<i>не задана</i>'
+    channels = autopub_service.get_channels()
+    chats = autopub_service.get_chats()
+    ch_str = ", ".join(c.get('title') or str(c['id']) for c in channels) if channels else "не заданы"
+    chat_str = ", ".join(c.get('title') or str(c['id']) for c in chats) if chats else "не заданы"
     return (
         f"📅 <b>Авто-публикация тестов</b>\n\n"
-        f"<b>Настройки:</b>\n"
-        f"💬 Чат для тестов: <code>{chat}</code>"
-        + (f" ({chat_title})" if chat_title else "") + "\n"
-        f"📢 Канал для анонсов: <code>{channel}</code>\n"
-        f"🔗 Пригласительная ссылка: {link}\n\n"
-        f"<i>Бот будет публиковать тесты в чат, а на канале — "
-        f"анонсировать со ссылкой.</i>"
+        f"📢 Каналов: <b>{len(channels)}</b> ({ch_str})\n"
+        f"💬 Чатов: <b>{len(chats)}</b> ({chat_str})\n\n"
+        f"<i>Бот публикует тесты в чат (через лобби), "
+        f"а на канале анонсирует со ссылкой.</i>"
     )
 
 
@@ -147,88 +143,47 @@ async def cb_autopub_menu(call: CallbackQuery):
 
 @router.callback_query(F.data == "apub:settings", IsAdmin())
 async def cb_settings_menu(call: CallbackQuery):
+    channels = autopub_service.get_channels()
+    chats = autopub_service.get_chats()
+    lines = ["⚙️ <b>Каналы и чаты</b>\n"]
+    lines.append("📢 <b>Каналы для анонсов:</b>")
+    if channels:
+        for c in channels:
+            lines.append(f"• {c.get('title') or c['id']}")
+    else:
+        lines.append("<i>нет</i>")
+    lines.append("\n💬 <b>Чаты для тестов:</b>")
+    if chats:
+        for c in chats:
+            inv = " 🔗" if c.get('invite') else " ⚠️без ссылки"
+            lines.append(f"• {c.get('title') or c['id']}{inv}")
+    else:
+        lines.append("<i>нет</i>")
+    text = "\n".join(lines)
+
     kb = InlineKeyboardBuilder()
-    kb.button(text="💬 Задать чат (ID или @username)", callback_data="apub:set_chat")
-    kb.button(text="📢 Задать канал для анонсов", callback_data="apub:set_channel")
-    kb.button(text="🔗 Задать пригласительную ссылку",
-              callback_data="apub:set_link")
+    kb.button(text="➕ Добавить канал", callback_data="apub:add_channel")
+    kb.button(text="➕ Добавить чат", callback_data="apub:add_chat")
+    if channels:
+        kb.button(text="🗑 Удалить канал", callback_data="apub:del_channel")
+    if chats:
+        kb.button(text="🗑 Удалить чат", callback_data="apub:del_chat")
+        kb.button(text="🔗 Задать ссылку чату", callback_data="apub:set_chat_link")
     kb.button(text="↩️ Назад", callback_data="adm:autopub")
-    kb.adjust(1)
+    kb.adjust(2, 2, 1, 1)
     try:
-        await call.message.edit_text(
-            _settings_card_text() +
-            "\n\n<b>Выбери что хочешь изменить:</b>",
-            reply_markup=kb.as_markup(), parse_mode="HTML")
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML")
     except Exception:
         pass
     await call.answer()
 
 
-@router.callback_query(F.data == "apub:set_chat", IsAdmin())
-async def cb_set_chat(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AutoPubStates.waiting_chat_id)
-    await call.message.answer(
-        "💬 <b>Куда публиковать тесты?</b>\n\n"
-        "Перешли любое сообщение из чата СЮДА (можно из канала-чата) "
-        "— я возьму ID автоматически.\n\n"
-        "Или отправь:\n"
-        "• <code>@username</code> чата (если он публичный)\n"
-        "• <code>-100xxxxxxxxxx</code> (ID супергруппы)\n\n"
-        "Важно: бот должен быть админом в этом чате!\n\n"
-        "/cancel для отмены.")
-    await call.answer()
-
-
-@router.message(AutoPubStates.waiting_chat_id, IsAdmin())
-async def msg_set_chat(message: Message, state: FSMContext):
-    if message.text and message.text.startswith('/cancel'):
-        await state.clear()
-        await message.answer("❌ Отменено.")
-        return
-
-    chat_id = None
-    chat_title = None
-    # Пересланное сообщение
-    if message.forward_from_chat:
-        chat_id = message.forward_from_chat.id
-        chat_title = message.forward_from_chat.title or ''
-    elif message.text:
-        txt = message.text.strip()
-        if txt.startswith('@'):
-            try:
-                ch = await message.bot.get_chat(txt)
-                chat_id = ch.id
-                chat_title = ch.title or txt
-            except Exception as e:
-                await message.answer(f"Не нашёл такой чат: {e}")
-                return
-        elif txt.startswith('-') or txt.isdigit():
-            try:
-                chat_id = int(txt)
-                try:
-                    ch = await message.bot.get_chat(chat_id)
-                    chat_title = ch.title or str(chat_id)
-                except Exception:
-                    chat_title = str(chat_id)
-            except ValueError:
-                await message.answer("Не похоже на ID. Пришли число или @username или перешли сообщение.")
-                return
-    if chat_id is None:
-        await message.answer("Не понял. Перешли сообщение из чата или дай @username/ID.")
-        return
-
-    autopub_service.set_autopub_config(chat_id=chat_id, chat_title=chat_title or '')
-    await state.clear()
-    await message.answer(
-        f"✅ Чат сохранён: <code>{chat_id}</code>"
-        + (f" ({chat_title})" if chat_title else ""))
-
-
-@router.callback_query(F.data == "apub:set_channel", IsAdmin())
+@router.callback_query(F.data == "apub:add_channel", IsAdmin())
 async def cb_set_channel(call: CallbackQuery, state: FSMContext):
     await state.set_state(AutoPubStates.waiting_channel_id)
     await call.message.answer(
-        "📢 <b>На какой канал слать анонсы?</b>\n\n"
+        "📢 <b>Добавить канал для анонсов</b>\n\n"
         "Перешли пост с канала, или отправь <code>@username</code> "
         "или ID <code>-100xxxxxxxxxx</code>.\n\n"
         "Бот должен быть админом канала!\n\n"
@@ -260,26 +215,155 @@ async def msg_set_channel(message: Message, state: FSMContext):
         elif txt.startswith('-') or txt.isdigit():
             try:
                 channel_id = int(txt)
+                try:
+                    ch = await message.bot.get_chat(channel_id)
+                    title = ch.title or str(channel_id)
+                except Exception:
+                    title = str(channel_id)
             except ValueError:
                 await message.answer("Не похоже на ID.")
                 return
     if channel_id is None:
         await message.answer("Не понял. Перешли пост, или дай @username/ID.")
         return
-    autopub_service.set_autopub_config(channel_id=channel_id)
+    autopub_service.add_channel(channel_id, title or '')
     await state.clear()
     await message.answer(
-        f"✅ Канал сохранён: <code>{channel_id}</code>"
-        + (f" ({title})" if title else ""))
+        f"✅ Канал добавлен: <b>{title or channel_id}</b>")
 
 
-@router.callback_query(F.data == "apub:set_link", IsAdmin())
-async def cb_set_link(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AutoPubStates.waiting_invite_link)
+@router.callback_query(F.data == "apub:del_channel", IsAdmin())
+async def cb_del_channel(call: CallbackQuery):
+    channels = autopub_service.get_channels()
+    kb = InlineKeyboardBuilder()
+    for c in channels:
+        kb.button(text=f"🗑 {c.get('title') or c['id']}",
+                  callback_data=f"apub:delch:{c['id']}")
+    kb.button(text="↩️ Назад", callback_data="apub:settings")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text("Какой канал удалить?",
+                                       reply_markup=kb.as_markup())
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("apub:delch:"), IsAdmin())
+async def cb_delch(call: CallbackQuery):
+    channel_id = call.data.split(":", 2)[2]
+    autopub_service.remove_channel(channel_id)
+    await call.answer("🗑 Удалён")
+    await cb_settings_menu(call)
+
+
+@router.callback_query(F.data == "apub:add_chat", IsAdmin())
+async def cb_set_chat(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AutoPubStates.waiting_chat_id)
     await call.message.answer(
-        "🔗 <b>Пригласительная ссылка на чат</b>\n\n"
-        "Отправь полную ссылку, по которой юзеры зайдут в чат с тестами.\n\n"
-        "Например:\n"
+        "💬 <b>Добавить чат для тестов</b>\n\n"
+        "Перешли любое сообщение из чата СЮДА — я возьму ID.\n\n"
+        "Или отправь <code>@username</code> или "
+        "<code>-100xxxxxxxxxx</code>.\n\n"
+        "Бот должен быть админом чата!\n\n"
+        "/cancel для отмены.")
+    await call.answer()
+
+
+@router.message(AutoPubStates.waiting_chat_id, IsAdmin())
+async def msg_set_chat(message: Message, state: FSMContext):
+    if message.text and message.text.startswith('/cancel'):
+        await state.clear()
+        await message.answer("❌ Отменено.")
+        return
+    chat_id = None
+    chat_title = None
+    if message.forward_from_chat:
+        chat_id = message.forward_from_chat.id
+        chat_title = message.forward_from_chat.title or ''
+    elif message.text:
+        txt = message.text.strip()
+        if txt.startswith('@'):
+            try:
+                ch = await message.bot.get_chat(txt)
+                chat_id = ch.id
+                chat_title = ch.title or txt
+            except Exception as e:
+                await message.answer(f"Не нашёл такой чат: {e}")
+                return
+        elif txt.startswith('-') or txt.isdigit():
+            try:
+                chat_id = int(txt)
+                try:
+                    ch = await message.bot.get_chat(chat_id)
+                    chat_title = ch.title or str(chat_id)
+                except Exception:
+                    chat_title = str(chat_id)
+            except ValueError:
+                await message.answer("Не похоже на ID.")
+                return
+    if chat_id is None:
+        await message.answer("Не понял. Перешли сообщение или дай @username/ID.")
+        return
+    autopub_service.add_chat(chat_id, chat_title or '')
+    await state.clear()
+    await message.answer(
+        f"✅ Чат добавлен: <b>{chat_title or chat_id}</b>\n\n"
+        f"⚠️ Не забудь задать ссылку-приглашение для этого чата "
+        f"в Настройках («🔗 Задать ссылку чату»).")
+
+
+@router.callback_query(F.data == "apub:del_chat", IsAdmin())
+async def cb_del_chat(call: CallbackQuery):
+    chats = autopub_service.get_chats()
+    kb = InlineKeyboardBuilder()
+    for c in chats:
+        kb.button(text=f"🗑 {c.get('title') or c['id']}",
+                  callback_data=f"apub:delcht:{c['id']}")
+    kb.button(text="↩️ Назад", callback_data="apub:settings")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text("Какой чат удалить?",
+                                       reply_markup=kb.as_markup())
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("apub:delcht:"), IsAdmin())
+async def cb_delcht(call: CallbackQuery):
+    chat_id = call.data.split(":", 2)[2]
+    autopub_service.remove_chat(chat_id)
+    await call.answer("🗑 Удалён")
+    await cb_settings_menu(call)
+
+
+@router.callback_query(F.data == "apub:set_chat_link", IsAdmin())
+async def cb_set_chat_link_pick(call: CallbackQuery, state: FSMContext):
+    chats = autopub_service.get_chats()
+    kb = InlineKeyboardBuilder()
+    for c in chats:
+        kb.button(text=f"💬 {c.get('title') or c['id']}",
+                  callback_data=f"apub:linkfor:{c['id']}")
+    kb.button(text="↩️ Назад", callback_data="apub:settings")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(
+            "Для какого чата задать ссылку-приглашение?",
+            reply_markup=kb.as_markup())
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("apub:linkfor:"), IsAdmin())
+async def cb_linkfor(call: CallbackQuery, state: FSMContext):
+    chat_id = call.data.split(":", 2)[2]
+    await state.set_state(AutoPubStates.waiting_invite_link)
+    await state.update_data(link_chat_id=chat_id)
+    await call.message.answer(
+        "🔗 <b>Ссылка-приглашение на чат</b>\n\n"
+        "Отправь полную ссылку:\n"
         "<code>https://t.me/+fo17_e1XrBAzZTEy</code>\n\n"
         "/cancel для отмены.")
     await call.answer()
@@ -295,9 +379,12 @@ async def msg_set_link(message: Message, state: FSMContext):
     if not link.startswith(('http://', 'https://', 't.me/')):
         await message.answer("Не похоже на ссылку. Отправь полный URL.")
         return
-    autopub_service.set_autopub_config(invite_link=link)
+    data = await state.get_data()
+    chat_id = data.get('link_chat_id')
+    if chat_id:
+        autopub_service.set_chat_invite(chat_id, link)
     await state.clear()
-    await message.answer(f"✅ Ссылка сохранена: {link}")
+    await message.answer(f"✅ Ссылка сохранена для чата: {link}")
 
 
 # ===================== ЗАПУСК СЕРИИ =====================
@@ -807,20 +894,18 @@ async def cb_cancel_queue(call: CallbackQuery):
 
 @router.callback_query(F.data == "apub:random_canal", IsAdmin())
 async def cb_random_canal(call: CallbackQuery, state: FSMContext):
-    cfg = autopub_service.get_autopub_config()
-    if not cfg.get('channel_id'):
-        await call.answer("Сначала задай канал в Настройках!", show_alert=True)
+    if not autopub_service.get_channels():
+        await call.answer("Сначала добавь канал в Настройках!", show_alert=True)
         return
-    # Шаг 1: выбор языка
     kb = InlineKeyboardBuilder()
-    kb.button(text="🇷🇺 Русский", callback_data="apubrnd_lang:ru")
-    kb.button(text="🇰🇿 Қазақша", callback_data="apubrnd_lang:kz")
+    kb.button(text="🇷🇺 Русский", callback_data="rnd_lang:ru")
+    kb.button(text="🇰🇿 Қазақша", callback_data="rnd_lang:kz")
     kb.button(text="↩️ Назад", callback_data="adm:autopub")
     kb.adjust(2, 1)
-    text = ("🎲 <b>10 случайных вопросов на канал</b>\n\n"
+    text = ("🎲 <b>10 вопросов на канал</b>\n\n"
             "Вопросы выйдут как Quiz Poll <b>без таймера</b>, "
-            "с задержкой 10 сек между ними.\n\n"
-            "Шаг 1 — выбери язык вопросов:")
+            "без нумерации, с задержкой 10 сек.\n\n"
+            "Шаг 1 — язык вопросов:")
     try:
         await call.message.edit_text(text, reply_markup=kb.as_markup(),
                                        parse_mode="HTML")
@@ -829,70 +914,107 @@ async def cb_random_canal(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("apubrnd_lang:"), IsAdmin())
-async def cb_random_lang(call: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("rnd_lang:"), IsAdmin())
+async def cb_rnd_lang(call: CallbackQuery, state: FSMContext):
     lang = call.data.split(":")[1]
-    await state.update_data(rnd_lang=lang)
-    # Шаг 2: выбор раздела
-    cats = db.fetchall("SELECT * FROM test_categories ORDER BY id")
+    await state.update_data(rnd_lang=lang, rnd_selected=[])
+    await _rnd_show_categories(call.message, state)
+    await call.answer()
+
+
+async def _rnd_show_categories(msg_obj, state: FSMContext):
+    data = await state.get_data()
+    lang = data.get('rnd_lang', 'ru')
+    selected = set(data.get('rnd_selected') or [])
+
+    from collections import defaultdict
+    by_cat = defaultdict(list)
+    tests = db.fetchall(
+        "SELECT id, title, category_id FROM tests "
+        "WHERE status='active' AND COALESCE(is_paid,0)=0 "
+        "AND COALESCE(is_private,0)=0 AND language=?", (lang,))
+    for t in tests:
+        by_cat[t.get('category_id')].append(t)
+
+    if not tests:
+        try:
+            await msg_obj.edit_text("⚠️ Нет подходящих тестов на этом языке.")
+        except Exception:
+            pass
+        return
+
+    text = (f"🎲 <b>10 вопросов</b> · {'🇷🇺' if lang == 'ru' else '🇰🇿'}\n\n"
+            f"✅ Выбрано тем: <b>{len(selected)}</b>\n\n"
+            f"Шаг 2 — выбери раздел, внутри отметь темы галочками:")
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎲 Из ВСЕХ разделов", callback_data=f"apubrnd_cat:all:{lang}")
+    cats = db.fetchall("SELECT * FROM test_categories ORDER BY id")
     for c in cats:
-        # Покажем только разделы где есть подходящие тесты
-        cnt = db.fetchone(
-            "SELECT COUNT(*) AS c FROM tests WHERE status='active' "
-            "AND COALESCE(is_paid,0)=0 AND COALESCE(is_private,0)=0 "
-            "AND language=? AND category_id=?", (lang, c['id']))['c']
-        if cnt == 0:
+        cat_tests = by_cat.get(c['id'], [])
+        if not cat_tests:
             continue
+        sel = sum(1 for t in cat_tests if t['id'] in selected)
         emoji = c.get('emoji') or '📚'
-        kb.button(text=f"{emoji} {c['name']} ({cnt})",
-                  callback_data=f"apubrnd_cat:{c['id']}:{lang}")
+        kb.button(text=f"{emoji} {c['name']} ({sel}/{len(cat_tests)})",
+                  callback_data=f"rnd_cat:{c['id']}")
+    no_cat = by_cat.get(None, [])
+    if no_cat:
+        sel = sum(1 for t in no_cat if t['id'] in selected)
+        kb.button(text=f"📭 Без раздела ({sel}/{len(no_cat)})",
+                  callback_data="rnd_cat:none")
+    if selected:
+        kb.button(text=f"✅ Готово, выбрать канал ({len(selected)})",
+                  callback_data="rnd_pick_channel")
     kb.button(text="↩️ Назад", callback_data="apub:random_canal")
     kb.adjust(1)
-    text = ("🎲 <b>10 случайных вопросов</b>\n\n"
-            f"Язык: <b>{'Русский' if lang == 'ru' else 'Қазақша'}</b>\n\n"
-            "Шаг 2 — выбери раздел:")
     try:
-        await call.message.edit_text(text, reply_markup=kb.as_markup(),
-                                       parse_mode="HTML")
+        await msg_obj.edit_text(text, reply_markup=kb.as_markup(),
+                                  parse_mode="HTML")
     except Exception:
-        pass
-    await call.answer()
+        try:
+            await msg_obj.answer(text, reply_markup=kb.as_markup(),
+                                   parse_mode="HTML")
+        except Exception:
+            pass
 
 
-@router.callback_query(F.data.startswith("apubrnd_cat:"), IsAdmin())
-async def cb_random_cat(call: CallbackQuery, state: FSMContext):
-    try:
-        _, arg, lang = call.data.split(":")
-    except ValueError:
-        await call.answer()
-        return
-    # Если "все разделы" — сразу публикуем
-    if arg == "all":
-        await _do_random_publish(call, category_id=None, topic_id=None, lang=lang)
-        return
-    cat_id = int(arg)
-    # Шаг 3: выбрать конкретную тему (тест) или все темы раздела
-    tests = db.fetchall(
-        "SELECT id, title FROM tests WHERE status='active' "
-        "AND COALESCE(is_paid,0)=0 AND COALESCE(is_private,0)=0 "
-        "AND language=? AND category_id=? ORDER BY id DESC", (lang, cat_id))
+@router.callback_query(F.data.startswith("rnd_cat:"), IsAdmin())
+async def cb_rnd_cat(call: CallbackQuery, state: FSMContext):
+    arg = call.data.split(":")[1]
+    data = await state.get_data()
+    lang = data.get('rnd_lang', 'ru')
+    selected = set(data.get('rnd_selected') or [])
+    if arg == "none":
+        tests = db.fetchall(
+            "SELECT id, title FROM tests WHERE status='active' "
+            "AND COALESCE(is_paid,0)=0 AND COALESCE(is_private,0)=0 "
+            "AND language=? AND category_id IS NULL ORDER BY id DESC", (lang,))
+        cat_title = "📭 Без раздела"
+    else:
+        cat_id = int(arg)
+        cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
+        tests = db.fetchall(
+            "SELECT id, title FROM tests WHERE status='active' "
+            "AND COALESCE(is_paid,0)=0 AND COALESCE(is_private,0)=0 "
+            "AND language=? AND category_id=? ORDER BY id DESC", (lang, cat_id))
+        cat_title = f"{cat.get('emoji') or '📚'} {cat['name']}"
     if not tests:
-        await call.answer("В разделе нет подходящих тестов.", show_alert=True)
+        await call.answer("Нет тем в разделе.", show_alert=True)
         return
-    cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
+    in_sel = sum(1 for t in tests if t['id'] in selected)
+    text = (f"<b>{cat_title}</b>\n\n"
+            f"✅ Отмечено: <b>{in_sel}/{len(tests)}</b>\n\n"
+            f"Тапай темы — отмечай галочками:")
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎲 Из ВСЕХ тем раздела",
-              callback_data=f"apubrnd_go:{cat_id}:0:{lang}")
-    for t in tests[:30]:
-        kb.button(text=f"📖 {t['title'][:40]}",
-                  callback_data=f"apubrnd_go:{cat_id}:{t['id']}:{lang}")
-    kb.button(text="↩️ Назад", callback_data=f"apubrnd_lang:{lang}")
+    for t in tests:
+        mark = "✅" if t['id'] in selected else "▫️"
+        kb.button(text=f"{mark} {t['title'][:40]}",
+                  callback_data=f"rnd_tog:{t['id']}:{arg}")
+    if in_sel == len(tests):
+        kb.button(text="◻️ Снять все", callback_data=f"rnd_all:{arg}:off")
+    else:
+        kb.button(text="☑️ Отметить все", callback_data=f"rnd_all:{arg}:on")
+    kb.button(text="↩️ К разделам", callback_data="rnd_back_cats")
     kb.adjust(1)
-    text = (f"🎲 <b>{cat.get('emoji') or '📚'} {cat['name']}</b>\n\n"
-            "Шаг 3 — выбери тему (конкретный тест) "
-            "или все темы раздела:")
     try:
         await call.message.edit_text(text, reply_markup=kb.as_markup(),
                                        parse_mode="HTML")
@@ -901,24 +1023,113 @@ async def cb_random_cat(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("apubrnd_go:"), IsAdmin())
-async def cb_random_go(call: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("rnd_tog:"), IsAdmin())
+async def cb_rnd_tog(call: CallbackQuery, state: FSMContext):
     try:
-        _, cat_id, topic_id, lang = call.data.split(":")
-        cat_id = int(cat_id)
-        topic_id = int(topic_id)
+        _, tid, arg = call.data.split(":")
+        tid = int(tid)
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    data = await state.get_data()
+    selected = set(data.get('rnd_selected') or [])
+    if tid in selected:
+        selected.discard(tid)
+    else:
+        selected.add(tid)
+    await state.update_data(rnd_selected=list(selected))
+    fake = type('F', (), {'data': f"rnd_cat:{arg}", 'message': call.message,
+                          'from_user': call.from_user, 'bot': call.bot,
+                          'answer': call.answer})()
+    await cb_rnd_cat(fake, state)
+
+
+@router.callback_query(F.data.startswith("rnd_all:"), IsAdmin())
+async def cb_rnd_all(call: CallbackQuery, state: FSMContext):
+    try:
+        _, arg, action = call.data.split(":")
     except ValueError:
         await call.answer()
         return
-    await _do_random_publish(
-        call, category_id=cat_id,
-        topic_id=(topic_id if topic_id > 0 else None), lang=lang)
+    data = await state.get_data()
+    lang = data.get('rnd_lang', 'ru')
+    selected = set(data.get('rnd_selected') or [])
+    if arg == "none":
+        tests = db.fetchall(
+            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
+            "AND COALESCE(is_private,0)=0 AND language=? AND category_id IS NULL",
+            (lang,))
+    else:
+        tests = db.fetchall(
+            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
+            "AND COALESCE(is_private,0)=0 AND language=? AND category_id=?",
+            (lang, int(arg)))
+    if action == "on":
+        for t in tests:
+            selected.add(t['id'])
+    else:
+        for t in tests:
+            selected.discard(t['id'])
+    await state.update_data(rnd_selected=list(selected))
+    fake = type('F', (), {'data': f"rnd_cat:{arg}", 'message': call.message,
+                          'from_user': call.from_user, 'bot': call.bot,
+                          'answer': call.answer})()
+    await cb_rnd_cat(fake, state)
 
 
-async def _do_random_publish(call, category_id, topic_id, lang):
-    await call.answer("Публикую… это займёт ~2 минуты (задержка 10 сек/вопрос)",
-                      show_alert=True)
-    # Получим username бота для кнопки
+@router.callback_query(F.data == "rnd_back_cats", IsAdmin())
+async def cb_rnd_back_cats(call: CallbackQuery, state: FSMContext):
+    await _rnd_show_categories(call.message, state)
+    await call.answer()
+
+
+@router.callback_query(F.data == "rnd_pick_channel", IsAdmin())
+async def cb_rnd_pick_channel(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = list(data.get('rnd_selected') or [])
+    if not selected:
+        await call.answer("Ничего не выбрано.", show_alert=True)
+        return
+    channels = autopub_service.get_channels()
+    if not channels:
+        await call.answer("Нет каналов. Добавь в Настройках.", show_alert=True)
+        return
+    # Если канал один — сразу публикуем
+    if len(channels) == 1:
+        await _rnd_do_publish(call, state, channels[0]['id'])
+        return
+    kb = InlineKeyboardBuilder()
+    for c in channels:
+        kb.button(text=f"📢 {c.get('title') or c['id']}",
+                  callback_data=f"rnd_go:{c['id']}")
+    kb.button(text="↩️ Назад", callback_data="rnd_back_cats")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(
+            "📤 <b>На какой канал отправить?</b>",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("rnd_go:"), IsAdmin())
+async def cb_rnd_go(call: CallbackQuery, state: FSMContext):
+    channel_id = call.data.split(":", 1)[1]
+    await _rnd_do_publish(call, state, channel_id)
+
+
+async def _rnd_do_publish(call, state: FSMContext, channel_id):
+    data = await state.get_data()
+    selected = list(data.get('rnd_selected') or [])
+    lang = data.get('rnd_lang', 'ru')
+    await state.clear()
+    if not selected:
+        await call.answer("Список пуст.", show_alert=True)
+        return
+    chan = autopub_service.get_channel_by_id(channel_id)
+    chan_name = (chan.get('title') if chan else channel_id)
+    await call.answer("Публикую…", show_alert=False)
     bot_username = ''
     try:
         me = await call.bot.get_me()
@@ -927,18 +1138,17 @@ async def _do_random_publish(call, category_id, topic_id, lang):
         pass
     try:
         await call.message.edit_text(
-            "🎲 Публикую 10 вопросов на канал…\n\n"
-            "⏳ Между вопросами задержка 10 сек, "
-            "это займёт около 2 минут. Подожди.")
+            f"🎲 Публикую 10 вопросов на «{chan_name}»…\n\n"
+            f"⏳ Между вопросами 10 сек, подожди ~2 минуты.")
     except Exception:
         pass
     sent, failed = await autopub_service.post_random_quiz_polls_to_channel(
-        call.bot, count=10, category_id=category_id,
-        topic_id=topic_id, language=lang, bot_username=bot_username)
+        call.bot, count=10, language=lang, bot_username=bot_username,
+        test_ids=selected, channel_id=channel_id)
     msg = (f"✅ <b>Готово!</b>\n\n"
+            f"Канал: <b>{chan_name}</b>\n"
             f"Отправлено вопросов: <b>{sent}</b>\n"
-            f"Ошибок: {failed}\n\n"
-            f"В конце добавлен пост с кнопкой «Начать тестирование».")
+            f"Ошибок: {failed}")
     try:
         await call.message.answer(msg, parse_mode="HTML",
                                     reply_markup=_main_menu_kb())
