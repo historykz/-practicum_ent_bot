@@ -28,10 +28,23 @@ KICK_WORDS = {"кик", "kick", "/kick"}
 MUTE_WORDS = {"мут", "mute", "/mute"}
 UNMUTE_WORDS = {"размут", "unmute", "/unmute"}
 UNBAN_WORDS = {"разбан", "unban", "/unban"}
+LOCK_WORDS = {"-чат", "-chat", "/lockchat", "закрыть"}
+UNLOCK_WORDS = {"+чат", "+chat", "/unlockchat", "открыть"}
 
 
 def _is_group(message: Message) -> bool:
     return message.chat.type in ("group", "supergroup")
+
+
+async def _is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Проверка: админ бота ИЛИ админ/создатель чата."""
+    if utils.is_admin(user_id):
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
 
 
 async def _resolve_target(message: Message, args: list[str], bot: Bot):
@@ -76,20 +89,29 @@ def _mention(username: str, full_name: str, user_id=None) -> str:
 
 @router.message(F.text.func(lambda t: t and t.strip().split()[0].lower() in
                              (BAN_WORDS | KICK_WORDS | MUTE_WORDS |
-                              UNMUTE_WORDS | UNBAN_WORDS)))
+                              UNMUTE_WORDS | UNBAN_WORDS |
+                              LOCK_WORDS | UNLOCK_WORDS)))
 async def cmd_moderation(message: Message, bot: Bot):
     if not _is_group(message):
         return
-    # Только админы бота
-    if not utils.is_admin(message.from_user.id):
+    # Админы бота ИЛИ админы чата
+    if not await _is_chat_admin(bot, message.chat.id, message.from_user.id):
         return
     parts = message.text.strip().split()
     cmd = parts[0].lower()
     args = parts[1:]
 
-    # «бан список» / «ban список»
+    # «бан список»
     if cmd in BAN_WORDS and args and args[0].lower() in ("список", "list"):
         await _show_banned_list(message)
+        return
+
+    # Закрыть/открыть чат
+    if cmd in LOCK_WORDS:
+        await _do_lock_chat(message, bot)
+        return
+    if cmd in UNLOCK_WORDS:
+        await _do_unlock_chat(message, bot)
         return
 
     user_id, username, full_name = await _resolve_target(message, args, bot)
@@ -104,6 +126,53 @@ async def cmd_moderation(message: Message, bot: Bot):
         await _do_unmute(message, bot, user_id, username, full_name)
     elif cmd in UNBAN_WORDS:
         await _do_unban(message, bot, user_id, username, full_name)
+
+
+async def _do_lock_chat(message: Message, bot: Bot):
+    """Закрыть чат: нельзя писать/медиа/стикеры, но реакции и инвайты можно."""
+    try:
+        perms = ChatPermissions(
+            can_send_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
+            can_send_polls=False,
+            can_send_other_messages=False,   # стикеры/гифки
+            can_add_web_page_previews=False,
+            can_invite_users=True,            # добавлять людей можно
+        )
+        await bot.set_chat_permissions(message.chat.id, permissions=perms)
+    except Exception as e:
+        await message.reply(f"⚠️ Не смог закрыть чат: {e}\n\n"
+                            f"Проверь что бот — админ с правом «Изменение профиля группы».")
+        return
+    await message.reply(
+        "🔒 <b>Чат закрыт.</b>\n\n"
+        "Писать, отправлять фото, голосовые и стикеры нельзя.\n"
+        "Реакции и добавление участников — разрешены.\n\n"
+        "Открыть: <code>+чат</code>", parse_mode="HTML")
+
+
+async def _do_unlock_chat(message: Message, bot: Bot):
+    """Открыть чат обратно."""
+    try:
+        perms = ChatPermissions(
+            can_send_messages=True, can_send_audios=True,
+            can_send_documents=True, can_send_photos=True,
+            can_send_videos=True, can_send_video_notes=True,
+            can_send_voice_notes=True, can_send_polls=True,
+            can_send_other_messages=True, can_add_web_page_previews=True,
+            can_invite_users=True)
+        await bot.set_chat_permissions(message.chat.id, permissions=perms)
+    except Exception as e:
+        await message.reply(f"⚠️ Не смог открыть чат: {e}")
+        return
+    await message.reply(
+        "🔓 <b>Чат открыт!</b>\n\nМожно снова писать и общаться.",
+        parse_mode="HTML")
 
 
 async def _do_ban(message, bot, user_id, username, full_name, args):
@@ -258,3 +327,118 @@ async def _show_banned_list(message: Message):
             name = f"@{m['username']}" if m.get('username') else (m.get('full_name') or 'юзер')
             lines.append(f"• {name} — {until}")
     await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+# ===================== АНТИ-ССЫЛКИ =====================
+
+import re as _re
+from datetime import timedelta as _td, datetime as _dt
+
+# Чужие телеграм-ссылки: t.me/..., @channel, telegram.me/...
+_LINK_PATTERNS = [
+    _re.compile(r'(https?://)?t\.me/\S+', _re.IGNORECASE),
+    _re.compile(r'(https?://)?telegram\.me/\S+', _re.IGNORECASE),
+    _re.compile(r'(https?://)?telegram\.dog/\S+', _re.IGNORECASE),
+]
+
+LINK_WARN_LIMIT = 3
+LINK_MUTE_SECONDS = 2 * 86400  # 2 дня
+
+
+def _get_link_warns(chat_id: int, user_id: int) -> int:
+    r = db.fetchone(
+        "SELECT warns FROM link_warnings WHERE chat_id=? AND user_tg_id=?",
+        (chat_id, user_id))
+    return (r['warns'] if r else 0) or 0
+
+
+def _add_link_warn(chat_id: int, user_id: int) -> int:
+    cur = _get_link_warns(chat_id, user_id) + 1
+    db.execute(
+        """INSERT INTO link_warnings (chat_id, user_tg_id, warns, updated_at)
+           VALUES (?,?,?,CURRENT_TIMESTAMP)
+           ON CONFLICT(chat_id, user_tg_id) DO UPDATE SET
+              warns=excluded.warns, updated_at=CURRENT_TIMESTAMP""",
+        (chat_id, user_id, cur))
+    return cur
+
+
+def _reset_link_warns(chat_id: int, user_id: int):
+    db.execute(
+        "DELETE FROM link_warnings WHERE chat_id=? AND user_tg_id=?",
+        (chat_id, user_id))
+
+
+def _message_has_foreign_link(message: Message) -> bool:
+    """Есть ли в сообщении чужая телеграм-ссылка или пересылка из канала."""
+    # Пересылка из канала/чата
+    if message.forward_from_chat is not None:
+        return True
+    # Текст и подпись
+    text = (message.text or "") + " " + (message.caption or "")
+    for pat in _LINK_PATTERNS:
+        if pat.search(text):
+            return True
+    # Ссылки-сущности (entities) типа text_link на t.me
+    entities = (message.entities or []) + (message.caption_entities or [])
+    for e in entities:
+        if getattr(e, 'type', None) == 'text_link' and e.url:
+            low = e.url.lower()
+            if 't.me/' in low or 'telegram.me/' in low or 'telegram.dog/' in low:
+                return True
+    return False
+
+
+async def check_antilink(message: Message, bot: Bot):
+    """Проверка чужих телеграм-ссылок. Вызывается из group_quiz.on_group_message."""
+    if not message.from_user:
+        return
+    if not _message_has_foreign_link(message):
+        return
+    # Админов чата и бота не трогаем
+    try:
+        if await _is_chat_admin(bot, message.chat.id, message.from_user.id):
+            return
+    except Exception:
+        pass
+
+    chat_id = message.chat.id
+    user = message.from_user
+
+    # Удаляем сообщение со ссылкой
+    try:
+        await bot.delete_message(chat_id, message.message_id)
+    except Exception:
+        pass
+
+    warns = _add_link_warn(chat_id, user.id)
+    mention = _mention(user.username or '', _full_name(user), user.id)
+
+    if warns >= LINK_WARN_LIMIT:
+        # Мут на 2 дня
+        until_dt = _dt.utcnow() + _td(seconds=LINK_MUTE_SECONDS)
+        perms = ChatPermissions(can_send_messages=False)
+        try:
+            await bot.restrict_chat_member(chat_id, user.id, permissions=perms,
+                                            until_date=until_dt)
+        except Exception as e:
+            log.warning("antilink mute: %s", e)
+        mod.record_action(chat_id, user.id, user.username or '',
+                          _full_name(user), 'mute', until_dt.isoformat(), 0)
+        _reset_link_warns(chat_id, user.id)
+        try:
+            await bot.send_message(
+                chat_id,
+                f"🔇 {mention} получил <b>3/3</b> предупреждения за ссылки "
+                f"и замучен на <b>2 дня</b>.", parse_mode="HTML")
+        except Exception:
+            pass
+    else:
+        try:
+            await bot.send_message(
+                chat_id,
+                f"⚠️ {mention}, ссылки на чужие каналы запрещены!\n"
+                f"Предупреждение <b>{warns}/{LINK_WARN_LIMIT}</b>. "
+                f"При 3 — мут на 2 дня.", parse_mode="HTML")
+        except Exception:
+            pass
