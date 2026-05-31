@@ -26,8 +26,17 @@ async def cmd_stop_series(message: Message, bot: Bot):
     """Команда /stop в чате — остановить серию тестов. Только для админов бота."""
     if not utils.is_admin(message.from_user.id):
         return
-    cfg = autopub_service.get_autopub_config()
-    target_chat_id = cfg.get('chat_id')
+    # Чат где остановить: текущий (если группа) или из активной серии
+    target_chat_id = None
+    if message.chat.type in ("group", "supergroup"):
+        target_chat_id = message.chat.id
+    else:
+        st = autopub_service.get_active_series()
+        if st and st.get('chat_id'):
+            target_chat_id = st['chat_id']
+        else:
+            chats = autopub_service.get_chats()
+            target_chat_id = chats[0]['id'] if chats else None
     # Отменяем все pending
     cancelled = 0
     try:
@@ -394,10 +403,9 @@ async def msg_set_link(message: Message, state: FSMContext):
 @router.callback_query(F.data == "apub:start", IsAdmin())
 async def cb_start_series(call: CallbackQuery, state: FSMContext):
     """Шаг 1: показываем разделы для выбора тестов."""
-    cfg = autopub_service.get_autopub_config()
-    if not cfg.get('chat_id'):
+    if not autopub_service.get_chats():
         await call.answer(
-            "Сначала задай чат для публикации в Настройках!",
+            "Сначала добавь чат для публикации в Настройках!",
             show_alert=True)
         return
     await state.update_data(apub_selected=[])
@@ -697,7 +705,80 @@ async def cb_when_chosen(call: CallbackQuery, state: FSMContext):
     except ValueError:
         await call.answer()
         return
-    await _enqueue_series(call, state, minutes)
+    await state.update_data(apub_minutes=minutes)
+    await _show_chat_picker(call, state)
+
+
+async def _show_chat_picker(call: CallbackQuery, state: FSMContext):
+    """Выбор чата для публикации тестов."""
+    chats = autopub_service.get_chats()
+    if not chats:
+        await call.answer("Нет чатов. Добавь в Настройках.", show_alert=True)
+        return
+    if len(chats) == 1:
+        # Один чат — выбираем автоматом, идём к каналу
+        await state.update_data(apub_chat_id=chats[0]['id'])
+        await _show_channel_picker(call, state)
+        return
+    kb = InlineKeyboardBuilder()
+    for c in chats:
+        warn = "" if c.get('invite') else " ⚠️"
+        kb.button(text=f"💬 {c.get('title') or c['id']}{warn}",
+                  callback_data=f"apub:chat:{c['id']}")
+    kb.button(text="↩️ Назад", callback_data="apub:choose_mode")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(
+            "💬 <b>В каком чате проводить тесты?</b>\n\n"
+            "(⚠️ = у чата не задана ссылка-приглашение)",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("apub:chat:"), IsAdmin())
+async def cb_pick_chat(call: CallbackQuery, state: FSMContext):
+    chat_id = call.data.split(":", 2)[2]
+    await state.update_data(apub_chat_id=chat_id)
+    await _show_channel_picker(call, state)
+
+
+async def _show_channel_picker(call: CallbackQuery, state: FSMContext):
+    """Выбор канала для анонсов."""
+    channels = autopub_service.get_channels()
+    if not channels:
+        # Нет каналов — публикуем без анонса
+        await state.update_data(apub_channel_id=None)
+        data = await state.get_data()
+        await _enqueue_series(call, state, data.get('apub_minutes', 0))
+        return
+    if len(channels) == 1:
+        await state.update_data(apub_channel_id=channels[0]['id'])
+        data = await state.get_data()
+        await _enqueue_series(call, state, data.get('apub_minutes', 0))
+        return
+    kb = InlineKeyboardBuilder()
+    for c in channels:
+        kb.button(text=f"📢 {c.get('title') or c['id']}",
+                  callback_data=f"apub:chan:{c['id']}")
+    kb.button(text="🚫 Без анонса на канал", callback_data="apub:chan:none")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(
+            "📢 <b>На каком канале анонсировать?</b>",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("apub:chan:"), IsAdmin())
+async def cb_pick_channel(call: CallbackQuery, state: FSMContext):
+    arg = call.data.split(":", 2)[2]
+    await state.update_data(apub_channel_id=(None if arg == "none" else arg))
+    data = await state.get_data()
+    await _enqueue_series(call, state, data.get('apub_minutes', 0))
 
 
 @router.message(AutoPubStates.waiting_custom_time, IsAdmin())
@@ -722,6 +803,8 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
     selected = list(data.get('apub_selected') or [])
     mode = data.get('apub_mode', 'mix')
     tpl_id = data.get('apub_template', 0)
+    sel_chat_id = data.get('apub_chat_id')
+    sel_channel_id = data.get('apub_channel_id')
     lang = 'ru'  # язык по умолчанию для микса
     if not selected:
         await call.answer("Список пуст.", show_alert=True)
@@ -737,21 +820,21 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
         run_at = datetime.utcnow() + timedelta(minutes=minutes)
         import time as _time
         series_id = f"s{int(_time.time())}"
-        # Один тест в серии (микс)
         autopub_service.enqueue_test(
             mix_id, run_at, call.from_user.id,
             series_id=series_id, series_pos=0, series_total=1,
             series_test_ids=str(mix_id))
-        # Состояние серии — чтобы после finish открылся чат
         autopub_service.save_series_state(
-            series_id, str(mix_id), 1, call.from_user.id)
+            series_id, str(mix_id), 1, call.from_user.id,
+            chat_id=sel_chat_id, channel_id=sel_channel_id)
         # Если время в будущем — анонс СРАЗУ С ТЕМАМИ
-        if minutes > 0:
+        if minutes > 0 and sel_channel_id:
             when_str = _humanize_minutes(minutes)
             mix_test = db.fetchone("SELECT * FROM tests WHERE id=?", (mix_id,))
             try:
                 await autopub_service.announce_batch_with_topics(
-                    call.bot, [dict(mix_test)], when_str)
+                    call.bot, [dict(mix_test)], when_str,
+                    channel_id=sel_channel_id)
             except Exception:
                 pass
         # minutes == 0 — worker сам отправит полный анонс «уже идёт»
@@ -785,11 +868,12 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
         # Сохраняем «состояние серии» для цепочки
         autopub_service.save_series_state(
             series_id, series_test_ids, len(selected),
-            call.from_user.id)
+            call.from_user.id,
+            chat_id=sel_chat_id, channel_id=sel_channel_id)
         enqueued = len(selected)
 
         # Пре-анонс СРАЗУ С ТЕМАМИ если время в будущем
-        if minutes > 0:
+        if minutes > 0 and sel_channel_id:
             when_str = _humanize_minutes(minutes)
             tests_obj = []
             for tid in selected:
@@ -798,7 +882,7 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
                     tests_obj.append(dict(t))
             try:
                 await autopub_service.announce_batch_with_topics(
-                    call.bot, tests_obj, when_str)
+                    call.bot, tests_obj, when_str, channel_id=sel_channel_id)
             except Exception as e:
                 log.warning("pre-announce topics: %s", e)
         # При minutes == 0 worker сам отправит полный анонс с темами
