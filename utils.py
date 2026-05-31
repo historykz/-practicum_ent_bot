@@ -140,6 +140,20 @@ def has_profile_subjects(tg_id: int) -> bool:
     return len(get_profile_subjects(tg_id)) > 0
 
 
+def is_anonymous_chat_admin(message) -> bool:
+    """
+    Сообщение отправлено от имени чата (анонимный админ)?
+    Telegram ставит sender_chat == chat для анонимных админов.
+    """
+    try:
+        sc = getattr(message, 'sender_chat', None)
+        if sc and message.chat and sc.id == message.chat.id:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def set_blocked(user_id: int, blocked: bool) -> None:
     db.execute("UPDATE users SET is_blocked=? WHERE id=?", (1 if blocked else 0, user_id))
 
