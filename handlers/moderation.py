@@ -47,6 +47,16 @@ async def _is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
         return False
 
 
+async def _can_moderate(message: Message, bot: Bot) -> bool:
+    """Может ли модерировать: анонимный админ чата ИЛИ обычный админ."""
+    # Анонимный админ (сообщение от имени чата)
+    if utils.is_anonymous_chat_admin(message):
+        return True
+    if message.from_user:
+        return await _is_chat_admin(bot, message.chat.id, message.from_user.id)
+    return False
+
+
 async def _resolve_target(message: Message, args: list[str], bot: Bot):
     """
     Вернуть (user_tg_id, username, full_name) цели — из reply или @username.
@@ -94,8 +104,8 @@ def _mention(username: str, full_name: str, user_id=None) -> str:
 async def cmd_moderation(message: Message, bot: Bot):
     if not _is_group(message):
         return
-    # Админы бота ИЛИ админы чата
-    if not await _is_chat_admin(bot, message.chat.id, message.from_user.id):
+    # Анонимный админ чата ИЛИ обычный админ
+    if not await _can_moderate(message, bot):
         return
     parts = message.text.strip().split()
     cmd = parts[0].lower()
@@ -391,6 +401,9 @@ def _message_has_foreign_link(message: Message) -> bool:
 
 async def check_antilink(message: Message, bot: Bot):
     """Проверка чужих телеграм-ссылок. Вызывается из group_quiz.on_group_message."""
+    # Сообщения от имени чата (анонимный админ) — не трогаем
+    if utils.is_anonymous_chat_admin(message):
+        return
     if not message.from_user:
         return
     if not _message_has_foreign_link(message):
