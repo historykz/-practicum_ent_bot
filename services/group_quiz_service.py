@@ -424,6 +424,14 @@ async def _send_question(bot: Bot, gq_id: int):
         await _send_question(bot, gq_id)
         return
 
+    # Фото вопроса (если есть) — перед Quiz Poll
+    _gphoto = question.get('photo_file_id') or question.get('image_file_id')
+    if _gphoto:
+        try:
+            await bot.send_photo(chat_id=gq['chat_id'], photo=_gphoto)
+        except Exception:
+            pass
+
     try:
         msg = await bot.send_poll(
             chat_id=gq['chat_id'],
