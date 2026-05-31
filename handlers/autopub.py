@@ -748,15 +748,12 @@ async def _show_channel_picker(call: CallbackQuery, state: FSMContext):
     """Выбор канала для анонсов."""
     channels = autopub_service.get_channels()
     if not channels:
-        # Нет каналов — публикуем без анонса
         await state.update_data(apub_channel_id=None)
-        data = await state.get_data()
-        await _enqueue_series(call, state, data.get('apub_minutes', 0))
+        await _ask_bot_announce(call, state)
         return
     if len(channels) == 1:
         await state.update_data(apub_channel_id=channels[0]['id'])
-        data = await state.get_data()
-        await _enqueue_series(call, state, data.get('apub_minutes', 0))
+        await _ask_bot_announce(call, state)
         return
     kb = InlineKeyboardBuilder()
     for c in channels:
@@ -777,8 +774,35 @@ async def _show_channel_picker(call: CallbackQuery, state: FSMContext):
 async def cb_pick_channel(call: CallbackQuery, state: FSMContext):
     arg = call.data.split(":", 2)[2]
     await state.update_data(apub_channel_id=(None if arg == "none" else arg))
+    await _ask_bot_announce(call, state)
+
+
+async def _ask_bot_announce(call: CallbackQuery, state: FSMContext):
+    """Спросить — анонсировать ли тест в боте для зарегистрированных."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, анонсировать", callback_data="apub:botann:yes")
+    kb.button(text="❌ Нет, не анонсировать", callback_data="apub:botann:no")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(
+            "📣 <b>Анонсировать тест в боте</b> для зарегистрированных "
+            "пользователей?\n\n"
+            "Все получат уведомление со ссылкой на чат. Если кто-то сейчас "
+            "проходит тест — ему предложат перейти или продолжить.",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("apub:botann:"), IsAdmin())
+async def cb_bot_announce_choice(call: CallbackQuery, state: FSMContext):
+    choice = call.data.split(":")[2]
+    await state.update_data(apub_bot_announce=(choice == "yes"))
     data = await state.get_data()
     await _enqueue_series(call, state, data.get('apub_minutes', 0))
+
+
 
 
 @router.message(AutoPubStates.waiting_custom_time, IsAdmin())
@@ -895,6 +919,32 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
             f"Следующие — сразу после результатов предыдущего (через 20 сек)\n\n"
             + (f"📢 Анонс с темами отправлен на канал." if minutes > 0
               else "🚀 Стартуем! Бот сейчас отправит анонс."))
+
+    # Анонс в боте всем юзерам (если выбрано)
+    if data.get('apub_bot_announce'):
+        try:
+            # Собираем темы
+            titles = []
+            ids_for_titles = selected if mode != 'mix' else selected
+            for tid in ids_for_titles:
+                t = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+                if t:
+                    titles.append(t['title'])
+            # Ссылка чата
+            invite = ''
+            if sel_chat_id:
+                cc = autopub_service.get_chat_by_id(sel_chat_id)
+                invite = (cc.get('invite') if cc else '') or ''
+            when_str = _humanize_minutes(minutes)
+            # Сохраняем активный анонс (для допоказа после теста)
+            autopub_service.set_bot_announce(invite, titles, active=True)
+            # Рассылаем
+            import asyncio as _a
+            _a.create_task(
+                autopub_service.broadcast_test_announce(
+                    call.bot, titles, invite, when_str))
+        except Exception as e:
+            log.warning("bot announce broadcast: %s", e)
 
     try:
         await call.message.edit_text(summary, reply_markup=_main_menu_kb(),
