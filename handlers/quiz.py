@@ -22,6 +22,37 @@ router = Router(name="quiz")
 log = logging.getLogger(__name__)
 
 
+@router.callback_query(F.data.startswith("redoerr:"))
+async def cb_redo_errors(call: CallbackQuery):
+    """Повторить вопросы где ошибся (не засчитывается)."""
+    await call.answer()
+    try:
+        prev_attempt = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        return
+    # Проверим владельца
+    import database as db
+    u = db.fetchone("SELECT id FROM users WHERE tg_id=?", (call.from_user.id,))
+    a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (prev_attempt,))
+    if not u or not a or a.get('user_id') != u['id']:
+        return
+    new_attempt = test_runner.create_redo_attempt(prev_attempt)
+    if not new_attempt:
+        await call.answer("Нет ошибок для повтора 🎉", show_alert=True)
+        return
+    try:
+        await call.message.answer(
+            "🔁 <b>Повтор ошибок</b>\n\n"
+            "Сейчас пройдёшь только те вопросы, где ошибся. "
+            "Эта попытка не влияет на статистику.",
+            parse_mode="HTML")
+    except Exception:
+        pass
+    await asyncio.sleep(1)
+    await test_runner.send_current_question(
+        call.bot, new_attempt, call.message.chat.id)
+
+
 # ============================
 # Личные ответы
 # ============================
