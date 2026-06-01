@@ -83,31 +83,6 @@ async def on_my_chat_member(event: ChatMemberUpdated, bot: Bot):
             log.warning("Не удалось отправить приветствие в %s: %s", chat.id, e)
 
 
-@router.message(F.chat.type.in_({"group", "supergroup"}))
-async def on_group_message(message: Message, bot: Bot):
-    """Любое сообщение в группе — обновляем seen_at + проверяем ссылки."""
-    if not message.chat or message.chat.type not in ("group", "supergroup"):
-        return
-    chat = message.chat
-    existing = db.fetchone("SELECT chat_id FROM known_groups WHERE chat_id=?", (chat.id,))
-    if not existing:
-        db.execute(
-            """INSERT OR IGNORE INTO known_groups (chat_id, title, type, seen_at)
-               VALUES (?,?,?, CURRENT_TIMESTAMP)""",
-            (chat.id, chat.title or "", chat.type))
-    else:
-        db.execute(
-            "UPDATE known_groups SET title=?, seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
-            (chat.title or "", chat.id))
-
-    # Антиссылки — проверяем чужие телеграм-ссылки
-    try:
-        from handlers.moderation import check_antilink
-        await check_antilink(message, bot)
-    except Exception as e:
-        log.warning("antilink check: %s", e)
-
-
 # ============ /stop в группе ============
 
 @router.message(Command("stop"), F.chat.type.in_({"group", "supergroup"}))
@@ -335,3 +310,29 @@ async def cb_gq_join(call: CallbackQuery):
             "already_in": "Вы уже в списке.",
         }
         await call.answer(msgs.get(key, "Не удалось присоединиться."), show_alert=False)
+
+
+# ============ Catch-all групповых сообщений (В САМОМ КОНЦЕ!) ============
+# Идёт последним чтобы не перехватывать /stop, /launch_ и другие команды.
+
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def on_group_message(message: Message, bot: Bot):
+    """Любое прочее сообщение в группе — seen_at + антиссылки."""
+    if not message.chat or message.chat.type not in ("group", "supergroup"):
+        return
+    chat = message.chat
+    existing = db.fetchone("SELECT chat_id FROM known_groups WHERE chat_id=?", (chat.id,))
+    if not existing:
+        db.execute(
+            """INSERT OR IGNORE INTO known_groups (chat_id, title, type, seen_at)
+               VALUES (?,?,?, CURRENT_TIMESTAMP)""",
+            (chat.id, chat.title or "", chat.type))
+    else:
+        db.execute(
+            "UPDATE known_groups SET title=?, seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
+            (chat.title or "", chat.id))
+    try:
+        from handlers.moderation import check_antilink
+        await check_antilink(message, bot)
+    except Exception as e:
+        log.warning("antilink check: %s", e)
