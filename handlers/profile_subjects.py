@@ -48,29 +48,47 @@ def _subjects_text(lang: str, selected_count: int, from_profile: bool) -> str:
             "ҰБТ-да сен 2 бейіндік пән тапсырасың "
             "(міндетті Қазақстан тарихы мен Математикалық "
             "сауаттылықтан бөлек).\n\n"
-            "Дәл <b>2</b> пәнді белгіле 👇")
+            "Дәл <b>2</b> пәнді белгіле 👇\n\n"
+            "❓ <b>Пәнің тізімде жоқ па?</b> «Басқа» таңда — "
+            "барлық тесттер ашылады. «Басқа» 2 пәнге саналады.")
     else:
         base = (
             "🎓 <b>Выбери профильные предметы</b>\n\n"
             "На ЕНТ ты сдаёшь 2 профильных предмета "
             "(помимо обязательных История Казахстана и "
             "Математическая грамотность).\n\n"
-            "Отметь ровно <b>2</b> галочками 👇")
+            "Отметь ровно <b>2</b> галочками 👇\n\n"
+            "❓ <b>Нет твоего предмета?</b> Выбери «Другое» — "
+            "это откроет тебе ВСЕ доступные тесты. "
+            "«Другое» считается за 2 предмета.")
     base += f"\n\n✅ {'Таңдалды' if lang == 'kz' else 'Выбрано'}: " \
             f"<b>{selected_count}/{REQUIRED_COUNT}</b>"
     return base
 
 
+def _selected_weight(selected: set) -> int:
+    """Вес выбора: 'other' = 2, обычный предмет = 1."""
+    w = 0
+    for s in selected:
+        w += 2 if s == 'other' else 1
+    return w
+
+
 def _subjects_kb(selected: set, lang: str, from_profile: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     cats = get_optional_categories()
+    has_other = 'other' in selected
     for c in cats:
         mark = "✅" if c['id'] in selected else "▫️"
         emoji = c.get('emoji') or '📚'
         kb.button(text=f"{mark} {emoji} {c['name']}",
                   callback_data=f"psub:tog:{c['id']}")
-    # Кнопка продолжить — только если выбрано ровно нужное число
-    if len(selected) == REQUIRED_COUNT:
+    # Кнопка «Другое»
+    omark = "✅" if has_other else "▫️"
+    kb.button(text=f"{omark} ❓ Другое (предмета нет в списке)",
+              callback_data="psub:tog:other")
+    # Кнопка продолжить — когда вес == REQUIRED_COUNT (2)
+    if _selected_weight(selected) == REQUIRED_COUNT:
         if from_profile:
             kb.button(text="💾 Сохранить", callback_data="psub:save")
         else:
@@ -106,31 +124,42 @@ async def show_subjects_screen(call: CallbackQuery, state: FSMContext,
 
 @router.callback_query(F.data.startswith("psub:tog:"))
 async def cb_toggle_subject(call: CallbackQuery, state: FSMContext):
-    try:
-        cat_id = int(call.data.split(":")[2])
-    except (ValueError, IndexError):
-        await call.answer()
-        return
+    raw = call.data.split(":")[2]
+    # 'other' или число
+    item = 'other' if raw == 'other' else None
+    if item is None:
+        try:
+            item = int(raw)
+        except ValueError:
+            await call.answer()
+            return
     data = await state.get_data()
     selected = set(data.get('psub_selected') or [])
     lang = _resolve_lang(call.from_user.id)
 
-    if cat_id in selected:
-        selected.discard(cat_id)
+    if item in selected:
+        selected.discard(item)
     else:
-        if len(selected) >= REQUIRED_COUNT:
+        # Вес: other=2, обычный=1. Лимит = REQUIRED_COUNT (2)
+        add_weight = 2 if item == 'other' else 1
+        if _selected_weight(selected) + add_weight > REQUIRED_COUNT:
             await call.answer(
-                "⚠️ Можно выбрать только 2 предмета.\n"
-                "Сначала сними галочку с одного." if lang == "ru"
-                else "⚠️ Тек 2 пән таңдауға болады.\n"
-                     "Алдымен біреуінен белгіні алып таста.",
+                "⚠️ Можно выбрать только 2 предмета (или «Другое» = 2).\n"
+                "Сначала сними галочку." if lang == "ru"
+                else "⚠️ Тек 2 пән (немесе «Басқа» = 2).\n"
+                     "Алдымен біреуін алып таста.",
                 show_alert=True)
             return
-        selected.add(cat_id)
+        # other нельзя совмещать с другими (он и так =2)
+        if item == 'other':
+            selected = {'other'}
+        else:
+            selected.discard('other')
+            selected.add(item)
     await state.update_data(psub_selected=list(selected))
 
     from_profile = data.get('psub_from_profile', False)
-    text = _subjects_text(lang, len(selected), from_profile)
+    text = _subjects_text(lang, _selected_weight(selected), from_profile)
     kb = _subjects_kb(selected, lang, from_profile)
     try:
         await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -144,9 +173,11 @@ async def cb_save_subjects(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     selected = list(data.get('psub_selected') or [])
     lang = _resolve_lang(call.from_user.id)
-    if len(selected) != REQUIRED_COUNT:
-        await call.answer("Нужно выбрать ровно 2 предмета.", show_alert=True)
+    if _selected_weight(set(selected)) != REQUIRED_COUNT:
+        await call.answer("Нужно выбрать 2 предмета (или «Другое»).",
+                          show_alert=True)
         return
+    # Сохраняем (включая 'other' как строку)
     utils.set_profile_subjects(call.from_user.id, selected)
     from_profile = data.get('psub_from_profile', False)
     await state.update_data(psub_selected=None, psub_from_profile=None)
@@ -154,6 +185,9 @@ async def cb_save_subjects(call: CallbackQuery, state: FSMContext):
     # Покажем что выбрано
     names = []
     for cid in selected:
+        if cid == 'other':
+            names.append("❓ Другое (все тесты)")
+            continue
         c = db.fetchone("SELECT name, emoji FROM test_categories WHERE id=?", (cid,))
         if c:
             names.append(f"{c.get('emoji') or '📚'} {c['name']}")
