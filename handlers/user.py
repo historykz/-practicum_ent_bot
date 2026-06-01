@@ -79,7 +79,9 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
                   callback_data="m:private_tests")
 
     # Категории: обязательные (всем) + профильные юзера
-    profile_ids = set(utils.get_profile_subjects(call.from_user.id))
+    profile_ids_raw = utils.get_profile_subjects(call.from_user.id)
+    has_other = 'other' in profile_ids_raw
+    profile_ids = set(x for x in profile_ids_raw if x != 'other')
 
     def _cnt(cat_id):
         return db.fetchone(
@@ -89,8 +91,12 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
             (cat_id, lang))['c']
 
     required_cats = [c for c in cats if c.get('is_required')]
-    profile_cats = [c for c in cats
-                    if not c.get('is_required') and c['id'] in profile_ids]
+    if has_other:
+        # «Другое» — показываем ВСЕ профильные разделы
+        profile_cats = [c for c in cats if not c.get('is_required')]
+    else:
+        profile_cats = [c for c in cats
+                        if not c.get('is_required') and c['id'] in profile_ids]
 
     has_any = False
     # Обязательные
