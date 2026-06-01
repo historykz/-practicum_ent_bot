@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 from config import ANTISPAM_COOLDOWN_SECONDS
 from locales import t
 from utils import get_or_create_user, is_blocked
+import database as db
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,33 @@ class UserContextMiddleware(BaseMiddleware):
                     except Exception:
                         pass
                 return
+        except Exception:
+            pass
+
+        # Режим обслуживания — кроме админов никто не может пользоваться
+        try:
+            import utils as _utils
+            if not _utils.is_admin(tg_user.id):
+                mrow = db.fetchone(
+                    "SELECT value FROM settings WHERE key='maintenance_mode'")
+                if mrow and str(mrow.get('value')) == '1':
+                    msg_row = db.fetchone(
+                        "SELECT value FROM settings WHERE key='maintenance_text'")
+                    mtext = (msg_row.get('value') if msg_row else None) or (
+                        "🔧 Бот временно на обслуживании.\n\n"
+                        "Мы устраняем неполадки и скоро вернёмся. "
+                        "Спасибо за терпение! 🙏")
+                    if isinstance(event, Message):
+                        try:
+                            await event.answer(mtext)
+                        except Exception:
+                            pass
+                    elif isinstance(event, CallbackQuery):
+                        try:
+                            await event.answer(mtext, show_alert=True)
+                        except Exception:
+                            pass
+                    return
         except Exception:
             pass
 
