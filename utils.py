@@ -117,21 +117,38 @@ def is_blocked(tg_id: int) -> bool:
     return bool(row and row["is_blocked"])
 
 
-def get_profile_subjects(tg_id: int) -> list[int]:
-    """Вернуть список category_id профильных предметов юзера."""
+def get_profile_subjects(tg_id: int) -> list:
+    """Список профильных: category_id (int) и/или 'other' (str)."""
     row = db.fetchone("SELECT profile_subjects FROM users WHERE tg_id=?", (tg_id,))
     if not row or not row.get('profile_subjects'):
         return []
-    try:
-        return [int(x) for x in str(row['profile_subjects']).split(',')
-                if x.strip().isdigit()]
-    except Exception:
-        return []
+    out = []
+    for x in str(row['profile_subjects']).split(','):
+        x = x.strip()
+        if x == 'other':
+            out.append('other')
+        elif x.isdigit():
+            out.append(int(x))
+    return out
 
 
-def set_profile_subjects(tg_id: int, category_ids: list[int]) -> None:
-    """Сохранить профильные предметы юзера (список category_id)."""
-    csv = ",".join(str(int(x)) for x in category_ids)
+def has_other_subject(tg_id: int) -> bool:
+    """Выбрал ли юзер 'Другое' (показывать все тесты)."""
+    return 'other' in get_profile_subjects(tg_id)
+
+
+def set_profile_subjects(tg_id: int, items: list) -> None:
+    """Сохранить профильные (category_id или 'other')."""
+    parts = []
+    for x in items:
+        if x == 'other':
+            parts.append('other')
+        else:
+            try:
+                parts.append(str(int(x)))
+            except (ValueError, TypeError):
+                pass
+    csv = ",".join(parts)
     db.execute("UPDATE users SET profile_subjects=? WHERE tg_id=?",
                 (csv, tg_id))
 
