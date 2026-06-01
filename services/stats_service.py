@@ -74,6 +74,23 @@ def total_users() -> int:
     return _count("SELECT COUNT(*) AS c FROM users")
 
 
+def users_by_language() -> dict:
+    """Сколько юзеров на каждом языке."""
+    ru = _count("SELECT COUNT(*) AS c FROM users WHERE language='ru'")
+    kz = _count("SELECT COUNT(*) AS c FROM users WHERE language='kz'")
+    return {"ru": ru, "kz": kz}
+
+
+def new_users_by_lang(period_days: int) -> dict:
+    since = _since(period_days)
+    try:
+        ru = _count("SELECT COUNT(*) AS c FROM users WHERE language='ru' AND created_at >= ?", (since,))
+        kz = _count("SELECT COUNT(*) AS c FROM users WHERE language='kz' AND created_at >= ?", (since,))
+        return {"ru": ru, "kz": kz}
+    except Exception:
+        return {"ru": 0, "kz": 0}
+
+
 def profile_subjects_stats() -> list:
     """Сколько юзеров выбрали каждый профильный предмет."""
     rows = db.fetchall(
@@ -105,7 +122,12 @@ def build_stats_text() -> str:
     lines = ["📊 <b>Статистика бота</b>\n"]
 
     lines.append(f"🟢 Сейчас проходят тест: <b>{active_now()}</b>")
-    lines.append(f"👥 Всего пользователей: <b>{total_users()}</b>\n")
+    lines.append(f"👥 Всего пользователей: <b>{total_users()}</b>")
+
+    # По языкам
+    bl = users_by_language()
+    lines.append(f"  🇷🇺 Русское отделение: <b>{bl['ru']}</b>")
+    lines.append(f"  🇰🇿 Казахское отделение: <b>{bl['kz']}</b>\n")
 
     # Новые юзеры
     lines.append("<b>📈 Новые пользователи:</b>")
