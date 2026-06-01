@@ -40,6 +40,25 @@ def _menu_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+@router.callback_query(F.data == "adm:stats", IsAdmin())
+async def cb_stats(call: CallbackQuery):
+    await call.answer()
+    from services import stats_service
+    try:
+        text = stats_service.build_stats_text()
+    except Exception as e:
+        log.exception("stats: %s", e)
+        text = f"⚠️ Ошибка статистики: {e}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔄 Обновить", callback_data="adm:stats"),
+        InlineKeyboardButton(text="↩️ В админку", callback_data="m:admin"),
+    ]])
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
 @router.callback_query(F.data == "adm:backup", IsAdmin())
 async def cb_backup_menu(call: CallbackQuery):
     c = backup_service.backup_counts()
@@ -206,6 +225,7 @@ async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
         f"• Медиафайлов: {report['media']}" +
             (f" (не удалось: {report['media_failed']}) ⚠️" if report['media_failed'] else " ✅"),
         f"• Доступов: {report['access']} ✅",
+        f"• Премиум-доступов: {report.get('premium', 0)} ✅",
     ]
     if report['errors']:
         lines.append(f"\n⚠️ <b>Проблемы ({len(report['errors'])}):</b>")
