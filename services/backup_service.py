@@ -26,7 +26,7 @@ STRUCTURE_TABLES = [
     "questions",
     "question_options",
 ]
-ACCESS_TABLES = ["private_test_access"]
+ACCESS_TABLES = ["private_test_access", "premium_users"]
 
 
 def _dump_table(table: str) -> list:
@@ -192,13 +192,21 @@ async def restore_backup(bot, zip_path: str, mode: str = "replace") -> dict:
                 _insert_row("test_categories", dict(row), keep_id=True)
                 cat_id_map[old_id] = old_id
             else:
-                r2 = dict(row); r2.pop('id', None)
-                cur = db.execute(
-                    "INSERT INTO test_categories (name,emoji,sort_order,created_by,is_required) "
-                    "VALUES (?,?,?,?,?)",
-                    (r2.get('name'), r2.get('emoji','📚'), r2.get('sort_order',0),
-                     r2.get('created_by'), r2.get('is_required',0)))
-                cat_id_map[old_id] = cur.lastrowid
+                # При append — если категория с таким именем уже есть, переиспользуем её
+                existing = db.fetchone(
+                    "SELECT id FROM test_categories WHERE name=?",
+                    (row.get('name'),))
+                if existing:
+                    cat_id_map[old_id] = existing['id']
+                else:
+                    r2 = dict(row); r2.pop('id', None)
+                    cur = db.execute(
+                        "INSERT INTO test_categories (name,emoji,sort_order,created_by,is_required) "
+                        "VALUES (?,?,?,?,?)",
+                        (r2.get('name'), r2.get('emoji', '📚'),
+                         r2.get('sort_order', 0), r2.get('created_by'),
+                         r2.get('is_required', 0)))
+                    cat_id_map[old_id] = cur.lastrowid
             report["categories"] += 1
         except Exception as e:
             report["errors"].append(f"Категория {old_id}: {e}")
@@ -283,6 +291,20 @@ async def restore_backup(bot, zip_path: str, mode: str = "replace") -> dict:
             report["access"] += 1
         except Exception as e:
             report["errors"].append(f"Доступ: {e}")
+
+    # 5б. Премиум-доступы
+    for row in access.get("tables", {}).get("premium_users", []):
+        r = dict(row)
+        try:
+            r.pop('id', None)
+            cols = list(r.keys())
+            ph = ",".join("?" for _ in cols)
+            db.execute(
+                f"INSERT OR REPLACE INTO premium_users ({','.join(cols)}) VALUES ({ph})",
+                tuple(r[c] for c in cols))
+            report["premium"] = report.get("premium", 0) + 1
+        except Exception as e:
+            report["errors"].append(f"Премиум: {e}")
 
     # 6. Настройки (только при replace)
     if mode == "replace":
