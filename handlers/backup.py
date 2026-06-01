@@ -40,6 +40,47 @@ def _menu_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+@router.callback_query(F.data == "adm:maintenance", IsAdmin())
+async def cb_maintenance(call: CallbackQuery):
+    row = db.fetchone("SELECT value FROM settings WHERE key='maintenance_mode'")
+    is_on = row and str(row.get('value')) == '1'
+    status = "🔴 ВКЛЮЧЕН (бот не работает для юзеров)" if is_on \
+             else "🟢 ВЫКЛЮЧЕН (бот работает)"
+    text = (
+        "🔧 <b>Режим обслуживания</b>\n\n"
+        f"Сейчас: {status}\n\n"
+        "Когда включён — обычные пользователи получают сообщение "
+        "«бот на обслуживании» и не могут проходить тесты. "
+        "Админы работают как обычно."
+    )
+    kb = InlineKeyboardBuilder()
+    if is_on:
+        kb.button(text="🟢 Включить бота обратно", callback_data="adm:maint:off")
+    else:
+        kb.button(text="🔴 Приостановить бота", callback_data="adm:maint:on")
+    kb.button(text="↩️ В админку", callback_data="m:admin")
+    kb.adjust(1)
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(),
+                                    parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm:maint:"), IsAdmin())
+async def cb_maint_toggle(call: CallbackQuery):
+    action = call.data.split(":")[2]
+    val = '1' if action == 'on' else '0'
+    db.execute(
+        "INSERT OR REPLACE INTO settings (key,value) VALUES ('maintenance_mode',?)",
+        (val,))
+    await call.answer("🔴 Бот приостановлен" if val == '1'
+                      else "🟢 Бот снова работает", show_alert=True)
+    await cb_maintenance(call)
+
+
 @router.callback_query(F.data == "adm:stats", IsAdmin())
 async def cb_stats(call: CallbackQuery):
     await call.answer()
