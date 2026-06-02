@@ -431,6 +431,29 @@ async def _send_question(bot: Bot, gq_id: int):
             await bot.send_photo(chat_id=gq['chat_id'], photo=_gphoto)
         except Exception:
             pass
+    else:
+        # Авто-рендер математики
+        try:
+            from services import formula_service as _fs
+            qtext = question.get('text') or ''
+            if _fs.has_math(qtext):
+                cached = _fs.get_cached_file_id(qtext)
+                if cached:
+                    await bot.send_photo(chat_id=gq['chat_id'], photo=cached)
+                else:
+                    import time as _t
+                    out = f"/tmp/gq_math_{_t.time_ns()}.png"
+                    if _fs.render_question_image(qtext, out):
+                        from aiogram.types import FSInputFile
+                        m = await bot.send_photo(chat_id=gq['chat_id'],
+                                                  photo=FSInputFile(out))
+                        if m.photo:
+                            _fs.set_cached_file_id(qtext, m.photo[-1].file_id)
+                        import os as _os
+                        try: _os.remove(out)
+                        except Exception: pass
+        except Exception as e:
+            logger.warning("group math render: %s", e)
 
     try:
         msg = await bot.send_poll(
