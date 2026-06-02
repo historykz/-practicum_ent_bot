@@ -248,14 +248,77 @@ async def _finish_create_test(bot: Bot, chat_id: int, state: FSMContext, user: d
 
 @router.callback_query(F.data == "adm:my_tests", IsAdmin())
 async def cb_my_tests(call: CallbackQuery, user: dict):
+    """Мои тесты — сначала разделы, потом тесты внутри."""
     lang = user.get('language') or 'ru'
-    rows = db.fetchall("SELECT * FROM tests ORDER BY id DESC LIMIT 30")
-    if not rows:
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    cats = db.fetchall("SELECT * FROM test_categories ORDER BY sort_order, id")
+    kb = InlineKeyboardBuilder()
+    total_tests = 0
+    for c in cats:
+        cnt = db.fetchone(
+            "SELECT COUNT(*) AS c FROM tests WHERE category_id=?", (c['id'],))['c']
+        if cnt == 0:
+            continue
+        total_tests += cnt
+        emoji = c.get('emoji') or '📚'
+        mark = "⭐️" if c.get('is_required') else "🎓"
+        kb.button(text=f"{mark} {emoji} {c['name']} ({cnt})",
+                  callback_data=f"admcat:{c['id']}")
+    # Тесты без раздела
+    no_cat = db.fetchone(
+        "SELECT COUNT(*) AS c FROM tests WHERE category_id IS NULL")['c']
+    if no_cat:
+        kb.button(text=f"📭 Без раздела ({no_cat})", callback_data="admcat:none")
+    kb.button(text="↩️ В админку", callback_data="m:admin")
+    kb.adjust(1)
+
+    total = db.fetchone("SELECT COUNT(*) AS c FROM tests")['c']
+    if total == 0:
         await call.message.answer(t("no_admin_tests", lang),
                                   reply_markup=back_kb(lang, "m:admin"))
     else:
-        await call.message.answer(t("admin_tests_list", lang),
-                                  reply_markup=admin_tests_list_kb([dict(r) for r in rows], lang))
+        text = (f"📚 <b>Мои тесты</b>\n\n"
+                f"Всего тестов: <b>{total}</b>\n\n"
+                f"Выбери раздел:")
+        try:
+            await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                           parse_mode="HTML")
+        except Exception:
+            await call.message.answer(text, reply_markup=kb.as_markup(),
+                                        parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("admcat:"), IsAdmin())
+async def cb_admin_cat_tests(call: CallbackQuery, user: dict):
+    """Тесты внутри раздела."""
+    lang = user.get('language') or 'ru'
+    arg = call.data.split(":")[1]
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    if arg == "none":
+        rows = db.fetchall(
+            "SELECT * FROM tests WHERE category_id IS NULL ORDER BY id DESC")
+        cat_title = "📭 Без раздела"
+    else:
+        cat_id = int(arg)
+        cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
+        rows = db.fetchall(
+            "SELECT * FROM tests WHERE category_id=? ORDER BY id DESC", (cat_id,))
+        cat_title = f"{cat.get('emoji') or '📚'} {cat['name']}" if cat else "Раздел"
+    kb = InlineKeyboardBuilder()
+    for tst in rows:
+        prefix = "🔐 " if tst.get('is_private') else ("💎 " if tst.get('is_paid') else "")
+        kb.button(text=f"{prefix}{tst['title'][:40]}",
+                  callback_data=f"admtest:{tst['id']}")
+    kb.button(text="↩️ К разделам", callback_data="adm:my_tests")
+    kb.adjust(1)
+    text = f"📂 <b>{cat_title}</b>\n\nТестов: {len(rows)}\nВыбери тест:"
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(),
+                                    parse_mode="HTML")
     await call.answer()
 
 
