@@ -376,6 +376,7 @@ def admin_test_actions_kb(test_id: int, lang: str, is_private: bool = False) -> 
     kb.button(text="⏱ Изменить таймер", callback_data=f"admedit_timer:{test_id}")
     kb.button(text="📝 Импорт текстом", callback_data=f"admimport_text:{test_id}")
     kb.button(text="📥 Импорт Quiz Poll", callback_data=f"admimport_poll:{test_id}")
+    kb.button(text="🖼 Импорт ZIP (с картинками)", callback_data=f"admimport_zip:{test_id}")
     kb.button(text="➕ Дописать вопросы из .txt", callback_data=f"admappend_star:{test_id}")
     kb.button(text="📤 Экспорт в .txt (со *)", callback_data=f"admexport_star:{test_id}")
     kb.button(text="📤 Экспорт JSON", callback_data=f"admexport_json:{test_id}")
