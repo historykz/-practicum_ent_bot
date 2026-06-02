@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 class BackupStates(StatesGroup):
     waiting_file = State()
     waiting_findq = State()
+    waiting_formula_txt = State()
 
 
 def _menu_kb() -> InlineKeyboardMarkup:
@@ -308,3 +309,90 @@ async def msg_findq(message: Message, state: FSMContext):
     # Используем карточку из appeals
     from handlers.appeals import _show_question_card
     await _show_question_card(message, q)
+
+
+# ===================== ГЕНЕРАТОР КАРТИНОК ФОРМУЛ =====================
+
+_LATEX_HELP = (
+    "🖼 <b>Генератор картинок формул</b>\n\n"
+    "Пришли <b>.txt файл</b>, где каждая строка — одна формула в LaTeX.\n\n"
+    "<b>Шпаргалка LaTeX:</b>\n"
+    "• Дробь: <code>\\frac{1}{2}</code>\n"
+    "• Корень: <code>\\sqrt{16}</code>\n"
+    "• Степень: <code>x^2</code>\n"
+    "• Индекс: <code>x_1</code>\n"
+    "• Умножить: <code>\\times</code>\n"
+    "• Деление: <code>\\div</code>\n"
+    "• ±: <code>\\pm</code>\n"
+    "• ≤ ≥: <code>\\leq</code> <code>\\geq</code>\n"
+    "• Сумма: <code>\\sum</code>, Интеграл: <code>\\int</code>\n\n"
+    "<b>Пример файла:</b>\n"
+    "<code>\\frac{3}{4} \\times \\sqrt{16}\n"
+    "x^2 + 5x - 6 = 0\n"
+    "\\frac{x+1}{x-1} = 5</code>\n\n"
+    "Можно добавить подпись через <code>|</code>:\n"
+    "<code>\\frac{1}{2} | задача 1</code>\n\n"
+    "/cancel — отмена."
+)
+
+
+@router.callback_query(F.data == "adm:formulas", IsAdmin())
+async def cb_formulas(call: CallbackQuery, state: FSMContext):
+    await state.set_state(BackupStates.waiting_formula_txt)
+    await call.message.answer(_LATEX_HELP, parse_mode="HTML")
+    await call.answer()
+
+
+@router.message(BackupStates.waiting_formula_txt, F.document, IsAdmin())
+async def msg_formula_file(message: Message, state: FSMContext, bot: Bot):
+    doc = message.document
+    if not (doc.file_name or '').endswith(('.txt', '.tex')):
+        await message.answer("Нужен .txt файл с формулами (по одной на строку).")
+        return
+    # Скачиваем
+    import io as _io
+    try:
+        tg_file = await bot.get_file(doc.file_id)
+        buf = _io.BytesIO()
+        await bot.download_file(tg_file.file_path, destination=buf)
+        text = buf.getvalue().decode('utf-8', errors='ignore')
+    except Exception as e:
+        await message.answer(f"⚠️ Не смог прочитать файл: {e}")
+        return
+
+    from services import formula_service
+    formulas = formula_service.parse_formulas_txt(text)
+    if not formulas:
+        await message.answer("В файле нет формул. Каждая строка — одна формула.")
+        return
+
+    await state.clear()
+    status = await message.answer(
+        f"🖼 Генерирую картинки… ({len(formulas)} формул)")
+    try:
+        zip_path, ok, failed, paths = formula_service.generate_zip(formulas)
+    except Exception as e:
+        await status.edit_text(f"⚠️ Ошибка генерации: {e}")
+        return
+    try:
+        await status.delete()
+    except Exception:
+        pass
+
+    # Отправляем ZIP
+    try:
+        await bot.send_document(
+            message.chat.id, FSInputFile(zip_path),
+            caption=(
+                f"✅ Готово! Картинок: {ok}" +
+                (f", ошибок: {len(failed)}" if failed else "") +
+                "\n\nПрикрепи нужную картинку к вопросу через "
+                "редактор → «🖼 Добавить фото»."),
+            parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"⚠️ Не смог отправить ZIP: {e}")
+
+    if failed:
+        errs = "\n".join(f"• строка {i}: {tex[:40]}" for i, tex in failed[:10])
+        await message.answer(
+            f"⚠️ Не отрисовались (проверь синтаксис LaTeX):\n{errs}")
