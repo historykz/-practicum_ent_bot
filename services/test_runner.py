@@ -59,6 +59,49 @@ def cancel_timer(attempt_id: int) -> None:
         task.cancel()
 
 
+async def _maybe_render_math(bot, chat_id: int, text: str) -> bool:
+    """
+    Если в тексте вопроса есть математика — отрисовать картинку и отправить.
+    Кэширует file_id чтобы не рендерить повторно. Возвращает True если отрисовал.
+    """
+    try:
+        from services import formula_service as _fs
+    except Exception:
+        return False
+    if not _fs.has_math(text):
+        return False
+    # Кэш
+    cached = _fs.get_cached_file_id(text)
+    if cached:
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=cached,
+                                  protect_content=PROTECT_CONTENT)
+            return True
+        except Exception:
+            pass  # file_id протух — перерендерим
+    # Рендерим
+    import os as _os, time as _t
+    out = f"/tmp/q_math_{_t.time_ns()}.png"
+    if not _fs.render_question_image(text, out):
+        return False
+    try:
+        from aiogram.types import FSInputFile
+        msg = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(out),
+                                    protect_content=PROTECT_CONTENT)
+        # Кэшируем новый file_id
+        if msg.photo:
+            _fs.set_cached_file_id(text, msg.photo[-1].file_id)
+        return True
+    except Exception as e:
+        log.warning("send math image: %s", e)
+        return False
+    finally:
+        try:
+            _os.remove(out)
+        except Exception:
+            pass
+
+
 def get_test(test_id: int) -> Optional[dict]:
     row = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
     return dict(row) if row else None
@@ -287,7 +330,7 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
             # Шлём заголовок С КНОПКОЙ СТОП
             await bot.send_message(chat_id=chat_id, text=prefix,
                                     parse_mode="HTML", reply_markup=stop_kb)
-            # Картинка, если есть (photo_file_id или старое image_file_id)
+            # Картинка: прикреплённая ИЛИ авто-рендер формулы из текста
             _photo = q.get("photo_file_id") or q.get("image_file_id")
             if _photo:
                 try:
@@ -298,6 +341,10 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
                     )
                 except Exception:
                     pass
+            else:
+                # Авто-рендер математики если есть формулы
+                _auto = await _maybe_render_math(bot, chat_id, q.get("text") or "")
+                # (если отрисовали — картинка уже отправлена)
             # Находим индекс правильного варианта в текущем порядке
             correct_idx = 0
             for i, o in enumerate(options):
@@ -357,6 +404,8 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
                     protect_content=PROTECT_CONTENT,
                 )
             else:
+                # Авто-рендер математики (картинка перед кнопками)
+                await _maybe_render_math(bot, chat_id, q.get("text") or "")
                 msg = await bot.send_message(
                     chat_id=chat_id,
                     text=text,
