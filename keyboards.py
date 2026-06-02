@@ -345,6 +345,7 @@ def admin_menu_kb(lang: str) -> InlineKeyboardMarkup:
     kb.button(text="📂 Разделы", callback_data="adm:categories")
     kb.button(text="📊 Статистика", callback_data="adm:stats")
     kb.button(text="💾 Резервная копия", callback_data="adm:backup")
+    kb.button(text="🖼 Генератор формул", callback_data="adm:formulas")
     kb.button(text="🔧 Режим обслуживания", callback_data="adm:maintenance")
     kb.button(text=t("btn_admin_import_text", lang), callback_data="adm:import_text")
     kb.button(text=t("btn_admin_premium", lang), callback_data="adm:premium")
