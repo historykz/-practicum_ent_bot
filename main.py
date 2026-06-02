@@ -25,7 +25,7 @@ from handlers import (common, profile, user, quiz, duel,
                        homework, rating, inline, admin, group_quiz,
                        private_access, categories, question_editor, autopub,
                        appeals, profile_subjects, moderation, daily, notes,
-                       backup)
+                       backup, zip_import)
 
 
 def setup_logging() -> None:
@@ -189,6 +189,7 @@ async def main() -> None:
     dp.include_router(question_editor.router)
     dp.include_router(autopub.router)
     dp.include_router(backup.router)
+    dp.include_router(zip_import.router)
     dp.include_router(admin.router)
 
     await set_default_commands(bot)
