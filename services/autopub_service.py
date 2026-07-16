@@ -594,6 +594,14 @@ def clear_active_series():
         pass
 
 
+def clear_all_queue():
+    """Удалить все pending/running записи очереди — чистый старт новой серии."""
+    try:
+        db.execute("DELETE FROM autopub_queue WHERE status IN ('pending','running')")
+    except Exception as e:
+        log.warning("clear_all_queue: %s", e)
+
+
 async def on_series_test_finished(bot: Bot, test_id: int, chat_id: int):
     """
     Вызывается когда групповой тест завершился.
@@ -1024,10 +1032,31 @@ async def _worker_loop(bot: Bot):
         try:
             await asyncio.sleep(10)
             now = datetime.utcnow().isoformat()
-            rows = db.fetchall(
+
+            # Снимаем зависшие running (старше 30 мин) — чтобы не блокировали
+            try:
+                stuck = (datetime.utcnow() - timedelta(minutes=30)).isoformat()
+                db.execute(
+                    "UPDATE autopub_queue SET status='done' "
+                    "WHERE status='running' AND run_at < ?", (stuck,))
+            except Exception:
+                pass
+
+            # Если уже есть running-тест — ждём, не запускаем второй
+            running = db.fetchone(
+                "SELECT id FROM autopub_queue WHERE status='running' LIMIT 1")
+            if running:
+                continue
+
+            # Берём ТОЛЬКО ОДИН ближайший pending
+            r = db.fetchone(
                 "SELECT * FROM autopub_queue "
                 "WHERE status='pending' AND run_at <= ? "
-                "ORDER BY run_at LIMIT 5", (now,))
+                "ORDER BY run_at LIMIT 1", (now,))
+            if not r:
+                continue
+
+            rows = [r]
             for r in rows:
                 qid = r['id']
                 test_id = r['test_id']
@@ -1145,7 +1174,8 @@ async def post_random_quiz_polls_to_channel(
         language: str = 'ru',
         bot_username: str = '',
         test_ids: Optional[list] = None,
-        channel_id: Optional[str] = None) -> tuple[int, int]:
+        channel_id: Optional[str] = None,
+        send_promo: bool = True) -> tuple[int, int]:
     """
     Опубликовать 10 Quiz Poll на канале БЕЗ таймера, БЕЗ нумерации.
     test_ids — если задан список, берём вопросы ПОРОВНУ из этих тестов.
@@ -1242,7 +1272,7 @@ async def post_random_quiz_polls_to_channel(
             failed += 1
 
     # Финальный пост с призывом и кнопкой «Начать тестирование»
-    if sent > 0:
+    if sent > 0 and send_promo:
         try:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             uname = bot_username.lstrip('@') if bot_username else ''
@@ -1350,3 +1380,34 @@ async def broadcast_test_announce(bot: Bot, titles: list,
             await asyncio.sleep(1)  # антифлуд
     log.info("bot announce broadcast sent to %s users", sent)
     return sent
+
+
+async def send_promo_to_channel(bot: Bot, channel_id, bot_username: str = '') -> bool:
+    """Отправить только промо-приглашение в канал (после подтверждения админа)."""
+    try:
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        uname = bot_username.lstrip('@') if bot_username else ''
+        start_url = f"https://t.me/{uname}?start=quiz" if uname else None
+        kb = None
+        if start_url:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🚀 Начать тестирование", url=start_url)
+            ]])
+        await bot.send_message(
+            int(channel_id),
+            "📚 <b>Понравились вопросы?</b>\n\n"
+            "В нашем боте <b>намного больше тестов</b> по всем предметам ЕНТ!\n\n"
+            "✅ Проходи тесты в удобное время\n"
+            "⚔️ Соревнуйся в дуэлях с другими\n"
+            "🏆 Поднимайся в рейтинге\n"
+            "📊 Отслеживай свой прогресс\n\n"
+            "👇 <b>Как начать:</b>\n"
+            "1. Нажми кнопку ниже\n"
+            "2. Выбери язык\n"
+            "3. Тапни «📚 Пройти тест» и выбери тему\n\n"
+            "Удачи на ЕНТ! 💪",
+            reply_markup=kb, parse_mode="HTML")
+        return True
+    except Exception as e:
+        log.warning("send_promo: %s", e)
+        return False
