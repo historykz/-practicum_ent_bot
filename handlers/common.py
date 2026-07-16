@@ -29,6 +29,61 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
     arg = (command.args or "").strip()
     lang = _resolve_lang(user)
 
+    # === Дуэль по ссылке-приглашению (start=duel_<code>) ===
+    if arg.startswith("duel_") and message.chat.type == "private":
+        code = arg[5:]
+        from services import duel_service
+        status = await duel_service.join_invite(
+            message.bot, code, message.from_user.id, message.chat.id, lang)
+        if status == 'started':
+            # дуэль запустилась — сообщения шлёт сам сервис
+            return
+        elif status == 'already_full':
+            # Третий лишний — ведём в бота, предлагаем свою дуэль
+            import config as _cfg
+            bot_un = getattr(_cfg, 'BOT_USERNAME', '') or ''
+            if not bot_un:
+                try:
+                    bot_un = (await message.bot.get_me()).username
+                except Exception:
+                    bot_un = ''
+            new_code = await duel_service.create_invite(
+                message.from_user.id, message.chat.id, lang)
+            new_link = f"https://t.me/{bot_un}?start=duel_{new_code}"
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⚔️ Принять участие", url=new_link)
+            ]])
+            await message.answer(
+                "⚔️ Эта дуэль уже идёт (2 игрока).\n\n"
+                "Хочешь свою? Перешли друзьям эту ссылку 👇" if lang == "ru"
+                else "⚔️ Бұл дуэль басталып қойды (2 ойыншы).\n\n"
+                     "Өзіңдікі керек пе? Достарыңа мына сілтемені жібер 👇")
+            await message.answer(
+                "⚔️ Я приглашаю тебя на дуэль!\nЗаходи, если не струсил 😏",
+                reply_markup=kb)
+            return
+        elif status == 'host_waiting':
+            await message.answer(
+                "⏳ Ты создатель этой дуэли. Жди когда соперник "
+                "нажмёт «Принять участие»!" if lang == "ru"
+                else "⏳ Сен осы дуэльдің авторысың. Қарсыластың "
+                     "«Қатысу» басуын күт!")
+            return
+        else:  # not_found
+            await message.answer(
+                "⚠️ Эта дуэль не найдена или истекла. "
+                "Создай свою через «⚔️ Дуэль» в меню." if lang == "ru"
+                else "⚠️ Дуэль табылмады немесе мерзімі бітті. "
+                     "Мәзірден өзіңдікін жаса.")
+            return
+
+    # === Принять подарок (start=gift_<code>) ===
+    if arg.startswith("gift_") and message.chat.type == "private":
+        from handlers.payments import claim_gift
+        await claim_gift(message, arg[5:])
+        return
+
     # === Запуск теста в группе (через ?startgroup=launch_X) ===
     if arg.startswith("launch_") and message.chat.type in ("group", "supergroup"):
         try:
@@ -116,9 +171,16 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
     await _apply_pending_and_show_menu(message, state, user)
 
 
-@router.message(CommandStart())
+@router.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: Message, state: FSMContext, user: dict):
     await state.clear()
+    # Закрыть незавершённые сессии режимов
+    try:
+        from handlers import flashcards as _fc, learning as _ln
+        _fc.close_user_sessions(message.from_user.id)
+        _ln.close_user_sessions(message.from_user.id)
+    except Exception:
+        pass
     lang = _resolve_lang(user)
     # В группах не показываем главное меню
     if message.chat.type in ("group", "supergroup"):
@@ -142,7 +204,7 @@ async def cmd_start(message: Message, state: FSMContext, user: dict):
     await state.set_state(CommonStates.choosing_language)
 
 
-@router.message(Command("restart"))
+@router.message(Command("restart"), F.chat.type == "private")
 async def cmd_restart(message: Message, state: FSMContext, user: dict):
     """Перезапуск — спрашиваем язык заново."""
     await state.clear()
@@ -162,6 +224,17 @@ async def _apply_pending_and_show_menu(message: Message, state: FSMContext, user
     inviter_tg = pending.get('inviter_tg_id')
     if inviter_tg and inviter_tg != message.from_user.id:
         referral_service.register_referral(inviter_tg, message.from_user.id)
+        # Новая система: сохраняем навсегда + проверим подписку
+        try:
+            from services import referral_reward_service as _rrs
+            _rrs.record_invite(inviter_tg, message.from_user.id)
+            # Проверим подписку и начислим если подписан
+            counted = await _rrs.check_and_update_subscription(
+                message.bot, message.from_user.id)
+            if counted:
+                await _rrs.maybe_give_reward(message.bot, inviter_tg)
+        except Exception:
+            pass
         try:
             # Проверим, подписан ли приглашённый на обязательный канал
             verified = await referral_service.verify_referral(message.bot, message.from_user.id)
@@ -328,7 +401,7 @@ async def cb_main_menu(call: CallbackQuery, state: FSMContext, user: dict):
     await call.answer()
 
 
-@router.message(Command("menu"))
+@router.message(Command("menu"), F.chat.type == "private")
 async def cmd_menu(message: Message, state: FSMContext, user: dict):
     await state.clear()
     lang = _resolve_lang(user)
@@ -338,7 +411,7 @@ async def cmd_menu(message: Message, state: FSMContext, user: dict):
     )
 
 
-@router.message(Command("help"))
+@router.message(Command("help"), F.chat.type == "private")
 async def cmd_help(message: Message, user: dict):
     lang = _resolve_lang(user)
     await message.answer(t("help_text", lang), reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)))
