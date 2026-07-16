@@ -43,6 +43,18 @@ logger = logging.getLogger(__name__)
 
 # Активные таймеры: attempt_id -> asyncio.Task
 _timers: dict[int, asyncio.Task] = {}
+# Блокировки против гонки при быстром нажатии (attempt_id -> Lock)
+_answer_locks: dict[int, asyncio.Lock] = {}
+# Время последнего ответа (attempt_id -> timestamp) для задержки 1 сек
+_last_answer_time: dict[int, float] = {}
+
+
+def _get_answer_lock(attempt_id: int) -> asyncio.Lock:
+    lk = _answer_locks.get(attempt_id)
+    if lk is None:
+        lk = asyncio.Lock()
+        _answer_locks[attempt_id] = lk
+    return lk
 # Активные сообщения с вопросом: attempt_id -> (chat_id, message_id)
 _active_messages: dict[int, tuple[int, int]] = {}
 # Quiz Poll: poll_id -> {attempt_id, question_id, option_order}
@@ -330,17 +342,39 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
             # Шлём заголовок С КНОПКОЙ СТОП
             await bot.send_message(chat_id=chat_id, text=prefix,
                                     parse_mode="HTML", reply_markup=stop_kb)
-            # Картинка: прикреплённая ИЛИ авто-рендер формулы из текста
+            # Картинка: прикреплённая (с водяным знаком) ИЛИ авто-рендер
             _photo = q.get("photo_file_id") or q.get("image_file_id")
+            _protected = bool(test.get('is_private') or test.get('is_paid'))
             if _photo:
-                try:
-                    await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=_photo,
-                        protect_content=PROTECT_CONTENT,
-                    )
-                except Exception:
-                    pass
+                _pm = None
+                if _protected:
+                    try:
+                        from services import watermark_service as _wm
+                        u_w = db.fetchone(
+                            "SELECT tg_id, username FROM users WHERE id=?",
+                            (attempt['user_id'],))
+                        _pm = await _wm.send_watermarked_photo(
+                            bot, chat_id, _photo,
+                            (u_w.get('username') if u_w else '') or '',
+                            (u_w.get('tg_id') if u_w else 0) or 0,
+                            protect=PROTECT_CONTENT)
+                    except Exception:
+                        _pm = None
+                if _pm is None:
+                    try:
+                        _pm = await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=_photo,
+                            protect_content=PROTECT_CONTENT,
+                        )
+                    except Exception:
+                        _pm = None
+                if _pm is not None and _protected:
+                    try:
+                        _private_poll_msgs.setdefault(attempt_id, []).append(
+                            (chat_id, _pm.message_id))
+                    except Exception:
+                        pass
             else:
                 # Авто-рендер математики если есть формулы
                 _auto = await _maybe_render_math(bot, chat_id, q.get("text") or "")
@@ -488,7 +522,26 @@ async def process_answer(bot: Bot, attempt_id: int, question_id: int,
     """
     Обрабатывает ответ пользователя.
     Возвращает короткий код: 'ok', 'already', 'invalid', 'old'.
+    Защита от гонки: блокировка на время обработки одного ответа.
+    Анти-дабл привязан к КОНКРЕТНОМУ вопросу (не блокирует следующий).
     """
+    lock = _get_answer_lock(attempt_id)
+    async with lock:
+        # Анти-дабл только для ПОВТОРНОГО тапа по ТОМУ ЖЕ вопросу.
+        # Ключ — (attempt_id, question_id), чтобы новый вопрос не блокировался.
+        import time as _t
+        now = _t.time()
+        key = (attempt_id, question_id)
+        last = _last_answer_time.get(key, 0)
+        if now - last < 0.4:
+            return "already"
+        _last_answer_time[key] = now
+        return await _process_answer_inner(bot, attempt_id, question_id,
+                                            option_id, chat_id)
+
+
+async def _process_answer_inner(bot: Bot, attempt_id: int, question_id: int,
+                                 option_id: int, chat_id: int) -> str:
     attempt = get_attempt(attempt_id)
     if not attempt:
         return "old"
@@ -577,8 +630,8 @@ async def process_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
     # ── Защита приватных тестов: запоминаем msg_id для удаления после теста ──
     try:
         test = db.fetchone(
-            "SELECT is_private FROM tests WHERE id=?", (attempt['test_id'],))
-        if test and test.get('is_private'):
+            "SELECT is_private, is_paid FROM tests WHERE id=?", (attempt['test_id'],))
+        if test and (test.get('is_private') or test.get('is_paid')):
             # Сохраняем msg_id для последующего удаления
             attempt_id = info["attempt_id"]
             _private_poll_msgs.setdefault(attempt_id, []).append(
@@ -634,6 +687,13 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
                            aborted: bool = False) -> None:
     """Подсчёт и отправка результатов."""
     cancel_timer(attempt_id)
+    # Чистим блокировки ответов (ключи вида (attempt_id, question_id))
+    _answer_locks.pop(attempt_id, None)
+    for k in list(_last_answer_time.keys()):
+        if isinstance(k, tuple) and k[0] == attempt_id:
+            _last_answer_time.pop(k, None)
+        elif k == attempt_id:
+            _last_answer_time.pop(k, None)
     attempt = get_attempt(attempt_id)
     if not attempt:
         return
@@ -728,6 +788,38 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
     )
     result_text += f"\n\n<b>{t('weak_topics_label', lang)}:</b>\n{weak_text}"
 
+    # История попыток в скобках: (№1 - 8б) (№2 - 9б) ...
+    try:
+        past_attempts = db.fetchall(
+            """SELECT attempt_num, correct_answers
+               FROM test_attempts
+               WHERE user_id=? AND test_id=? AND status='finished'
+                 AND attempt_num < 999
+               ORDER BY attempt_num""",
+            (attempt['user_id'], attempt['test_id']))
+        if len(past_attempts) > 1:
+            parts = []
+            for pa in past_attempts:
+                parts.append(f"(№{pa['attempt_num']} - {pa['correct_answers']}б)")
+            result_text += ("\n\n📈 <b>История попыток:</b>\n" + " ".join(parts))
+    except Exception:
+        pass
+
+    # Шапка: кто прошёл (@username + id) и сколько повторов
+    u_row = db.fetchone("SELECT tg_id, username FROM users WHERE id=?",
+                         (attempt['user_id'],))
+    redos_used = db.fetchone(
+        "SELECT COUNT(*) AS c FROM test_attempts "
+        "WHERE user_id=? AND test_id=? AND attempt_num=999",
+        (attempt['user_id'], attempt['test_id']))
+    n_redos = (redos_used['c'] if redos_used else 0) or 0
+    if u_row and u_row.get('tg_id'):
+        who = (f"@{u_row['username']}" if u_row.get('username') else "")
+        result_text = (f"👤 {who} (id:{u_row['tg_id']})\n" + result_text
+                       if who else
+                       f"👤 id:{u_row['tg_id']}\n" + result_text)
+    result_text += f"\n🔁 Повторов использовано: {n_redos}"
+
     # Кнопки в результате
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     rows = []
@@ -738,11 +830,17 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
         (attempt_id,))
     n_wrong = (wrong_count['c'] if wrong_count else 0) or 0
     if not aborted and n_wrong > 0:
-        rows.append([InlineKeyboardButton(
-            text=f"🔁 Повторить ошибки ({n_wrong})",
-            callback_data=f"redoerr:{attempt_id}")])
-    # Поделиться
-    if not aborted and not test.get('is_private'):
+        if n_redos == 0:
+            rows.append([InlineKeyboardButton(
+                text=f"🔁 Повторить ошибки ({n_wrong}) — бесплатно",
+                callback_data=f"redoerr:{attempt_id}")])
+        else:
+            from services import payment_service as _pms
+            rows.append([InlineKeyboardButton(
+                text=f"🔁 Повторить ошибки ({n_wrong}) — {_pms.REDO_PRICE_STARS} ⭐️",
+                callback_data=f"buyredo:{attempt_id}")])
+    # Поделиться (в т.ч. приватные — юзер сам решает делиться ли результатом)
+    if not aborted:
         share_query = f"share_{test['id']}_{correct}_{total}"
         rows.append([InlineKeyboardButton(
             text="📤 Поделиться результатом",
@@ -776,7 +874,7 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
             logger.exception("update_streak error: %s", e)
 
     # ── Защита приватных тестов: удаляем все Quiz Poll через 5 минут после теста ──
-    if test.get('is_private'):
+    if test.get('is_private') or test.get('is_paid'):
         msgs_to_del = _private_poll_msgs.pop(attempt_id, [])
         if msgs_to_del:
             async def _delete_after_delay():
