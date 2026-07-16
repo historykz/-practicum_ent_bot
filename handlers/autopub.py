@@ -125,9 +125,11 @@ def _settings_card_text() -> str:
 def _main_menu_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🚀 Запустить серию тестов", callback_data="apub:start")
+    kb.button(text="⏰ Автозапуск по расписанию", callback_data="sched:menu")
     kb.button(text="🎲 10 случайных вопросов на канал",
               callback_data="apub:random_canal")
     kb.button(text="📋 Очередь публикаций", callback_data="apub:queue")
+    kb.button(text="🧹 Очистить очередь / сбросить", callback_data="apub:clear")
     kb.button(text="⚙️ Настройки чата/канала", callback_data="apub:settings")
     kb.button(text="↩️ В админ-меню", callback_data="m:admin")
     kb.adjust(1)
@@ -420,18 +422,18 @@ async def _show_categories(msg_obj, state: FSMContext):
     from collections import defaultdict
     by_cat = defaultdict(list)
     tests = db.fetchall(
-        "SELECT id, title, category_id FROM tests "
-        "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-        "AND COALESCE(is_private,0)=0")
+        "SELECT id, title, category_id, is_paid, is_private FROM tests "
+        "WHERE status='active'")
     for tst in tests:
         by_cat[tst.get('category_id')].append(tst)
 
     if not tests:
-        await msg_obj.answer("⚠️ Нет ни одного бесплатного теста.")
+        await msg_obj.answer("⚠️ Нет ни одного теста.")
         return
 
     text = (f"🚀 <b>Запуск серии тестов</b>\n\n"
             f"✅ Выбрано: <b>{len(selected)}</b>\n\n"
+            f"💎 платный · 🔐 приватный · 🆓 бесплатный\n"
             f"👇 Выбери раздел — внутри отметишь тесты галочками.")
 
     kb = InlineKeyboardBuilder()
@@ -469,9 +471,8 @@ async def cb_apub_category(call: CallbackQuery, state: FSMContext):
     selected = set(data.get('apub_selected') or [])
     if arg == "none":
         tests = db.fetchall(
-            "SELECT id, title FROM tests "
-            "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id IS NULL "
+            "SELECT id, title, is_paid, is_private FROM tests "
+            "WHERE status='active' AND category_id IS NULL "
             "ORDER BY id DESC")
         cat_title = "📭 Без раздела"
     else:
@@ -482,9 +483,8 @@ async def cb_apub_category(call: CallbackQuery, state: FSMContext):
             return
         cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
         tests = db.fetchall(
-            "SELECT id, title FROM tests "
-            "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id=? "
+            "SELECT id, title, is_paid, is_private FROM tests "
+            "WHERE status='active' AND category_id=? "
             "ORDER BY id DESC", (cat_id,))
         cat_title = f"{cat.get('emoji') or '📚'} {cat['name']}"
 
@@ -499,7 +499,8 @@ async def cb_apub_category(call: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     for t in tests:
         mark = "✅" if t['id'] in selected else "▫️"
-        kb.button(text=f"{mark} {t['title'][:40]}",
+        tag = "💎" if t.get('is_paid') else ("🔐" if t.get('is_private') else "")
+        kb.button(text=f"{mark} {tag}{t['title'][:38]}",
                   callback_data=f"apubtog:{t['id']}:{arg}")
     if in_sel == len(tests):
         kb.button(text="◻️ Снять все в разделе",
@@ -548,8 +549,7 @@ async def cb_apub_all(call: CallbackQuery, state: FSMContext):
         return
     if arg == "none":
         tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id IS NULL")
+            "SELECT id FROM tests WHERE status='active' AND category_id IS NULL")
     else:
         try:
             cat_id = int(arg)
@@ -557,8 +557,7 @@ async def cb_apub_all(call: CallbackQuery, state: FSMContext):
             await call.answer()
             return
         tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id=?", (cat_id,))
+            "SELECT id FROM tests WHERE status='active' AND category_id=?", (cat_id,))
     data = await state.get_data()
     selected = set(data.get('apub_selected') or [])
     if action == "on":
@@ -834,6 +833,14 @@ async def _enqueue_series(call: CallbackQuery, state: FSMContext, minutes: int):
         await call.answer("Список пуст.", show_alert=True)
         return
 
+    # ВАЖНО: чистим старую очередь и серию, чтобы не было каши
+    # со старыми зависшими тестами (напр. предыдущий запуск).
+    try:
+        autopub_service.clear_all_queue()
+        autopub_service.clear_active_series()
+    except Exception as e:
+        log.warning("clear old queue: %s", e)
+
     if mode == 'mix' and len(selected) >= 2:
         # Создаём один большой микс
         mix_id = autopub_service.create_mixed_test(
@@ -973,6 +980,31 @@ async def _enqueue_series_msg(message: Message, state: FSMContext, minutes: int)
 
 # ===================== ОЧЕРЕДЬ =====================
 
+@router.callback_query(F.data == "apub:clear", IsAdmin())
+async def cb_clear_queue(call: CallbackQuery, bot: Bot):
+    """Очистить очередь и сбросить активную серию (если каша)."""
+    autopub_service.clear_all_queue()
+    autopub_service.clear_active_series()
+    try:
+        from services import group_quiz_service
+        for c in autopub_service.get_chats():
+            try:
+                await group_quiz_service.stop_quiz(bot, int(c['id']), 0)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    await call.answer("🧹 Очередь очищена, серия сброшена", show_alert=True)
+    try:
+        await call.message.edit_text(
+            "🧹 <b>Готово!</b>\n\nОчередь публикаций очищена, "
+            "активная серия сброшена, зависшие лобби остановлены.\n\n"
+            "Теперь можешь запустить серию заново.",
+            reply_markup=_main_menu_kb(), parse_mode="HTML")
+    except Exception:
+        pass
+
+
 @router.callback_query(F.data == "apub:queue", IsAdmin())
 async def cb_show_queue(call: CallbackQuery):
     rows = autopub_service.list_pending()
@@ -1065,8 +1097,7 @@ async def _rnd_show_categories(msg_obj, state: FSMContext):
     by_cat = defaultdict(list)
     tests = db.fetchall(
         "SELECT id, title, category_id FROM tests "
-        "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-        "AND COALESCE(is_private,0)=0 AND language=?", (lang,))
+        "WHERE status='active' AND language=?", (lang,))
     for t in tests:
         by_cat[t.get('category_id')].append(t)
 
@@ -1120,7 +1151,6 @@ async def cb_rnd_cat(call: CallbackQuery, state: FSMContext):
     if arg == "none":
         tests = db.fetchall(
             "SELECT id, title FROM tests WHERE status='active' "
-            "AND COALESCE(is_paid,0)=0 AND COALESCE(is_private,0)=0 "
             "AND language=? AND category_id IS NULL ORDER BY id DESC", (lang,))
         cat_title = "📭 Без раздела"
     else:
@@ -1128,7 +1158,6 @@ async def cb_rnd_cat(call: CallbackQuery, state: FSMContext):
         cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
         tests = db.fetchall(
             "SELECT id, title FROM tests WHERE status='active' "
-            "AND COALESCE(is_paid,0)=0 AND COALESCE(is_private,0)=0 "
             "AND language=? AND category_id=? ORDER BY id DESC", (lang, cat_id))
         cat_title = f"{cat.get('emoji') or '📚'} {cat['name']}"
     if not tests:
@@ -1190,13 +1219,13 @@ async def cb_rnd_all(call: CallbackQuery, state: FSMContext):
     selected = set(data.get('rnd_selected') or [])
     if arg == "none":
         tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND language=? AND category_id IS NULL",
+            "SELECT id FROM tests WHERE status='active' "
+            "AND language=? AND category_id IS NULL",
             (lang,))
     else:
         tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND language=? AND category_id=?",
+            "SELECT id FROM tests WHERE status='active' "
+            "AND language=? AND category_id=?",
             (lang, int(arg)))
     if action == "on":
         for t in tests:
@@ -1278,13 +1307,51 @@ async def _rnd_do_publish(call, state: FSMContext, channel_id):
         pass
     sent, failed = await autopub_service.post_random_quiz_polls_to_channel(
         call.bot, count=10, language=lang, bot_username=bot_username,
-        test_ids=selected, channel_id=channel_id)
+        test_ids=selected, channel_id=channel_id, send_promo=False)
     msg = (f"✅ <b>Готово!</b>\n\n"
             f"Канал: <b>{chan_name}</b>\n"
             f"Отправлено вопросов: <b>{sent}</b>\n"
-            f"Ошибок: {failed}")
+            f"Ошибок: {failed}\n\n"
+            f"Отправить в канал промо-приглашение в бота?")
+    # Кнопки: отправить промо или нет
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    promo_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, отправить приглашение",
+                              callback_data=f"rndpromo:{channel_id}")],
+        [InlineKeyboardButton(text="❌ Нет, не надо", callback_data="rndpromo:no")]
+    ])
     try:
-        await call.message.answer(msg, parse_mode="HTML",
-                                    reply_markup=_main_menu_kb())
+        await call.message.answer(msg, parse_mode="HTML", reply_markup=promo_kb)
     except Exception:
         pass
+
+
+@router.callback_query(F.data.startswith("rndpromo:"), IsAdmin())
+async def cb_rnd_promo(call: CallbackQuery):
+    """Отправить или нет промо-приглашение после 10 вопросов."""
+    arg = call.data.split(":", 1)[1]
+    if arg == "no":
+        await call.answer("Промо не отправлено.", show_alert=True)
+        try:
+            await call.message.edit_text("✅ Готово. Промо-приглашение не отправлено.")
+        except Exception:
+            pass
+        return
+    channel_id = arg
+    await call.answer("Отправляю приглашение…")
+    bot_username = ''
+    try:
+        me = await call.bot.get_me()
+        bot_username = me.username or ''
+    except Exception:
+        pass
+    ok = await autopub_service.send_promo_to_channel(
+        call.bot, channel_id, bot_username=bot_username)
+    try:
+        if ok:
+            await call.message.edit_text("✅ Промо-приглашение отправлено в канал!")
+        else:
+            await call.message.edit_text("⚠️ Не удалось отправить промо.")
+    except Exception:
+        pass
+
