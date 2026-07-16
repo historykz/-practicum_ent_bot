@@ -186,3 +186,38 @@ async def _upload_image(bot, chat_id, img_bytes, label="") -> str:
     except Exception as e:
         log.warning("upload image: %s", e)
     return None
+
+
+
+# ===================== ЭКСПОРТ ZIP =====================
+
+from aiogram.types import FSInputFile
+
+
+@router.callback_query(F.data.startswith("admexport_zip:"), IsAdmin())
+async def cb_export_zip(call: CallbackQuery, bot: Bot):
+    try:
+        test_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    await call.answer()
+    status = await call.message.answer("📦 Собираю архив…")
+    try:
+        path, qn, imn = await zis.export_test_zip(bot, test_id)
+    except Exception as e:
+        await status.edit_text(f"⚠️ Ошибка экспорта: {e}")
+        return
+    if not path:
+        await status.edit_text("⚠️ Тест не найден.")
+        return
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    try:
+        await bot.send_document(
+            call.message.chat.id, FSInputFile(path),
+            caption=f"✅ Экспорт готов!\n📚 Вопросов: {qn} · 🖼 Картинок: {imn}")
+    except Exception as e:
+        await call.message.answer(f"⚠️ Не смог отправить: {e}")
