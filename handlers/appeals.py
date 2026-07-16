@@ -62,11 +62,12 @@ async def cb_pause(call: CallbackQuery):
         await call.answer("Тест уже не активен.", show_alert=True)
         return
 
-    # Меняем status на 'paused' — _question_timeout в test_runner это увидит и выйдет
+    # Меняем status на 'user_paused' (отдельный от встроенной 'paused')
     try:
         db.execute(
-            "UPDATE test_attempts SET status='paused', "
-            "paused_at=CURRENT_TIMESTAMP WHERE id=?",
+            "UPDATE test_attempts SET status='user_paused', "
+            "paused_at=CURRENT_TIMESTAMP, "
+            "missed_questions_counter=0 WHERE id=?",
             (attempt_id,))
     except Exception:
         pass
@@ -204,8 +205,9 @@ async def cb_appeal_start(call: CallbackQuery, state: FSMContext):
     # Приостанавливаем — меняем status + закрываем текущий poll
     try:
         db.execute(
-            "UPDATE test_attempts SET status='paused', "
-            "paused_at=CURRENT_TIMESTAMP WHERE id=?",
+            "UPDATE test_attempts SET status='user_paused', "
+            "paused_at=CURRENT_TIMESTAMP, "
+            "missed_questions_counter=0 WHERE id=?",
             (attempt_id,))
     except Exception:
         pass
