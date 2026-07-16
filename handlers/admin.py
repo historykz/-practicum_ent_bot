@@ -33,6 +33,45 @@ router = Router(name="admin")
 log = logging.getLogger(__name__)
 
 
+@router.message(Command("setlogchat"), IsAdmin())
+async def cmd_set_log_chat(message: Message, user: dict):
+    """Задать текущий чат как чат для логов действий админов."""
+    from services import admin_log_service as _als
+    chat_id = message.chat.id
+    _als.set_log_chat(chat_id)
+    try:
+        await message.answer(
+            f"✅ <b>Этот чат теперь получает логи действий админов.</b>\n"
+            f"🆔 Chat ID: <code>{chat_id}</code>\n\n"
+            f"Сюда будут приходить все действия: создание тестов, "
+            f"добавление вопросов, выдача доступа, удаление.\n\n"
+            f"Проверить — команда /testlog",
+            parse_mode="HTML")
+    except Exception:
+        pass
+
+
+@router.message(Command("testlog"), IsAdmin())
+async def cmd_test_log(message: Message, user: dict):
+    """Проверить работает ли лог-чат — отправить тестовое сообщение."""
+    from services import admin_log_service as _als
+    target = _als._log_chat_id()
+    await message.answer(
+        f"🔍 Текущий чат для логов: <code>{target}</code>\n"
+        f"Отправляю тестовое сообщение туда…", parse_mode="HTML")
+    try:
+        await _als.log_action(
+            message.bot, user.get('tg_id') or message.from_user.id,
+            "🧪 Тест логирования",
+            "Если ты видишь это сообщение в лог-чате — логи работают ✅")
+        await message.answer(
+            "✅ Отправлено. Проверь лог-чат.\n\n"
+            "Если там ничего нет — значит бот не может писать в тот чат "
+            "(не добавлен, не админ, или неверный ID).")
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка: {e}")
+
+
 @router.message(Command("admin"), IsAdmin())
 async def cmd_admin(message: Message, state: FSMContext, user: dict):
     await state.clear()
@@ -240,6 +279,15 @@ async def _finish_create_test(bot: Bot, chat_id: int, state: FSMContext, user: d
     await state.clear()
     await bot.send_message(chat_id, t("test_created", lang, id=test_id),
                            reply_markup=admin_test_actions_kb(test_id, lang))
+    # Лог действия админа
+    try:
+        from services import admin_log_service as _als
+        admin_tg = user.get('tg_id') or message.from_user.id
+        await _als.log_action(
+            bot, admin_tg, "Создан тест (черновик)",
+            f"📝 «{data['title']}»\n🆔 ID: {test_id}")
+    except Exception:
+        pass
 
 
 # =================================
@@ -624,6 +672,20 @@ async def msg_append_star(message: Message, state: FSMContext):
                 f"Тест #{test_id} обновлён.")
     await message.answer(msg_text)
     await _show_test_admin_card(message.bot, message.chat.id, test_id)
+    # Лог: вопросы добавлены — теперь тест виден юзерам, отправляем полную инфу
+    try:
+        from services import admin_log_service as _als
+        total_q = db.fetchone(
+            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test_id,))['c']
+        admin_tg = user.get('tg_id') or message.from_user.id
+        await _als.log_action(
+            message.bot, admin_tg, "Добавлены вопросы в тест",
+            f"➕ Добавлено: {added} (всего в тесте: {total_q})\n🆔 Тест ID: {test_id}")
+        # Если это первые вопросы (тест стал видимым) — полный лог + txt
+        if total_q == added:
+            await _als.log_test_created(message.bot, admin_tg, test_id)
+    except Exception:
+        pass
 
 
 # ====== Редактировать название теста ======
@@ -818,21 +880,66 @@ async def msg_import_file(message: Message, state: FSMContext):
 
 
 
+class DeleteTestStates(StatesGroup):
+    waiting_password = State()
+
+
+DELETE_PASSWORD = "qwerty10"
+
+
 @router.callback_query(F.data.startswith("admdel:"), IsAdmin())
-async def cb_admdel(call: CallbackQuery, user: dict):
+async def cb_admdel(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     try:
         tid = int(call.data.split(":")[1])
     except (ValueError, IndexError):
         await call.answer()
         return
+    test = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+    tname = test['title'] if test else '—'
+    await state.set_state(DeleteTestStates.waiting_password)
+    await state.update_data(del_test_id=tid)
+    await call.message.answer(
+        f"🔒 <b>Удаление теста «{tname}»</b>\n\n"
+        f"Это действие <b>необратимо</b> — тест и все вопросы удалятся навсегда.\n\n"
+        f"Введи пароль для подтверждения удаления:\n\n"
+        f"/cancel — отмена",
+        parse_mode="HTML")
+    await call.answer()
+
+
+@router.message(DeleteTestStates.waiting_password, IsAdmin())
+async def msg_delete_password(message: Message, state: FSMContext, user: dict):
+    lang = user.get('language') or 'ru'
+    if message.text and message.text.startswith('/cancel'):
+        await state.clear()
+        await message.answer("❌ Удаление отменено.")
+        return
+    entered = (message.text or '').strip()
+    data = await state.get_data()
+    tid = data.get('del_test_id')
+    if entered != DELETE_PASSWORD:
+        await message.answer(
+            "❌ Неверный пароль. Тест НЕ удалён.\n"
+            "Попробуй ещё раз или /cancel для отмены.")
+        return
+    await state.clear()
+    if not tid:
+        await message.answer("⚠️ Тест не найден.")
+        return
     db.execute("DELETE FROM question_options WHERE question_id IN "
                 "(SELECT id FROM questions WHERE test_id=?)", (tid,))
     db.execute("DELETE FROM questions WHERE test_id=?", (tid,))
+    # Получаем название до удаления для лога
+    test_del = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+    tname_del = test_del['title'] if test_del else '—'
     db.execute("DELETE FROM tests WHERE id=?", (tid,))
-    await call.answer(t("test_deleted", lang), show_alert=True)
+    await message.answer("🗑 ✅ Тест удалён.")
     try:
-        await call.message.delete()
+        from services import admin_log_service as _als
+        await _als.log_test_deleted(
+            message.bot, user.get('tg_id') or message.from_user.id,
+            tname_del, tid)
     except Exception:
         pass
 
@@ -1234,6 +1341,7 @@ async def cb_premium(call: CallbackQuery, state: FSMContext, user: dict):
     kb.button(text="➕ Выдать Premium", callback_data="adm:premium:grant")
     kb.button(text="📋 Список Premium", callback_data="adm:premium:list")
     kb.button(text="🗑 Удалить Premium", callback_data="adm:premium:revoke")
+    kb.button(text="⚙️ Цена и настройки подписки", callback_data="adm:premium_settings")
     kb.button(text="↩️ Назад", callback_data="adm:menu")
     kb.adjust(1)
     await call.message.answer(
@@ -1538,21 +1646,65 @@ async def s_block(message: Message, state: FSMContext, user: dict):
 async def cb_channels(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     rows = db.fetchall("SELECT * FROM required_channels WHERE is_global=1")
+    cat_rows = db.fetchall(
+        "SELECT rc.*, tc.name AS cat_name FROM required_channels rc "
+        "LEFT JOIN test_categories tc ON tc.id=rc.category_id "
+        "WHERE rc.category_id IS NOT NULL")
+    lines = ["📢 <b>Обязательные каналы</b>\n"]
+    lines.append("<b>Глобальные</b> (для всех тестов):")
     if rows:
-        lines = [t("channels_list", lang)]
         for r in rows:
             lines.append(f"• {r['channel_username']}")
-        text = "\n".join(lines)
     else:
-        text = t("channels_empty", lang)
+        lines.append("<i>нет</i>")
+    if cat_rows:
+        lines.append("\n<b>По разделам:</b>")
+        for r in cat_rows:
+            lines.append(f"• {r['channel_username']} → {r.get('cat_name') or '?'}")
+    text = "\n".join(lines)
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить", callback_data="adm:channel_add")
+    kb.button(text="➕ Добавить глобальный", callback_data="adm:channel_add")
+    kb.button(text="➕ Добавить для раздела", callback_data="adm:channel_add_cat")
     if rows:
         for r in rows:
             kb.button(text=f"🗑 {r['channel_username']}", callback_data=f"chdel:{r['id']}")
+    if cat_rows:
+        for r in cat_rows:
+            kb.button(text=f"🗑 {r['channel_username']} ({r.get('cat_name') or '?'})",
+                      callback_data=f"chdel:{r['id']}")
     kb.button(text=t("btn_back", lang), callback_data="m:admin")
     kb.adjust(1)
-    await call.message.answer(text, reply_markup=kb.as_markup())
+    await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:channel_add_cat", IsAdmin())
+async def cb_channel_add_cat(call: CallbackQuery, state: FSMContext, user: dict):
+    """Выбрать раздел для канала."""
+    cats = db.fetchall("SELECT * FROM test_categories ORDER BY sort_order, name")
+    if not cats:
+        await call.answer("Сначала создай разделы.", show_alert=True)
+        return
+    kb = InlineKeyboardBuilder()
+    for c in cats:
+        kb.button(text=f"{c.get('emoji') or '📚'} {c['name']}",
+                  callback_data=f"chcat:{c['id']}")
+    kb.button(text="❌ Отмена", callback_data="adm:channels")
+    kb.adjust(1)
+    await call.message.answer("Для какого раздела добавить канал?",
+                               reply_markup=kb.as_markup())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("chcat:"), IsAdmin())
+async def cb_channel_cat_chosen(call: CallbackQuery, state: FSMContext, user: dict):
+    cat_id = int(call.data.split(":")[1])
+    await state.set_state(ChannelStates.waiting_username)
+    await state.update_data(channel_category_id=cat_id)
+    cat = db.fetchone("SELECT name FROM test_categories WHERE id=?", (cat_id,))
+    await call.message.answer(
+        f"Введи @username канала для раздела «{cat['name'] if cat else ''}»:\n\n"
+        f"(Бот должен быть админом этого канала)")
     await call.answer()
 
 
@@ -1560,6 +1712,7 @@ async def cb_channels(call: CallbackQuery, state: FSMContext, user: dict):
 async def cb_channel_add(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     await state.set_state(ChannelStates.waiting_username)
+    await state.update_data(channel_category_id=None)
     await call.message.answer(t("channel_add_ask", lang), reply_markup=cancel_kb(lang))
     await call.answer()
 
@@ -1571,13 +1724,26 @@ async def s_channel(message: Message, state: FSMContext, user: dict):
     if not ch:
         await message.answer(t("channel_invalid", lang))
         return
-    if not ch.startswith("@"):
+    if not ch.startswith("@") and not ch.startswith("http"):
         ch = "@" + ch.lstrip("@")
-    db.execute(
-        """INSERT INTO required_channels (channel_username, is_global, created_at)
-           VALUES (?, 1, ?)""", (ch, utils.now_iso()))
+    data = await state.get_data()
+    cat_id = data.get('channel_category_id')
+    if cat_id:
+        db.execute(
+            """INSERT INTO required_channels
+               (channel_username, category_id, is_global, is_active, created_at)
+               VALUES (?, ?, 0, 1, ?)""", (ch, cat_id, utils.now_iso()))
+        cat = db.fetchone("SELECT name FROM test_categories WHERE id=?", (cat_id,))
+        await message.answer(
+            f"✅ Канал {ch} добавлен для раздела «{cat['name'] if cat else ''}».\n"
+            f"Теперь для прохождения тестов этого раздела нужна подписка.",
+            reply_markup=admin_menu_kb(lang))
+    else:
+        db.execute(
+            """INSERT INTO required_channels (channel_username, is_global, is_active, created_at)
+               VALUES (?, 1, 1, ?)""", (ch, utils.now_iso()))
+        await message.answer(t("channel_added", lang), reply_markup=admin_menu_kb(lang))
     await state.clear()
-    await message.answer(t("channel_added", lang), reply_markup=admin_menu_kb(lang))
 
 
 @router.callback_query(F.data.startswith("chdel:"), IsAdmin())
@@ -1758,24 +1924,7 @@ async def cb_admnote_del(call: CallbackQuery, user: dict):
 # Статистика
 # =================================
 
-@router.callback_query(F.data == "adm:stats", IsAdmin())
-async def cb_stats(call: CallbackQuery, user: dict):
-    lang = user.get('language') or 'ru'
-    users = db.fetchone("SELECT COUNT(*) AS c FROM users")['c']
-    tests = db.fetchone("SELECT COUNT(*) AS c FROM tests")['c']
-    attempts = db.fetchone("SELECT COUNT(*) AS c FROM test_attempts")['c']
-    notes = db.fetchone("SELECT COUNT(*) AS c FROM notes")['c']
-    premium = db.fetchone("SELECT COUNT(*) AS c FROM premium_users")['c']
-    duels = db.fetchone("SELECT COUNT(*) AS c FROM duels WHERE status='finished'")['c']
-    text = t("stats_text", lang,
-             users=users, tests=tests, attempts=attempts,
-             notes=notes, premium=premium, duels=duels)
-    try:
-        await call.message.edit_text(text, reply_markup=back_kb(lang, "m:admin"))
-    except Exception:
-        await call.message.answer(text, reply_markup=back_kb(lang, "m:admin"))
-    await call.answer()
-
+# (старый adm:stats удалён — полная статистика в handlers/backup.py)
 
 # =================================
 # Экспорт CSV
