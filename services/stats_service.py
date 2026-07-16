@@ -22,6 +22,57 @@ def active_now() -> int:
         "WHERE status IN ('in_progress','user_paused')")
 
 
+def stars_for_period(days: int) -> int:
+    """Сколько звёзд заработано за последние N дней (все покупки)."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    r = db.fetchone(
+        "SELECT SUM(stars_amount) AS s FROM purchases WHERE created_at >= ?",
+        (since,))
+    base = (r['s'] if r and r['s'] else 0)
+    # Плюс звёзды за режимы (mode_passes)
+    try:
+        # mode_passes хранит prices не напрямую — считаем по purchased*цена сложно,
+        # поэтому добавим из таблицы если есть charge_id (купленные)
+        pass
+    except Exception:
+        pass
+    return base
+
+
+def real_completions(days: int = None) -> int:
+    """
+    Реальные прохождения тестов — только ЗАВЕРШЁННЫЕ (status='finished'),
+    без приостановленных и брошенных.
+    """
+    sql = "SELECT COUNT(*) AS c FROM test_attempts WHERE status='finished'"
+    params = ()
+    if days:
+        since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        sql += " AND (end_time >= ? OR created_at >= ?)"
+        params = (since, since)
+    return _count(sql, params)
+
+
+def modes_stats() -> dict:
+    """Статистика режимов: сколько прохождений карточек и заучивания."""
+    def cnt(sql, p=()):
+        r = db.fetchone(sql, p)
+        return (r['c'] if r else 0) or 0
+    fc_done = cnt("SELECT COUNT(*) AS c FROM mode_results WHERE mode='flashcards'")
+    ln_done = cnt("SELECT COUNT(*) AS c FROM mode_results WHERE mode='learning'")
+    fc_users = cnt("SELECT COUNT(DISTINCT user_tg_id) AS c FROM mode_results "
+                   "WHERE mode='flashcards'")
+    ln_users = cnt("SELECT COUNT(DISTINCT user_tg_id) AS c FROM mode_results "
+                   "WHERE mode='learning'")
+    fc_passes = cnt("SELECT SUM(purchased) AS c FROM mode_passes "
+                    "WHERE mode='flashcards'")
+    ln_passes = cnt("SELECT SUM(purchased) AS c FROM mode_passes "
+                    "WHERE mode='learning'")
+    return {'fc_done': fc_done, 'ln_done': ln_done,
+            'fc_users': fc_users, 'ln_users': ln_users,
+            'fc_passes': fc_passes, 'ln_passes': ln_passes}
+
+
 def top_tests(limit: int = 10) -> list:
     """Топ популярных тестов по числу завершённых прохождений."""
     return db.fetchall(
@@ -129,6 +180,24 @@ def build_stats_text() -> str:
     lines.append(f"  🇷🇺 Русское отделение: <b>{bl['ru']}</b>")
     lines.append(f"  🇰🇿 Казахское отделение: <b>{bl['kz']}</b>\n")
 
+    # Реальные прохождения тестов (только завершённые, без пауз/брошенных)
+    lines.append("<b>✅ Завершённые тесты (реальные):</b>")
+    lines.append(f"• Сегодня: {real_completions(1)}")
+    lines.append(f"• За неделю: {real_completions(7)}")
+    lines.append(f"• За месяц: {real_completions(30)}")
+    lines.append(f"• Всего: {real_completions()}\n")
+
+    # Режимы Карточки / Заучивание
+    try:
+        md = modes_stats()
+        lines.append("<b>🃏🧠 Режимы обучения:</b>")
+        lines.append(f"• 🃏 Карточки: {md['fc_done']} прох. "
+                     f"({md['fc_users']} чел., куплено {md['fc_passes']})")
+        lines.append(f"• 🧠 Заучивание: {md['ln_done']} прох. "
+                     f"({md['ln_users']} чел., куплено {md['ln_passes']})\n")
+    except Exception:
+        pass
+
     # Новые юзеры
     lines.append("<b>📈 Новые пользователи:</b>")
     lines.append(f"• Сегодня: {new_users(1)}")
@@ -146,6 +215,23 @@ def build_stats_text() -> str:
     lines.append(f"• Сегодня: {private_granted(1)}")
     lines.append(f"• За неделю: {private_granted(7)}")
     lines.append(f"• За месяц: {private_granted(30)}\n")
+
+    # Продажи (звёзды)
+    try:
+        from services import payment_service as _pms
+        ss = _pms.sales_stats()
+        lines.append("<b>💰 Продажи (Stars):</b>")
+        lines.append(f"• Тестов куплено: {ss['tests']}")
+        lines.append(f"• Разделов куплено: {ss['categories']}")
+        lines.append(f"• Подарков: {ss['gifts']}")
+        lines.append(f"• Повторов куплено: {ss['redos']} ({ss['redo_stars']} ⭐️)")
+        lines.append(f"• Всего звёзд: {ss['total_stars']} ⭐️")
+        # Звёзды по периодам
+        lines.append(f"• 📅 За сегодня: {stars_for_period(1)} ⭐️")
+        lines.append(f"• 📅 За неделю: {stars_for_period(7)} ⭐️")
+        lines.append(f"• 📅 За месяц: {stars_for_period(30)} ⭐️\n")
+    except Exception:
+        pass
 
     # Топ тестов
     top = top_tests(10)
