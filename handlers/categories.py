@@ -44,7 +44,7 @@ async def cb_adm_categories(call: CallbackQuery, state: FSMContext):
         text += "<b>Существующие:</b>\n"
         for c in cats:
             cnt = db.fetchone(
-                "SELECT COUNT(*) AS c FROM tests WHERE category_id=? AND status='active'",
+                "SELECT COUNT(*) AS c FROM tests WHERE category_id=? AND status='active' AND (SELECT COUNT(*) FROM questions WHERE test_id=tests.id) > 0",
                 (c['id'],))['c']
             mark = "⭐️" if c.get('is_required') else "🎓"
             text += f"{mark} {c.get('emoji') or '📚'} <b>{utils.escape_html(c['name'])}</b> — {cnt} тестов\n"
@@ -80,7 +80,7 @@ async def cb_cat_open(call: CallbackQuery):
     is_req = bool(c.get('is_required'))
     type_label = "⭐️ Обязательный (виден всем)" if is_req else "🎓 Профильный (выбирается)"
     cnt = db.fetchone(
-        "SELECT COUNT(*) AS c FROM tests WHERE category_id=? AND status='active'",
+        "SELECT COUNT(*) AS c FROM tests WHERE category_id=? AND status='active' AND (SELECT COUNT(*) FROM questions WHERE test_id=tests.id) > 0",
         (cat_id,))['c']
     text = (f"📂 <b>{c.get('emoji') or '📚'} {utils.escape_html(c['name'])}</b>\n\n"
             f"Тип: {type_label}\n"
@@ -233,7 +233,7 @@ async def cb_cat_delconfirm(call: CallbackQuery):
     else:
         for c in cats:
             cnt = db.fetchone(
-                "SELECT COUNT(*) AS c FROM tests WHERE category_id=? AND status='active'",
+                "SELECT COUNT(*) AS c FROM tests WHERE category_id=? AND status='active' AND (SELECT COUNT(*) FROM questions WHERE test_id=tests.id) > 0",
                 (c['id'],))['c']
             text += f"{c.get('emoji') or '📚'} <b>{utils.escape_html(c['name'])}</b> — {cnt} тестов\n"
     kb = InlineKeyboardBuilder()
@@ -254,28 +254,31 @@ def get_categories() -> list[dict]:
 
 
 def get_tests_in_category(category_id: int, language: str = None) -> list[dict]:
+    # Показываем только тесты где есть хотя бы 1 вопрос
+    q_filter = "AND (SELECT COUNT(*) FROM questions WHERE test_id=tests.id) > 0"
     if language:
         rows = db.fetchall(
-            """SELECT * FROM tests WHERE category_id=? AND status='active'
-               AND COALESCE(is_private,0)=0 AND language=?
+            f"""SELECT * FROM tests WHERE category_id=? AND status='active'
+               AND COALESCE(is_private,0)=0 AND language=? {q_filter}
                ORDER BY id DESC""", (category_id, language))
     else:
         rows = db.fetchall(
-            """SELECT * FROM tests WHERE category_id=? AND status='active'
-               AND COALESCE(is_private,0)=0
+            f"""SELECT * FROM tests WHERE category_id=? AND status='active'
+               AND COALESCE(is_private,0)=0 {q_filter}
                ORDER BY id DESC""", (category_id,))
     return [dict(r) for r in rows]
 
 
 def get_tests_without_category(language: str = None) -> list[dict]:
+    q_filter = "AND (SELECT COUNT(*) FROM questions WHERE test_id=tests.id) > 0"
     if language:
         rows = db.fetchall(
-            """SELECT * FROM tests WHERE category_id IS NULL AND status='active'
-               AND COALESCE(is_private,0)=0 AND language=?
+            f"""SELECT * FROM tests WHERE category_id IS NULL AND status='active'
+               AND COALESCE(is_private,0)=0 AND language=? {q_filter}
                ORDER BY id DESC""", (language,))
     else:
         rows = db.fetchall(
-            """SELECT * FROM tests WHERE category_id IS NULL AND status='active'
-               AND COALESCE(is_private,0)=0
+            f"""SELECT * FROM tests WHERE category_id IS NULL AND status='active'
+               AND COALESCE(is_private,0)=0 {q_filter}
                ORDER BY id DESC""")
     return [dict(r) for r in rows]
