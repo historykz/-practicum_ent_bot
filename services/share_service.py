@@ -100,8 +100,21 @@ def build_test_card(test: dict, bot_username: str = None,
         rows.append([InlineKeyboardButton(
             text="▶️ Пройти тест", url=deep_link)])
 
-    # Кнопка «Поделиться» только для бесплатных и не-приватных тестов
-    if not is_private_test and not is_paid_test:
+    # Режимы Карточки/Заучивание — только в личке (in_bot)
+    if in_bot:
+        try:
+            from services import modes_service as _ms
+            if _ms.is_mode_enabled(test_id, 'flashcards'):
+                rows.append([InlineKeyboardButton(
+                    text="🃏 Режим карточек", callback_data=f"mode:fc:{test_id}")])
+            if _ms.is_mode_enabled(test_id, 'learning'):
+                rows.append([InlineKeyboardButton(
+                    text="🧠 Режим заучивания", callback_data=f"mode:ln:{test_id}")])
+        except Exception:
+            pass
+
+    # Кнопка «Поделиться» — для всех КРОМЕ приватных (платные тоже можно)
+    if not is_private_test:
         rows.append([InlineKeyboardButton(
             text="🔗 Поделиться",
             switch_inline_query=f"test:{test_id}",
