@@ -230,6 +230,18 @@ def has_paid_access(user_id: int, test_id: Optional[int] = None,
             "SELECT 1 FROM paid_access WHERE user_id=? AND test_id=?",
             (user_id, test_id),
         )
+        if row:
+            return True
+        # Покупка за звёзды (по tg_id)
+        try:
+            u = db.fetchone("SELECT tg_id FROM users WHERE id=?", (user_id,))
+            if u and u.get('tg_id'):
+                from services import payment_service as _ps
+                if _ps.has_paid_access(test_id, u['tg_id']):
+                    return True
+        except Exception:
+            pass
+        return False
     elif note_id:
         row = db.fetchone(
             "SELECT 1 FROM paid_access WHERE user_id=? AND note_id=?",
