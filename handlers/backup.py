@@ -91,10 +91,31 @@ async def cb_stats(call: CallbackQuery):
     except Exception as e:
         log.exception("stats: %s", e)
         text = f"⚠️ Ошибка статистики: {e}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔄 Обновить", callback_data="adm:stats"),
-        InlineKeyboardButton(text="↩️ В админку", callback_data="m:admin"),
-    ]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔴 Анализ сложности",
+                              callback_data="adm:hardest")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="adm:stats"),
+         InlineKeyboardButton(text="↩️ В админку", callback_data="m:admin")],
+    ])
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "adm:hardest", IsAdmin())
+async def cb_hardest(call: CallbackQuery):
+    """Показать анализ сложных тестов и вопросов."""
+    await call.answer()
+    from services import difficulty_service as _ds
+    try:
+        text = _ds.build_hardest_report('ru')
+    except Exception as e:
+        text = f"⚠️ Ошибка анализа: {e}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="adm:hardest")],
+        [InlineKeyboardButton(text="↩️ К статистике", callback_data="adm:stats")],
+    ])
     try:
         await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except Exception:
@@ -110,7 +131,8 @@ async def cb_backup_menu(call: CallbackQuery):
         f"• Разделов: <b>{c['categories']}</b>\n"
         f"• Тестов: <b>{c['tests']}</b>\n"
         f"• Вопросов: <b>{c['questions']}</b>\n"
-        f"• Фото в вопросах: <b>{c['media']}</b>\n\n"
+        f"• Фото в вопросах: <b>{c['media']}</b>\n"
+        f"• Пользователей: <b>{c.get('users', 0)}</b>\n\n"
         "💡 Скачай копию и храни у себя. После сброса БД "
         "загрузишь файл обратно — всё вернётся."
     )
@@ -128,10 +150,17 @@ async def cb_download(call: CallbackQuery, bot: Bot):
     await call.answer()
     c = backup_service.backup_counts()
     status = await call.message.answer(
-        f"💾 Собираю резервную копию…\n"
-        f"⏳ Качаю медиафайлы ({c['media']} фото)…")
+        f"💾 Собираю полную копию с картинками ({c['media']} фото)…\n"
+        f"Это может занять минуту.")
+
+    async def progress(done, total):
+        try:
+            await status.edit_text(f"💾 Качаю картинки… {done}/{total}")
+        except Exception:
+            pass
+
     try:
-        path = await backup_service.create_backup_zip(bot)
+        parts = await backup_service.create_backup_parts(bot, progress_cb=progress)
     except Exception as e:
         log.exception("backup create: %s", e)
         await status.edit_text(f"⚠️ Ошибка создания бэкапа: {e}")
@@ -140,17 +169,26 @@ async def cb_download(call: CallbackQuery, bot: Bot):
         await status.delete()
     except Exception:
         pass
-    try:
-        await bot.send_document(
-            call.message.chat.id,
-            FSInputFile(path),
-            caption=(
-                "✅ <b>Резервная копия готова!</b>\n\n"
-                "Сохрани этот файл. После сброса БД загрузишь "
-                "его обратно через «⬆️ Восстановить из файла»."),
-            parse_mode="HTML")
-    except Exception as e:
-        await call.message.answer(f"⚠️ Не смог отправить файл: {e}")
+
+    import os as _os
+    n = len(parts)
+    for i, path in enumerate(parts, 1):
+        size_mb = _os.path.getsize(path) / 1024 / 1024
+        if n == 1:
+            cap = ("✅ <b>Полная резервная копия готова!</b>\n\n"
+                   "Сохрани этот файл. Внутри: тесты, картинки, пользователи "
+                   "с доступом, кто купил платные, прохождения карточек и "
+                   "заучивания.\n\nВосстановить — через «⬆️ Восстановить».")
+        else:
+            cap = (f"✅ <b>Резервная копия — часть {i} из {n}</b> "
+                   f"({size_mb:.1f} МБ)\n\n"
+                   f"⚠️ Сохрани ВСЕ {n} частей! Для восстановления нужны все.")
+        try:
+            await bot.send_document(
+                call.message.chat.id, FSInputFile(path),
+                caption=cap, parse_mode="HTML")
+        except Exception as e:
+            await call.message.answer(f"⚠️ Не смог отправить часть {i}: {e}")
 
 
 @router.callback_query(F.data == "bkp:restore", IsAdmin())
@@ -169,46 +207,94 @@ async def msg_restore_file(message: Message, state: FSMContext, bot: Bot):
     if not doc.file_name.endswith(".zip"):
         await message.answer("Нужен ZIP-файл бэкапа. Пришли backup_*.zip")
         return
-    # Скачиваем
     os.makedirs(backup_service.BACKUP_DIR, exist_ok=True)
-    local = os.path.join(backup_service.BACKUP_DIR, f"restore_{message.from_user.id}.zip")
+    # Накапливаем части (можно прислать несколько файлов подряд)
+    sd = await state.get_data()
+    parts = sd.get('restore_parts', [])
+    idx = len(parts) + 1
+    local = os.path.join(backup_service.BACKUP_DIR,
+                          f"restore_{message.from_user.id}_p{idx}.zip")
     try:
         tg_file = await bot.get_file(doc.file_id)
         await bot.download_file(tg_file.file_path, destination=local)
     except Exception as e:
-        await message.answer(f"⚠️ Не смог скачать файл: {e}")
-        return
-    # Читаем что внутри
-    import zipfile, json
-    try:
-        zf = zipfile.ZipFile(local)
-        data = json.loads(zf.read("backup.json").decode("utf-8"))
-        zf.close()
-        tbl = data.get("tables", {})
-        n_cat = len(tbl.get("test_categories", []))
-        n_test = len(tbl.get("tests", []))
-        n_q = len(tbl.get("questions", []))
-        n_media = len(data.get("media_map", {}))
-    except Exception as e:
-        await message.answer(f"⚠️ Файл повреждён или не тот формат: {e}")
-        await state.clear()
+        # Файл больше 20 МБ? Подскажем
+        if "too big" in str(e).lower():
+            await message.answer(
+                "⚠️ Этот файл больше 20 МБ — Telegram не даёт его скачать.\n"
+                "Используй НОВЫЙ бэкап (он разбит на части ≤19 МБ). "
+                "Старые большие бэкапы восстановить нельзя.")
+        else:
+            await message.answer(f"⚠️ Не смог скачать файл: {e}")
         return
 
-    await state.update_data(restore_path=local)
+    parts.append(local)
+    await state.update_data(restore_parts=parts)
+
+    # Проверяем — есть ли среди частей backup.json
+    import zipfile, json
+    has_main = False
+    n_cat = n_test = n_q = n_media = 0
+    for pp in parts:
+        try:
+            zf = zipfile.ZipFile(pp)
+            if "backup.json" in zf.namelist():
+                has_main = True
+                data = json.loads(zf.read("backup.json").decode("utf-8"))
+                tbl = data.get("tables", {})
+                n_cat = len(tbl.get("test_categories", []))
+                n_test = len(tbl.get("tests", []))
+                n_q = len(tbl.get("questions", []))
+                n_media = len(data.get("media_map", {}))
+            zf.close()
+        except Exception:
+            pass
+
+    if not has_main:
+        await message.answer(
+            f"📥 Получена часть {len(parts)}. Это часть без основных данных.\n"
+            f"Пришли часть с данными (обычно part1), или все части по очереди.")
+        return
+
+    # Сколько картинок собрано из присланных частей
+    collected_media = 0
+    for pp in parts:
+        try:
+            zf = zipfile.ZipFile(pp)
+            collected_media += sum(1 for n in zf.namelist() if n.startswith("media/"))
+            zf.close()
+        except Exception:
+            pass
+
     kb = InlineKeyboardBuilder()
     kb.button(text="🔄 Заменить всё", callback_data="bkp:mode:replace")
     kb.button(text="➕ Добавить к существующим", callback_data="bkp:mode:append")
+    kb.button(text="📎 Прислать ещё часть", callback_data="bkp:morepart")
     kb.button(text="❌ Отмена", callback_data="bkp:cancel")
     kb.adjust(1)
+    media_note = ""
+    if n_media > collected_media:
+        media_note = (f"\n\n⚠️ Картинок в бэкапе: {n_media}, прислано: "
+                      f"{collected_media}. Пришли остальные части чтобы "
+                      f"картинки восстановились полностью, либо восстанавливай "
+                      f"как есть.")
     await message.answer(
-        f"⚠️ <b>Восстановление из {doc.file_name}</b>\n\n"
-        f"В файле:\n"
+        f"⚠️ <b>Восстановление</b> (частей: {len(parts)})\n\n"
+        f"В бэкапе:\n"
         f"• Разделов: <b>{n_cat}</b>\n"
         f"• Тестов: <b>{n_test}</b>\n"
         f"• Вопросов: <b>{n_q}</b>\n"
-        f"• Медиа: <b>{n_media}</b>\n\n"
+        f"• Картинок: <b>{n_media}</b> (собрано: {collected_media})\n"
+        f"{media_note}\n\n"
         f"Как восстановить?",
         reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "bkp:morepart", IsAdmin())
+async def cb_more_part(call: CallbackQuery, state: FSMContext):
+    await state.set_state(BackupStates.waiting_file)
+    await call.message.answer("📎 Пришли следующую часть бэкапа (.zip)")
+    await call.answer()
 
 
 @router.callback_query(F.data == "bkp:cancel", IsAdmin())
@@ -240,16 +326,22 @@ async def cb_mode(call: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "bkp:confirm", IsAdmin())
 async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
-    path = data.get("restore_path")
+    # Поддержка частей (новый формат) и одиночного файла (старый)
+    parts = data.get("restore_parts")
+    path = parts if parts else data.get("restore_path")
     mode = data.get("restore_mode", "replace")
     await state.clear()
-    if not path or not os.path.exists(path):
+    if not path:
         await call.answer("Файл не найден, начни заново.", show_alert=True)
         return
     await call.answer()
-    await call.message.edit_text("♻️ Восстанавливаю… подожди.")
-    # Передаём chat для заливки медиа
+    prog = await call.message.edit_text("♻️ Восстанавливаю… подожди.")
+    # Передаём chat для заливки медиа + сообщение для прогресса
     backup_service.restore_backup._admin_chat = call.message.chat.id
+    try:
+        backup_service.restore_backup._progress_msg_id = prog.message_id
+    except Exception:
+        backup_service.restore_backup._progress_msg_id = call.message.message_id
     try:
         report = await backup_service.restore_backup(bot, path, mode=mode)
     except Exception as e:
@@ -266,8 +358,13 @@ async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
         f"• Вариантов ответов: {report['options']} ✅",
         f"• Медиафайлов: {report['media']}" +
             (f" (не удалось: {report['media_failed']}) ⚠️" if report['media_failed'] else " ✅"),
+        (f"   📷 В бэкапе заявлено: {report.get('media_in_map', '?')}, "
+         f"файлов в архиве: {report.get('media_files_in_zip', '?')}, "
+         f"залито: {report['media']}"),
         f"• Доступов: {report['access']} ✅",
         f"• Премиум-доступов: {report.get('premium', 0)} ✅",
+        f"• Пользователей: {report.get('users', 0)} ✅",
+        f"• Результатов тестов: {report.get('test_attempts', 0)} ✅",
     ]
     if report['errors']:
         lines.append(f"\n⚠️ <b>Проблемы ({len(report['errors'])}):</b>")
