@@ -170,3 +170,53 @@ def merge_option_images(options: list, images: dict) -> bytes:
     out = io.BytesIO()
     canvas.save(out, format="PNG")
     return out.getvalue()
+
+
+
+# ===================== ЭКСПОРТ ZIP =====================
+
+async def export_test_zip(bot, test_id: int) -> tuple:
+    """
+    Экспорт теста в ZIP: questions.txt (со * у правильных) + images/.
+    Возвращает (zip_path, q_count, img_count).
+    """
+    import zipfile as _zip
+    import time as _time
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+    if not test:
+        return None, 0, 0
+    questions = db.fetchall(
+        "SELECT * FROM questions WHERE test_id=? ORDER BY order_num, id",
+        (test_id,))
+    path = os.path.join(IMPORT_DIR, f"export_{test_id}_{int(_time.time())}.zip")
+    q_count = 0
+    img_count = 0
+    lines = []
+    with _zip.ZipFile(path, 'w', _zip.ZIP_DEFLATED) as zf:
+        for qi, q in enumerate(questions, 1):
+            block = []
+            photo = q.get('photo_file_id') or q.get('image_file_id')
+            if photo:
+                fname = f"q{qi}.png"
+                try:
+                    tg_file = await bot.get_file(photo)
+                    buf = io.BytesIO()
+                    await bot.download_file(tg_file.file_path, destination=buf)
+                    zf.writestr(f"images/{fname}", buf.getvalue())
+                    block.append(f"[img:{fname}]")
+                    img_count += 1
+                except Exception as e:
+                    log.warning("export img q%s: %s", qi, e)
+            if q.get('text'):
+                block.append(q['text'])
+            opts = db.fetchall(
+                "SELECT * FROM question_options WHERE question_id=? "
+                "ORDER BY order_num, id", (q['id'],))
+            letters = "ABCDE"
+            for oi, o in enumerate(opts[:5]):
+                star = " *" if o.get('is_correct') else ""
+                block.append(f"{letters[oi]}) {o['text']}{star}")
+            lines.append("\n".join(block))
+            q_count += 1
+        zf.writestr("questions.txt", "\n\n".join(lines))
+    return path, q_count, img_count
