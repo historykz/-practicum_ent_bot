@@ -129,6 +129,68 @@ async def cmd_stop_group(message: Message, bot: Bot):
                 pass
 
 
+# ============ Пауза / продолжение теста ============
+
+@router.message(Command("pause"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_pause_group(message: Message, bot: Bot):
+    requester = message.from_user.id if message.from_user else 0
+    if requester == 0 and message.sender_chat and \
+            message.sender_chat.id == message.chat.id:
+        requester = 0  # от имени группы — разрешаем
+    ok, key = await group_quiz_service.pause_quiz(
+        bot, message.chat.id, requester_tg_id=requester)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if ok:
+        try:
+            await bot.send_message(
+                message.chat.id,
+                "⏸ <b>Тест на паузе.</b>\n"
+                "Чтобы продолжить — напишите <code>/resume</code>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    elif key == "no_rights":
+        try:
+            await bot.send_message(
+                message.chat.id,
+                "⛔ Паузу может поставить только админ или автор теста.")
+        except Exception:
+            pass
+    # no_active — молча
+
+
+@router.message(Command("resume"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_resume_group(message: Message, bot: Bot):
+    requester = message.from_user.id if message.from_user else 0
+    if requester == 0 and message.sender_chat and \
+            message.sender_chat.id == message.chat.id:
+        requester = 0
+    ok, key = await group_quiz_service.resume_quiz(
+        bot, message.chat.id, requester_tg_id=requester)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if ok:
+        try:
+            await bot.send_message(
+                message.chat.id, "▶️ <b>Тест продолжается!</b>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    elif key == "no_rights":
+        try:
+            await bot.send_message(
+                message.chat.id,
+                "⛔ Продолжить может только админ или автор теста.")
+        except Exception:
+            pass
+    # no_paused — молча
+
+
 # ============ Запуск теста в группу ============
 
 @router.callback_query(F.data.startswith("groupsend:"))
@@ -317,7 +379,7 @@ async def cb_gq_join(call: CallbackQuery):
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def on_group_message(message: Message, bot: Bot):
-    """Любое прочее сообщение в группе — seen_at + антиссылки."""
+    """Любое прочее сообщение в группе — seen_at + антиссылки + антифлуд."""
     if not message.chat or message.chat.type not in ("group", "supergroup"):
         return
     chat = message.chat
@@ -331,6 +393,36 @@ async def on_group_message(message: Message, bot: Bot):
         db.execute(
             "UPDATE known_groups SET title=?, seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
             (chat.title or "", chat.id))
+
+    # Запись активности для статистики планировщика
+    try:
+        from services import auto_schedule_service as _ass
+        if message.from_user:
+            _ass.record_chat_activity(chat.id, message.from_user.id)
+    except Exception:
+        pass
+
+    # Блокировка ВСЕХ команд в группе, кроме запуска теста /launch_X.
+    # /launch_X обрабатывается отдельным хендлером выше и сюда не доходит.
+    # Все прочие команды (/start, /menu, /help, /admin и любые другие)
+    # молча удаляются — бот на них не отвечает.
+    txt = (message.text or "").strip()
+    if txt.startswith("/"):
+        if not txt.startswith("/launch_"):
+            try:
+                await bot.delete_message(chat.id, message.message_id)
+            except Exception:
+                pass
+            return  # тихо игнорим любую команду кроме launch
+
+    # Антифлуд
+    try:
+        from handlers.moderation import check_antiflood
+        await check_antiflood(message, bot)
+    except Exception as e:
+        log.warning("antiflood check: %s", e)
+
+    # Антиссылки
     try:
         from handlers.moderation import check_antilink
         await check_antilink(message, bot)
