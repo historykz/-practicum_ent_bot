@@ -151,3 +151,4 @@ def list_muted(chat_id: int) -> list:
                 pass
         out.append(r)
     return out
+
