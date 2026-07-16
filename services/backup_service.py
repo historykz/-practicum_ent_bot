@@ -25,8 +25,21 @@ STRUCTURE_TABLES = [
     "tests",
     "questions",
     "question_options",
+    "test_modes",
 ]
-ACCESS_TABLES = ["private_test_access", "premium_users"]
+ACCESS_TABLES = ["private_test_access", "premium_users", "paid_access"]
+# Пользователи и их прогресс (достижения, баны, рефералы, результаты)
+USER_TABLES = [
+    "users",
+    "referrals",
+    "user_achievements",
+    "test_attempts",
+    "attempt_answers",
+    "chat_moderation",
+    "purchases",
+    "mode_passes",
+    "mode_results",
+]
 
 
 def _dump_table(table: str) -> list:
@@ -61,6 +74,14 @@ def collect_settings_data() -> dict:
     return {"settings": rows}
 
 
+def collect_users_data() -> dict:
+    """Пользователи и весь их прогресс."""
+    out = {"tables": {}}
+    for t in USER_TABLES:
+        out["tables"][t] = _dump_table(t)
+    return out
+
+
 def backup_counts() -> dict:
     def cnt(sql):
         r = db.fetchone(sql)
@@ -70,27 +91,37 @@ def backup_counts() -> dict:
         "tests": cnt("SELECT COUNT(*) AS c FROM tests"),
         "questions": cnt("SELECT COUNT(*) AS c FROM questions"),
         "media": cnt("SELECT COUNT(*) AS c FROM questions WHERE photo_file_id IS NOT NULL"),
+        "users": cnt("SELECT COUNT(*) AS c FROM users"),
     }
 
 
-async def create_backup_zip(bot) -> str:
+async def create_backup_zip(bot, include_media: bool = False) -> str:
     """
-    Создаёт ZIP-файл бэкапа. Качает фото в media/. Возвращает путь к файлу.
+    Создаёт ZIP-файл бэкапа.
+    include_media=False (по умолчанию) — БЕЗ картинок в архиве (лёгкий, до 1МБ).
+        file_id картинок сохраняются в данных вопросов, картинки подтянутся
+        по file_id при использовании (они хранятся на серверах Telegram).
+    include_media=True — качает картинки в архив (тяжёлый, может превысить
+        лимит Telegram 20МБ при восстановлении).
     """
     data = collect_backup_data()
     access = collect_access_data()
     settings = collect_settings_data()
+    users = collect_users_data()
 
     ts = datetime.now().strftime("%Y-%m-%d_%H%M")
-    path = os.path.join(BACKUP_DIR, f"backup_{ts}.zip")
+    suffix = "_full" if include_media else ""
+    path = os.path.join(BACKUP_DIR, f"backup_{ts}{suffix}.zip")
 
-    # Качаем фото вопросов
+    # Качаем фото вопросов только если include_media
     media_map = {}  # question_id -> filename в архиве
-    photos = db.fetchall(
-        "SELECT id, photo_file_id FROM questions WHERE photo_file_id IS NOT NULL")
+    photos = []
+    if include_media:
+        photos = db.fetchall(
+            "SELECT id, photo_file_id FROM questions WHERE photo_file_id IS NOT NULL")
 
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Медиа
+        # Медиа (только в полном режиме)
         for p in photos:
             fid = p['photo_file_id']
             qid = p['id']
@@ -113,8 +144,99 @@ async def create_backup_zip(bot) -> str:
                     json.dumps(access, ensure_ascii=False, indent=2))
         zf.writestr("settings.json",
                     json.dumps(settings, ensure_ascii=False, indent=2))
+        zf.writestr("users.json",
+                    json.dumps(users, ensure_ascii=False, indent=2))
 
     return path
+
+
+# ===================== МНОГОТОМНЫЙ БЭКАП (с картинками, части ≤19МБ) =====================
+
+MAX_PART_BYTES = 19 * 1024 * 1024  # 19 МБ запас под лимит Telegram 20МБ
+
+
+async def create_backup_parts(bot, progress_cb=None) -> list:
+    """
+    Создаёт бэкап с КАРТИНКАМИ, разбитый на части ≤19МБ.
+    Возвращает список путей к ZIP-частям.
+
+    part1 содержит все данные (тесты, вопросы, пользователи, доступы,
+    покупки, прохождения режимов) + начало картинок.
+    Остальные части — только картинки.
+    Все части нужны для полного восстановления.
+    """
+    data = collect_backup_data()
+    access = collect_access_data()
+    settings = collect_settings_data()
+    users = collect_users_data()
+
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M")
+
+    # Все фото вопросов
+    photos = db.fetchall(
+        "SELECT id, photo_file_id FROM questions WHERE photo_file_id IS NOT NULL")
+
+    # Скачиваем все картинки в память (qid -> bytes)
+    media_blobs = {}  # qid -> bytes
+    media_map = {}    # str(qid) -> filename
+    total = len(photos)
+    for i, p in enumerate(photos):
+        fid = p['photo_file_id']
+        qid = p['id']
+        try:
+            tg_file = await bot.get_file(fid)
+            buf = io.BytesIO()
+            await bot.download_file(tg_file.file_path, destination=buf)
+            media_blobs[qid] = buf.getvalue()
+            media_map[str(qid)] = f"media/q_{qid}.jpg"
+        except Exception as e:
+            log.warning("backup media q%s: %s", qid, e)
+        if progress_cb and total and (i + 1) % 20 == 0:
+            try:
+                await progress_cb(i + 1, total)
+            except Exception:
+                pass
+
+    data["media_map"] = media_map
+
+    # JSON-данные (обычно небольшие)
+    json_blobs = {
+        "backup.json": json.dumps(data, ensure_ascii=False, indent=2).encode(),
+        "users_access.json": json.dumps(access, ensure_ascii=False, indent=2).encode(),
+        "settings.json": json.dumps(settings, ensure_ascii=False, indent=2).encode(),
+        "users.json": json.dumps(users, ensure_ascii=False, indent=2).encode(),
+    }
+    json_size = sum(len(v) for v in json_blobs.values())
+
+    parts = []
+    part_idx = 1
+
+    def _new_part():
+        path = os.path.join(BACKUP_DIR, f"backup_{ts}_part{part_idx}.zip")
+        return path, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED)
+
+    # Часть 1 — JSON + сколько влезет картинок
+    cur_path, zf = _new_part()
+    cur_size = json_size
+    for name, blob in json_blobs.items():
+        zf.writestr(name, blob)
+
+    qids_sorted = sorted(media_blobs.keys())
+    for qid in qids_sorted:
+        blob = media_blobs[qid]
+        # Если не влезает в текущую часть — новая часть
+        if cur_size + len(blob) > MAX_PART_BYTES and cur_size > json_size:
+            zf.close()
+            parts.append(cur_path)
+            part_idx += 1
+            cur_path, zf = _new_part()
+            cur_size = 0
+        zf.writestr(f"media/q_{qid}.jpg", blob)
+        cur_size += len(blob)
+    zf.close()
+    parts.append(cur_path)
+
+    return parts
 
 
 def _insert_row(table: str, row: dict, keep_id: bool = True):
@@ -130,9 +252,10 @@ def _insert_row(table: str, row: dict, keep_id: bool = True):
         tuple(vals))
 
 
-async def restore_backup(bot, zip_path: str, mode: str = "replace") -> dict:
+async def restore_backup(bot, zip_path, mode: str = "replace") -> dict:
     """
     Восстановить из ZIP.
+    zip_path — путь к ZIP, ИЛИ список путей (части многотомного бэкапа).
     mode='replace' — удалить текущие тесты и восстановить.
     mode='append'  — добавить к существующим (новые id).
     Возвращает отчёт.
@@ -142,8 +265,31 @@ async def restore_backup(bot, zip_path: str, mode: str = "replace") -> dict:
         "options": 0, "media": 0, "media_failed": 0,
         "access": 0, "errors": [],
     }
+    # Поддержка нескольких частей: первая часть содержит JSON,
+    # картинки могут быть распределены по всем частям.
+    if isinstance(zip_path, (list, tuple)):
+        part_paths = list(zip_path)
+    else:
+        part_paths = [zip_path]
+
+    # Открываем все части; ищем ту что содержит backup.json
+    open_zips = []
+    main_zf = None
     try:
-        zf = zipfile.ZipFile(zip_path, "r")
+        for pp in part_paths:
+            try:
+                z = zipfile.ZipFile(pp, "r")
+                open_zips.append(z)
+                if "backup.json" in z.namelist():
+                    main_zf = z
+            except Exception as e:
+                report["errors"].append(f"Не открыть часть {pp}: {e}")
+        if main_zf is None:
+            report["errors"].append("Ни в одной части нет backup.json")
+            for z in open_zips:
+                z.close()
+            return report
+        zf = main_zf
     except Exception as e:
         report["errors"].append(f"Не открыть архив: {e}")
         return report
@@ -162,9 +308,22 @@ async def restore_backup(bot, zip_path: str, mode: str = "replace") -> dict:
         settings = json.loads(zf.read("settings.json").decode("utf-8"))
     except Exception:
         settings = {"settings": []}
+    try:
+        users_data = json.loads(zf.read("users.json").decode("utf-8"))
+    except Exception:
+        users_data = {"tables": {}}
 
     tables = data.get("tables", {})
     media_map = data.get("media_map", {})
+    # Диагностика: сколько фото заявлено в бэкапе
+    report["media_in_map"] = len(media_map)
+    # Считаем сколько РЕАЛЬНО есть в архиве (файлы media/)
+    media_files_in_zip = 0
+    for z in open_zips:
+        for name in z.namelist():
+            if name.startswith("media/") and name.endswith(".jpg"):
+                media_files_in_zip += 1
+    report["media_files_in_zip"] = media_files_in_zip
 
     # REPLACE — чистим текущее
     if mode == "replace":
@@ -306,6 +465,37 @@ async def restore_backup(bot, zip_path: str, mode: str = "replace") -> dict:
         except Exception as e:
             report["errors"].append(f"Премиум: {e}")
 
+    # 5в. Платные доступы (paid_access) — кто купил тесты
+    for row in access.get("tables", {}).get("paid_access", []):
+        r = dict(row)
+        if not keep_id and r.get('test_id') in test_id_map:
+            r['test_id'] = test_id_map[r['test_id']]
+        try:
+            r.pop('id', None)
+            cols = list(r.keys())
+            ph = ",".join("?" for _ in cols)
+            db.execute(
+                f"INSERT OR IGNORE INTO paid_access ({','.join(cols)}) VALUES ({ph})",
+                tuple(r[c] for c in cols))
+            report["paid_access"] = report.get("paid_access", 0) + 1
+        except Exception as e:
+            report["errors"].append(f"Платный доступ: {e}")
+
+    # 5г. Настройки режимов (test_modes) — цены, вкл/выкл карточек/заучивания
+    for row in data.get("tables", {}).get("test_modes", []):
+        r = dict(row)
+        if not keep_id and r.get('test_id') in test_id_map:
+            r['test_id'] = test_id_map[r['test_id']]
+        try:
+            cols = list(r.keys())
+            ph = ",".join("?" for _ in cols)
+            db.execute(
+                f"INSERT OR REPLACE INTO test_modes ({','.join(cols)}) VALUES ({ph})",
+                tuple(r[c] for c in cols))
+            report["test_modes"] = report.get("test_modes", 0) + 1
+        except Exception as e:
+            report["errors"].append(f"Режимы теста: {e}")
+
     # 6. Настройки (только при replace)
     if mode == "replace":
         for row in settings.get("settings", []):
@@ -316,11 +506,60 @@ async def restore_backup(bot, zip_path: str, mode: str = "replace") -> dict:
             except Exception:
                 pass
 
+    # 6б. Пользователи и их прогресс
+    # users восстанавливаем ВСЕГДА (INSERT OR REPLACE по tg_id),
+    # чтобы вернуть достижения, баны, стрики, профильные.
+    ut = users_data.get("tables", {})
+    user_restored = 0
+    for row in ut.get("users", []):
+        try:
+            r = dict(row)
+            cols = list(r.keys())
+            ph = ",".join("?" for _ in cols)
+            db.execute(
+                f"INSERT OR REPLACE INTO users ({','.join(cols)}) VALUES ({ph})",
+                tuple(r[c] for c in cols))
+            user_restored += 1
+        except Exception as e:
+            report["errors"].append(f"Юзер: {e}")
+    report["users"] = user_restored
+
+    # Прочие user-таблицы (рефералы, достижения, результаты, модерация,
+    # покупки, прохождения режимов карточки/заучивание)
+    for tname in ["referrals", "user_achievements", "test_attempts",
+                  "attempt_answers", "chat_moderation", "purchases",
+                  "mode_passes", "mode_results"]:
+        rows_t = ut.get(tname, [])
+        n = 0
+        for row in rows_t:
+            try:
+                r = dict(row)
+                # id оставляем как есть (replace-режим), при append убираем
+                if not keep_id:
+                    r.pop('id', None)
+                cols = list(r.keys())
+                ph = ",".join("?" for _ in cols)
+                db.execute(
+                    f"INSERT OR REPLACE INTO {tname} ({','.join(cols)}) VALUES ({ph})",
+                    tuple(r[c] for c in cols))
+                n += 1
+            except Exception:
+                pass
+        report[tname] = n
+
     # 7. Медиа — заливаем фото обратно (через админский чат для получения file_id)
     media_to_upload = []  # (target_qid, bytes)
     for qid_str, fname in media_map.items():
         try:
-            content = zf.read(fname)
+            # Картинка может быть в любой из частей — ищем
+            content = None
+            for z in open_zips:
+                if fname in z.namelist():
+                    content = z.read(fname)
+                    break
+            if content is None:
+                report["media_failed"] += 1
+                continue
             target_qid = int(qid_str)
             if not keep_id and int(qid_str) in q_id_map:
                 target_qid = q_id_map[int(qid_str)]
@@ -329,26 +568,132 @@ async def restore_backup(bot, zip_path: str, mode: str = "replace") -> dict:
             report["media_failed"] += 1
             report["errors"].append(f"Медиа q{qid_str}: чтение {e}")
 
-    # Реальная заливка фото (нужен chat_id админа)
+    # Заливка фото: шлём тихо, сразу удаляем, показываем ТОЛЬКО прогресс.
+    # С задержкой между фото чтобы Telegram не блокировал (flood control).
     admin_chat = getattr(restore_backup, "_admin_chat", None)
+    progress_msg_id = getattr(restore_backup, "_progress_msg_id", None)
     if admin_chat and media_to_upload:
+        import asyncio as _asyncio
         from aiogram.types import BufferedInputFile
+        from aiogram.exceptions import TelegramRetryAfter
+        total_media = len(media_to_upload)
+        done = 0
         for target_qid, content in media_to_upload:
-            try:
-                photo = BufferedInputFile(content, filename=f"q_{target_qid}.jpg")
-                msg = await bot.send_photo(
-                    admin_chat, photo,
-                    caption=f"♻️ Восстановление фото для вопроса #{target_qid}")
-                new_fid = msg.photo[-1].file_id
-                db.execute("UPDATE questions SET photo_file_id=? WHERE id=?",
-                            (new_fid, target_qid))
-                report["media"] += 1
-            except Exception as e:
-                report["media_failed"] += 1
-                report["errors"].append(f"Медиа q{target_qid}: заливка {e}")
+            # До 5 попыток на каждое фото (на случай flood control)
+            saved_ok = False
+            for attempt in range(5):
+                try:
+                    photo = BufferedInputFile(content, filename=f"q_{target_qid}.jpg")
+                    msg = await bot.send_photo(admin_chat, photo)
+                    new_fid = msg.photo[-1].file_id
+                    # Проверяем что вопрос существует перед записью
+                    q_exists = db.fetchone("SELECT id FROM questions WHERE id=?",
+                                            (target_qid,))
+                    if q_exists:
+                        db.execute("UPDATE questions SET photo_file_id=? WHERE id=?",
+                                    (new_fid, target_qid))
+                        saved_ok = True
+                    else:
+                        log.warning("restore: вопрос %s не найден для фото", target_qid)
+                    # Удаляем сообщение ТОЛЬКО после успешной записи в БД
+                    if saved_ok:
+                        try:
+                            await bot.delete_message(admin_chat, msg.message_id)
+                        except Exception:
+                            pass
+                    report["media"] += 1
+                    done += 1
+                    break  # успех — выходим из retry
+                except TelegramRetryAfter as e:
+                    # Telegram просит подождать N секунд — ждём и повторяем
+                    wait = getattr(e, 'retry_after', 5)
+                    log.warning("restore flood, ждём %s сек", wait)
+                    if progress_msg_id:
+                        try:
+                            await bot.edit_message_text(
+                                f"♻️ Восстановление…\n"
+                                f"📷 Загружено: {done} из {total_media}\n"
+                                f"⏳ Telegram просит паузу {wait} сек…",
+                                chat_id=admin_chat, message_id=progress_msg_id)
+                        except Exception:
+                            pass
+                    await _asyncio.sleep(wait + 1)
+                except Exception as e:
+                    # Сетевая ошибка/таймаут — подождём и попробуем ещё
+                    if attempt < 4:
+                        await _asyncio.sleep(2)
+                        continue
+                    report["media_failed"] += 1
+                    break  # после 5 попыток — пропускаем это фото
+            # Задержка между фото (защита от flood): ~0.3 сек
+            await _asyncio.sleep(0.35)
+            # Обновляем прогресс каждые 10 фото
+            if progress_msg_id and (done % 10 == 0 or done == total_media):
+                try:
+                    await bot.edit_message_text(
+                        f"♻️ Восстановление…\n"
+                        f"📷 Загружено фото: {done} из {total_media}",
+                        chat_id=admin_chat, message_id=progress_msg_id)
+                except Exception:
+                    pass
     elif media_to_upload:
-        # Нет chat — просто отметим что медиа есть но не залито
         report["media_failed"] += len(media_to_upload)
 
-    zf.close()
+    for z in open_zips:
+        try:
+            z.close()
+        except Exception:
+            pass
     return report
+
+
+# ===================== АВТО-БЭКАП КАЖДЫЙ ДЕНЬ =====================
+
+async def daily_backup_loop(bot):
+    """
+    Каждый день отправляет лёгкий бэкап главному админу в личку.
+    Главный админ — первый в config._HARDCODED_ADMIN_IDS.
+    """
+    import asyncio
+    import config
+    from aiogram.types import FSInputFile
+
+    # Главный админ
+    admin_id = None
+    try:
+        if config._HARDCODED_ADMIN_IDS:
+            admin_id = config._HARDCODED_ADMIN_IDS[0]
+    except Exception:
+        pass
+    if not admin_id:
+        log.warning("daily_backup: главный админ не найден, автобэкап выключен")
+        return
+
+    # Ждём минуту после старта, потом раз в 24 часа
+    await asyncio.sleep(60)
+    while True:
+        try:
+            # Полный бэкап с картинками, разбитый на части ≤19МБ
+            parts = await create_backup_parts(bot)
+            import os as _os
+            from datetime import datetime as _dt
+            today = _dt.now().strftime("%d.%m.%Y")
+            n = len(parts)
+            for i, path in enumerate(parts, 1):
+                size_mb = _os.path.getsize(path) / 1024 / 1024
+                if n == 1:
+                    cap = (f"🗓 <b>Авто-бэкап за {today}</b> ({size_mb:.1f} МБ)\n\n"
+                           "Полная копия: тесты, картинки, пользователи с "
+                           "доступом, покупки, прохождения режимов.")
+                else:
+                    cap = (f"🗓 <b>Авто-бэкап за {today} — часть {i} из {n}</b> "
+                           f"({size_mb:.1f} МБ)\n\n"
+                           f"⚠️ Сохрани ВСЕ {n} частей для восстановления.")
+                await bot.send_document(admin_id, FSInputFile(path),
+                                         caption=cap, parse_mode="HTML")
+            log.info("daily_backup (%d частей) отправлен админу %s", n, admin_id)
+        except Exception as e:
+            log.warning("daily_backup ошибка: %s", e)
+        # Следующий бэкап через 24 часа
+        await asyncio.sleep(24 * 3600)
+
