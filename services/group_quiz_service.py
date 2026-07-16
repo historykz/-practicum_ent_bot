@@ -633,6 +633,19 @@ async def _finalize(bot: Bot, gq_id: int, aborted: bool = False):
     except Exception as e:
         logger.warning("Не удалось отправить лидерборд: %s", e)
 
+    # Возвращаем обычный интервал сообщений (5 сек) + обновляем статистику
+    try:
+        from services import auto_schedule_service as _ass
+        # Slow mode обратно на 5 секунд (чат не закрываем)
+        await _ass.set_chat_slowmode(bot, gq['chat_id'], _ass.SLOWMODE_NORMAL)
+        # Обновляем число участников для активного расписания этого чата
+        sched = _ass.get_schedule_by_chat(gq['chat_id'])
+        if sched:
+            participants = len(players)
+            _ass.update_run_participants(sched['id'], gq['test_id'], participants)
+    except Exception as e:
+        logger.warning("scheduler post-test: %s", e)
+
     # Хук: уведомляем автопубликацию что тест из серии завершён —
     # чтобы СРАЗУ запустить следующий тест серии или открыть чат.
     try:
@@ -864,3 +877,62 @@ def _build_pagination_buttons(test_id: int, page: int, total: int) -> list[Inlin
         buttons.append(InlineKeyboardButton(
             text="»", callback_data=f"stats:{test_id}:{total}"))
     return buttons
+
+
+# ===================== ПАУЗА / ПРОДОЛЖЕНИЕ =====================
+
+async def _can_control(bot: Bot, chat_id: int, gq: dict,
+                        requester_tg_id: int) -> bool:
+    """Может ли юзер управлять тестом (админ бота, автор или админ чата)."""
+    import utils as _utils
+    if requester_tg_id and _utils.is_admin(requester_tg_id):
+        return True
+    if gq and gq.get('started_by') == requester_tg_id:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id, requester_tg_id)
+        if member.status in ("creator", "administrator"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def pause_quiz(bot: Bot, chat_id: int, requester_tg_id: int = 0) -> tuple:
+    """
+    Поставить активный тест в группе на паузу.
+    Возвращает (ok, key). Останавливает таймер и текущий poll.
+    """
+    gq = db.fetchone(
+        "SELECT * FROM group_quizzes WHERE chat_id=? AND status='running'",
+        (chat_id,))
+    if not gq:
+        return False, "no_active"
+    if requester_tg_id and not await _can_control(bot, chat_id, gq, requester_tg_id):
+        return False, "no_rights"
+    t = _question_timers.pop(gq['id'], None)
+    if t and not t.done():
+        t.cancel()
+    try:
+        if gq.get('current_poll_message_id'):
+            await bot.stop_poll(chat_id, gq['current_poll_message_id'])
+    except Exception:
+        pass
+    db.execute("UPDATE group_quizzes SET status='paused' WHERE id=?", (gq['id'],))
+    return True, "ok"
+
+
+async def resume_quiz(bot: Bot, chat_id: int, requester_tg_id: int = 0) -> tuple:
+    """Продолжить тест с текущего вопроса."""
+    gq = db.fetchone(
+        "SELECT * FROM group_quizzes WHERE chat_id=? AND status='paused'",
+        (chat_id,))
+    if not gq:
+        return False, "no_paused"
+    if requester_tg_id and not await _can_control(bot, chat_id, gq, requester_tg_id):
+        return False, "no_rights"
+    db.execute("UPDATE group_quizzes SET status='running' WHERE id=?", (gq['id'],))
+    if gq.get('current_poll_id'):
+        _poll_to_gq.pop(gq['current_poll_id'], None)
+    await _send_question(bot, gq['id'])
+    return True, "ok"
