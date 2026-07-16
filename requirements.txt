@@ -2,3 +2,10 @@ aiogram==3.7.0
 python-dotenv==1.0.1
 matplotlib>=3.7
 Pillow>=10.0
+
+# Сайт (лендинг + личный кабинет), работает в том же процессе, что и бот
+aiohttp>=3.9
+aiohttp-jinja2>=1.6
+aiohttp-session>=2.12
+cryptography>=42
+
