@@ -36,6 +36,23 @@ async def cb_redo_errors(call: CallbackQuery):
     a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (prev_attempt,))
     if not u or not a or a.get('user_id') != u['id']:
         return
+    # Бесплатный повтор только первый раз — дальше за звёзды
+    used = db.fetchone(
+        "SELECT COUNT(*) AS c FROM test_attempts "
+        "WHERE user_id=? AND test_id=? AND attempt_num=999",
+        (u['id'], a['test_id']))
+    if ((used['c'] if used else 0) or 0) >= 1:
+        from services import payment_service as _pms
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text=f"🔁 Повторить за {_pms.REDO_PRICE_STARS} ⭐️",
+                callback_data=f"buyredo:{prev_attempt}")]])
+        await call.message.answer(
+            "🔁 Бесплатный повтор уже использован.\n"
+            f"Следующий повтор — {_pms.REDO_PRICE_STARS} ⭐️",
+            reply_markup=kb)
+        return
     new_attempt = test_runner.create_redo_attempt(prev_attempt)
     if not new_attempt:
         await call.answer("Нет ошибок для повтора 🎉", show_alert=True)
@@ -209,7 +226,7 @@ async def cb_review(call: CallbackQuery, user: dict):
 # Групповая викторина
 # ============================
 
-@router.message(Command("quiz"))
+@router.message(Command("quiz"), F.chat.type == "private")
 async def cmd_group_quiz(message: Message, command: CommandObject, user: dict):
     """В группе: /quiz <test_id> — начать набор группы для теста."""
     lang = user.get('language') or 'ru'
@@ -527,11 +544,21 @@ async def _finalize_group(bot: Bot, gqid: int, chat_id: int):
 
 @router.poll_answer()
 async def on_poll_answer(poll_answer: PollAnswer):
-    """Ответ из Quiz Poll — личный, групповой тест или смена правильного ответа админом."""
+    """Ответ из Quiz Poll — личный, групповой тест, дуэль или смена правильного ответа админом."""
     try:
         bot = poll_answer.bot
         if bot is None:
             return
+        # Дуэль (Quiz Poll)
+        try:
+            from services import duel_service as _ds
+            if poll_answer.poll_id in _ds._poll_to_duel:
+                await _ds.handle_poll_answer(
+                    bot, poll_answer.poll_id,
+                    poll_answer.user.id, poll_answer.option_ids)
+                return
+        except Exception as e:
+            log.warning("duel poll route: %s", e)
         # Админский poll смены правильного ответа (question_editor)
         try:
             from handlers.question_editor import _correct_poll_map
