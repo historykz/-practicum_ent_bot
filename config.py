@@ -32,6 +32,10 @@ ADMIN_IDS: list[int] = list(dict.fromkeys(_HARDCODED_ADMIN_IDS + _env_admin_ids)
 # Username менеджера (без @) для платных тестов и поддержки
 MANAGER_USERNAME: str = os.getenv("MANAGER_USERNAME", "historyentk_bot")
 
+# Чат для логов действий админов (ID чата/канала, например -1001234567890).
+# Если пусто — логи шлются главному админу в личку.
+ADMIN_LOG_CHAT: str = os.getenv("ADMIN_LOG_CHAT", "").strip()
+
 # Канал обязательной подписки (с @ или без; пустая строка = выключено).
 # По умолчанию — @historykazakhkz. Можно переопределить через Railway Variables.
 REQUIRED_CHANNEL: str = os.getenv("REQUIRED_CHANNEL", "@ent_biologydariga").strip()
@@ -51,6 +55,10 @@ TEST_START_COOLDOWN_SECONDS: int = 3      # пауза между стартам
 # === Тесты ===
 DEFAULT_TIME_PER_QUESTION: int = 30       # сек на вопрос по умолчанию
 MAX_PAUSE_MISS_COUNT: int = 2             # после скольких пропусков ставить на паузу
+
+# Подписка Премиум (доступ ко всем тестам и режимам)
+PREMIUM_PRICE_STARS: int = int(os.getenv("PREMIUM_PRICE_STARS", "300"))
+PREMIUM_DAYS: int = int(os.getenv("PREMIUM_DAYS", "30"))
 MAX_OPTIONS_PER_QUESTION: int = 10
 MIN_OPTIONS_PER_QUESTION: int = 2
 
@@ -82,3 +90,17 @@ INLINE_CACHE_TIME: int = 5
 
 # === Имя бота для deep link (без @). Заполнится автоматически при запуске. ===
 BOT_USERNAME: str = ""
+
+# === Веб-сайт (лендинг + личный кабинет) ===
+# Порт для встроенного веб-сервера. Railway сам подставляет переменную PORT.
+WEB_PORT: int = int(os.getenv("PORT", "8080"))
+
+# Секрет для шифрования cookie-сессии сайта. ВАЖНО: задать постоянное
+# значение в Railway Variables — иначе при каждом деплое все посетители
+# будут разлогинены (сгенерированный на старте ключ не сохраняется).
+SESSION_SECRET: str = os.getenv("SESSION_SECRET", "")
+
+# Имя бота для сайта (без @) — используется в Telegram Login Widget и
+# в кнопке "Открыть бота". Не полагаемся на BOT_USERNAME (заполняется
+# только после запуска бота), чтобы сайт не зависел от порядка старта.
+WEB_BOT_USERNAME: str = os.getenv("WEB_BOT_USERNAME", "practicum_ent_bot")
