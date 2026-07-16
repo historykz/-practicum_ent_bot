@@ -464,3 +464,83 @@ async def check_antilink(message: Message, bot: Bot):
                 f"При 3 — мут на 2 дня.", parse_mode="HTML")
         except Exception:
             pass
+
+
+# ===================== АНТИФЛУД =====================
+
+async def check_antiflood(message: Message, bot: Bot):
+    """
+    Антифлуд в группе. Вызывается из on_group_message.
+    5 сообщений за 7 сек или 3 повтора = нарушение.
+    Реакция: удалить → удалить+⚠️ → мут 10 минут.
+    """
+    from services import antiflood_service as af
+    from datetime import datetime as _dt2, timedelta as _td2
+
+    # Те же исключения что у антиссылок
+    if utils.is_anonymous_chat_admin(message):
+        return
+    if getattr(message, 'is_automatic_forward', False):
+        return
+    if getattr(message, 'sender_chat', None) is not None:
+        return
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    chat_id = message.chat.id
+    user = message.from_user
+
+    # Админов чата/бота не трогаем
+    try:
+        if utils.is_admin(user.id):
+            return
+        if await _is_chat_admin(bot, chat_id, user.id):
+            return
+    except Exception:
+        pass
+
+    text = message.text or message.caption or ""
+    decision = af.register_message(chat_id, user.id, text)
+    if not decision['violation']:
+        return
+
+    # Удаляем нарушающее сообщение
+    try:
+        await bot.delete_message(chat_id, message.message_id)
+    except Exception:
+        pass
+
+    mention = _mention(user.username or '', _full_name(user), user.id)
+    action = decision['action']
+
+    if action == 'delete':
+        # тихо — ничего не пишем
+        return
+    elif action == 'warn':
+        try:
+            await bot.send_message(
+                chat_id,
+                f"⚠️ {mention}, не флуди! Сбавь темп.\n"
+                f"Ещё раз — мут на 10 минут.", parse_mode="HTML")
+        except Exception:
+            pass
+    elif action == 'mute':
+        until_dt = _dt2.utcnow() + _td2(seconds=af.MUTE_SECONDS)
+        perms = ChatPermissions(can_send_messages=False)
+        try:
+            await bot.restrict_chat_member(chat_id, user.id, permissions=perms,
+                                            until_date=until_dt)
+        except Exception as e:
+            log.warning("antiflood mute: %s", e)
+        try:
+            mod.record_action(chat_id, user.id, user.username or '',
+                              _full_name(user), 'mute', until_dt.isoformat(), 0)
+        except Exception:
+            pass
+        try:
+            await bot.send_message(
+                chat_id,
+                f"🔇 {mention} замучен на <b>10 минут</b> за флуд.",
+                parse_mode="HTML")
+        except Exception:
+            pass
