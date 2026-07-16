@@ -23,17 +23,21 @@ def language_kb() -> InlineKeyboardMarkup:
 def main_menu_kb(lang: str, is_admin: bool = False) -> InlineKeyboardMarkup:
     """Главное меню пользователя."""
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("btn_tests", lang), callback_data="m:tests")
-    kb.button(text=t("btn_duel", lang), callback_data="m:duel")
-    kb.button(text=t("btn_rating", lang), callback_data="m:rating")
-    kb.button(text=t("btn_my_results", lang), callback_data="m:results")
-    kb.button(text=t("btn_profile", lang), callback_data="m:profile")
-    kb.button(text=t("btn_invite", lang), callback_data="m:invite")
-    kb.button(text=t("btn_support", lang), callback_data="m:support")
-    kb.button(text=t("btn_help", lang), callback_data="m:help")
+    # 🔥 Заметные кнопки — каждая на всю ширину, вверху
+    kb.row(InlineKeyboardButton(
+        text="📚✨ ПРОЙТИ ТЕСТЫ ✨📚", callback_data="m:tests"))
+    kb.row(InlineKeyboardButton(
+        text="💎🔥 ПРЕМИУМ-ПОДПИСКА 🔥💎", callback_data="buy:premium"))
+    # Остальные — по 2 в ряд
+    kb.row(
+        InlineKeyboardButton(text=t("btn_duel", lang), callback_data="m:duel"),
+        InlineKeyboardButton(text=t("btn_profile", lang), callback_data="m:profile"))
+    kb.row(
+        InlineKeyboardButton(text="🎁 Пригласить друзей", callback_data="m:referral"),
+        InlineKeyboardButton(text=t("btn_support", lang), callback_data="m:support"))
+    kb.row(InlineKeyboardButton(text=t("btn_help", lang), callback_data="m:help"))
     if is_admin:
-        kb.button(text="🛠 Admin", callback_data="m:admin")
-    kb.adjust(2)
+        kb.row(InlineKeyboardButton(text="🛠 Admin", callback_data="m:admin"))
     return kb.as_markup()
 
 
@@ -62,6 +66,12 @@ def cancel_kb(lang: str, callback: str = "cancel") -> InlineKeyboardMarkup:
 def profile_kb(lang: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t("btn_change_lang", lang), callback_data="profile:lang")
+    kb.button(
+        text=("🛒 Менің сатып алуларым" if lang == "kz" else "🛒 Мои покупки"),
+        callback_data="profile:purchases")
+    kb.button(
+        text=("📊 Менің нәтижелерім" if lang == "kz" else "📊 Мои результаты"),
+        callback_data="myresults")
     kb.button(
         text=("🎓 Бейіндік пәндерді ауыстыру" if lang == "kz"
               else "🎓 Сменить профильные предметы"),
@@ -99,6 +109,15 @@ def test_card_kb(test_id: int, lang: str, allow_group: bool = True,
     kb = InlineKeyboardBuilder()
     if has_access:
         kb.button(text=t("btn_start_test", lang), callback_data=f"run:{test_id}")
+        # Режимы Карточки/Заучивание (только в личке, проверки внутри)
+        try:
+            from services import modes_service as _ms
+            if _ms.is_mode_enabled(test_id, 'flashcards'):
+                kb.button(text="🃏 Карточки", callback_data=f"mode:fc:{test_id}")
+            if _ms.is_mode_enabled(test_id, 'learning'):
+                kb.button(text="🧠 Заучивание", callback_data=f"mode:ln:{test_id}")
+        except Exception:
+            pass
     if allow_group:
         kb.button(text=t("btn_start_in_group", lang),
                   callback_data=f"share_group:{test_id}")
@@ -108,8 +127,21 @@ def test_card_kb(test_id: int, lang: str, allow_group: bool = True,
     return kb.as_markup()
 
 
-def paid_test_kb(test_id: int, lang: str, manager: str) -> InlineKeyboardMarkup:
+def paid_test_kb(test_id: int, lang: str, manager: str,
+                  price_stars: int = 0,
+                  section_offer: dict = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if price_stars and price_stars > 0:
+        kb.button(text=f"⭐️ Купить этот тест — {price_stars} ⭐️",
+                  callback_data=f"buy:test:{test_id}")
+        kb.button(text=f"🎁 Купить другу — {price_stars} ⭐️",
+                  callback_data=f"buy:gift:{test_id}")
+    if section_offer:
+        kb.button(
+            text=(f"⭐️ Весь раздел {section_offer['name']} "
+                  f"({section_offer['tests_count']} тестов) — "
+                  f"{section_offer['price']} ⭐️ (−20%)"),
+            callback_data=f"buy:cat:{section_offer['category_id']}")
     kb.button(text=t("btn_write_manager", lang), url=f"https://t.me/{manager}")
     kb.button(text=t("btn_check_access", lang), callback_data=f"checkacc:{test_id}")
     kb.button(text=t("btn_back", lang), callback_data="m:tests")
@@ -377,6 +409,10 @@ def admin_test_actions_kb(test_id: int, lang: str, is_private: bool = False) -> 
     kb.button(text="📝 Импорт текстом", callback_data=f"admimport_text:{test_id}")
     kb.button(text="📥 Импорт Quiz Poll", callback_data=f"admimport_poll:{test_id}")
     kb.button(text="🖼 Импорт ZIP (с картинками)", callback_data=f"admimport_zip:{test_id}")
+    kb.button(text="📦 Экспорт ZIP (с картинками)", callback_data=f"admexport_zip:{test_id}")
+    kb.button(text="💎 Платный тест / цены", callback_data=f"admpaid:{test_id}")
+    kb.button(text="📢 Анонсировать тест", callback_data=f"admannounce:{test_id}")
+    kb.button(text="🃏🧠 Режимы (Карточки/Заучивание)", callback_data=f"admmodes:{test_id}")
     kb.button(text="➕ Дописать вопросы из .txt", callback_data=f"admappend_star:{test_id}")
     kb.button(text="📤 Экспорт в .txt (со *)", callback_data=f"admexport_star:{test_id}")
     kb.button(text="📤 Экспорт JSON", callback_data=f"admexport_json:{test_id}")
