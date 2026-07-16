@@ -35,6 +35,49 @@ async def check_user_subscription(bot: Bot, channel: str, user_id: int) -> bool:
         return False
 
 
+def get_global_channels() -> list:
+    """Все активные глобальные обязательные каналы."""
+    rows = db.fetchall(
+        "SELECT channel_username FROM required_channels "
+        "WHERE is_global=1 AND COALESCE(is_active,1)=1")
+    return [r['channel_username'] for r in rows if r.get('channel_username')]
+
+
+def get_category_channels(category_id: int) -> list:
+    """Обязательные каналы конкретного раздела."""
+    if not category_id:
+        return []
+    rows = db.fetchall(
+        "SELECT channel_username FROM required_channels "
+        "WHERE category_id=? AND COALESCE(is_active,1)=1", (category_id,))
+    return [r['channel_username'] for r in rows if r.get('channel_username')]
+
+
+async def check_all_subscriptions(bot: Bot, user_id: int,
+                                    category_id: int = None) -> list:
+    """
+    Проверяет подписку на ВСЕ обязательные каналы (глобальные + раздела).
+    Возвращает список каналов на которые НЕ подписан (пустой = всё ок).
+    """
+    channels = get_global_channels()
+    if category_id:
+        channels += get_category_channels(category_id)
+    # Убираем дубли
+    seen = set()
+    unique = []
+    for ch in channels:
+        key = ch.lstrip('@').lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(ch)
+    not_subscribed = []
+    for ch in unique:
+        ok = await check_user_subscription(bot, ch, user_id)
+        if not ok:
+            not_subscribed.append(ch)
+    return not_subscribed
+
+
 def get_required_channel_for_test(test_id: int) -> Optional[str]:
     """
     Возвращает канал для проверки подписки.
