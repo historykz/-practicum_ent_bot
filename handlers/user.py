@@ -132,8 +132,51 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
                       else "🎓 Выбрать профильные предметы"),
                 callback_data="m:change_subjects")
 
+    # Тесты без раздела — показываем всем (бесплатные/платные, не приватные)
+    no_cat_count = db.fetchone(
+        """SELECT COUNT(*) AS c FROM tests
+           WHERE category_id IS NULL AND status='active'
+             AND COALESCE(is_private,0)=0 AND language=?""", (lang,))['c']
+    if no_cat_count > 0:
+        has_any = True
+        kb.button(
+            text=(f"📭 Бөлімсіз тесттер ({no_cat_count})" if lang == "kz"
+                  else f"📭 Тесты без раздела ({no_cat_count})"),
+            callback_data="m:cat:none")
+
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
+
+    # Премиум-баннер в конце (заметный, но кнопки на месте)
+    is_prem = False
+    try:
+        is_prem = utils.is_premium(user.get('id'))
+    except Exception:
+        pass
+    if not is_prem:
+        text += ("\n\n━━━━━━━━━━━━━━\n"
+                 "💎 <b>ПРЕМИУМ</b> — доступ ко ВСЕМ тестам и режимам!\n"
+                 "Жми «💎 Премиум» ниже 👇" if lang == "ru" else
+                 "\n\n━━━━━━━━━━━━━━\n"
+                 "💎 <b>ПРЕМИУМ</b> — барлық тесттерге қол жеткіз!")
+        # Вставляем кнопку премиума ПЕРЕД "Назад"
+        kb2 = InlineKeyboardBuilder()
+        for row in kb.export():
+            kb2.row(*row)
+        # добавим премиум-кнопку первой
+        final_kb = InlineKeyboardBuilder()
+        final_kb.row(InlineKeyboardButton(
+            text="💎🔥 Купить Премиум 🔥💎", callback_data="buy:premium"))
+        for row in kb.export():
+            final_kb.row(*row)
+        try:
+            await call.message.edit_text(text, reply_markup=final_kb.as_markup(),
+                                          parse_mode="HTML")
+        except Exception:
+            await call.message.answer(text, reply_markup=final_kb.as_markup(),
+                                        parse_mode="HTML")
+        await call.answer()
+        return
 
     try:
         await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
@@ -191,34 +234,98 @@ async def cb_tests_by_category(call: CallbackQuery, user: dict):
 
 @router.callback_query(F.data == "m:private_tests")
 async def cb_private_tests_list(call: CallbackQuery, user: dict):
-    """Каталог приватных тестов конкретного юзера."""
+    """Каталог приватных тестов конкретного юзера — по разделам."""
     from handlers import private_access as _pa
     lang = _resolve_lang(user)
     private_tests = _pa.list_user_private_tests(call.from_user.id)
 
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
     if not private_tests:
         text = "🔐 <b>Закрытые тесты</b>\n\n<i>У вас нет доступа к закрытым тестам.</i>"
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="↩️ Назад", callback_data="m:tests")
         ]])
-    else:
-        text = (f"🔐 <b>Ваши закрытые тесты</b>\n\n"
-                f"Доступно: <b>{len(private_tests)}</b>\n"
-                f"Выберите тест для прохождения:")
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
-        kb_builder = InlineKeyboardBuilder()
-        for tst in private_tests[:30]:
-            title = (tst.get('title') or '—')[:50]
-            kb_builder.button(text=f"🔐 {title}", callback_data=f"opentest:{tst['id']}")
-        kb_builder.button(text="↩️ Назад", callback_data="m:tests")
-        kb_builder.adjust(1)
-        kb = kb_builder.as_markup()
+        try:
+            await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await call.answer()
+        return
 
+    # Группируем по разделам
+    from collections import defaultdict
+    by_cat = defaultdict(list)
+    for tst in private_tests:
+        by_cat[tst.get('category_id')].append(tst)
+
+    kb_builder = InlineKeyboardBuilder()
+    # Сначала разделы (по одному тесты внутри)
+    cats = db.fetchall("SELECT * FROM test_categories ORDER BY sort_order, name")
+    cat_by_id = {c['id']: c for c in cats}
+
+    for cat in cats:
+        tests_in = by_cat.get(cat['id'], [])
+        if tests_in:
+            emoji = cat.get('emoji') or '📚'
+            kb_builder.button(
+                text=f"{emoji} {cat['name']} ({len(tests_in)})",
+                callback_data=f"privcat:{cat['id']}")
+    # Тесты без раздела
+    no_cat = by_cat.get(None, [])
+    if no_cat:
+        kb_builder.button(text=f"📭 Без раздела ({len(no_cat)})",
+                          callback_data="privcat:none")
+    kb_builder.button(text="↩️ Назад", callback_data="m:tests")
+    kb_builder.adjust(1)
+
+    text = (f"🔐 <b>Ваши закрытые тесты</b>\n\n"
+            f"Доступно: <b>{len(private_tests)}</b>\n"
+            f"Выберите раздел:")
     try:
-        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await call.message.edit_text(text, reply_markup=kb_builder.as_markup(),
+                                      parse_mode="HTML")
     except Exception:
-        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await call.message.answer(text, reply_markup=kb_builder.as_markup(),
+                                    parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("privcat:"))
+async def cb_private_category(call: CallbackQuery, user: dict):
+    """Приватные тесты внутри выбранного раздела."""
+    from handlers import private_access as _pa
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    arg = call.data.split(":")[1]
+    private_tests = _pa.list_user_private_tests(call.from_user.id)
+
+    if arg == "none":
+        tests_in = [t for t in private_tests if t.get('category_id') is None]
+        cat_title = "📭 Без раздела"
+    else:
+        try:
+            cat_id = int(arg)
+        except ValueError:
+            await call.answer()
+            return
+        tests_in = [t for t in private_tests if t.get('category_id') == cat_id]
+        cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
+        cat_title = f"{(cat.get('emoji') or '📚') if cat else '📚'} {cat['name'] if cat else ''}"
+
+    kb = InlineKeyboardBuilder()
+    for tst in tests_in[:40]:
+        title = (tst.get('title') or '—')[:50]
+        kb.button(text=f"🔐 {title}", callback_data=f"opentest:{tst['id']}")
+    kb.button(text="↩️ К разделам", callback_data="m:private_tests")
+    kb.adjust(1)
+    text = f"🔐 <b>{cat_title}</b>\n\nТестов: {len(tests_in)}\nВыберите тест:"
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                      parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(),
+                                    parse_mode="HTML")
     await call.answer()
 
 
@@ -266,16 +373,31 @@ async def show_test_card(bot: Bot, chat_id: int, user_tg_id: int, test_id: int, 
         if not _rs.user_can_unlock_paid_test(user['id']):
             qcount = db.fetchone(
                 "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test['id'],))['c']
+            stars = test.get('price_stars') or 0
+            price_line = f"💵 {test['price']} ₸"
+            if stars:
+                price_line += f"  ·  ⭐️ {stars} звёзд"
             short_card = (
                 f"💰 <b>{utils.escape_html(test['title'])}</b>\n"
-                f"📚 {qcount} вопросов · ⏱ {test['time_per_question']} сек\n\n"
-                f"<i>Это платный тест.</i>"
+                f"📚 {qcount} вопросов · ⏱ {test['time_per_question']} сек\n"
+                f"{price_line}\n\n"
+                f"<i>Это платный тест. Выбери способ оплаты:</i>"
             )
             await bot.send_message(chat_id, short_card)
+            section_offer = None
+            try:
+                from services import payment_service as _pms
+                if test.get('category_id'):
+                    section_offer = _pms.get_section_offer(
+                        test['category_id'], user_tg_id)
+            except Exception:
+                pass
             await bot.send_message(
                 chat_id,
                 t("paid_test_card", lang, price=test['price'], manager=config.MANAGER_USERNAME),
-                reply_markup=paid_test_kb(test['id'], lang, config.MANAGER_USERNAME),
+                reply_markup=paid_test_kb(
+                    test['id'], lang, config.MANAGER_USERNAME,
+                    price_stars=stars, section_offer=section_offer),
             )
             return
 
@@ -396,18 +518,25 @@ async def cb_run_test(call: CallbackQuery, state: FSMContext, user: dict):
             await call.answer(t("attempts_exhausted", lang), show_alert=True)
             return
 
-    # Проверка подписки на канал
-    channel = subscription_service.get_required_channel_for_test(test_id)
-    if channel:
-        ok = await subscription_service.check_user_subscription(
-            call.bot, channel, call.from_user.id)
-        if not ok:
-            await call.message.answer(
-                t("must_subscribe", lang),
-                reply_markup=subscription_kb(channel, lang, f"checksub:test:{test_id}")
-            )
-            await call.answer()
-            return
+    # Проверка подписки на ВСЕ обязательные каналы (глобальные + раздела)
+    not_sub = await subscription_service.check_all_subscriptions(
+        call.bot, call.from_user.id, category_id=test.get('category_id'))
+    if not_sub:
+        # Показываем кнопки на все каналы куда не подписан
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        kb = InlineKeyboardBuilder()
+        for ch in not_sub:
+            ch_url = ch if ch.startswith('http') else f"https://t.me/{ch.lstrip('@')}"
+            kb.button(text=f"📢 Подписаться: {ch}", url=ch_url)
+        kb.button(text="✅ Я подписался", callback_data=f"checksub:test:{test_id}")
+        kb.adjust(1)
+        await call.message.answer(
+            "📢 <b>Для прохождения нужно подписаться на канал(ы):</b>\n\n"
+            + "\n".join(f"• {ch}" for ch in not_sub)
+            + "\n\nПодпишись и нажми «✅ Я подписался»",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
+        await call.answer()
+        return
 
     # Есть вопросы?
     qs = test_runner.get_test_questions(test_id)
@@ -606,3 +735,4 @@ async def cb_stats(call: CallbackQuery, user: dict):
         await call.message.answer(text, reply_markup=kb, parse_mode="HTML",
                                     disable_web_page_preview=True)
     await call.answer()
+
