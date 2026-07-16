@@ -209,14 +209,20 @@ async def s_opens_grant_user(message: Message, state: FSMContext):
         await message.answer("❌ Не распознал ни одного пользователя. Попробуйте ещё раз.")
         return
 
+    # Буфер: накапливаем пользователей между сообщениями
+    data = await state.get_data()
+    buffer = data.get('grant_buffer', [])  # [(tg_id, name), ...]
+    buffer_ids = {b[0] for b in buffer}
+
+    # За одно сообщение — максимум 15 (чтобы не перегружать резолв)
     if len(parsed) > 15:
         await message.answer(
-            f"⚠️ Можно максимум 15 человек за раз. Вы прислали {len(parsed)}. "
-            f"Отправьте список покороче.")
+            f"⚠️ За один раз добавляй до 15 человек. Ты прислал {len(parsed)}.\n"
+            f"Раздели на части — я буду копить их в буфере, сколько нужно.")
         return
 
     # Резолвим каждого
-    found_users = []  # [(tg_id, display_name), ...]
+    added_now = []
     not_found = []
     for ident in parsed:
         target_tg_id = None
@@ -241,40 +247,82 @@ async def s_opens_grant_user(message: Message, state: FSMContext):
             else:
                 not_found.append(ident)
                 continue
-        found_users.append((target_tg_id, target_name))
+        # Не дублируем
+        if target_tg_id not in buffer_ids:
+            added_now.append((target_tg_id, target_name))
+            buffer_ids.add(target_tg_id)
 
-    if not found_users:
-        await message.answer(
-            "❌ Ни одного пользователя не нашёл.\n"
-            "Те, кто вводил по @username, должны были писать /start боту. "
-            "Или вводите tg_id числом.")
+    buffer.extend(added_now)
+
+    # Разумный потолок 500 (чтоб не перегрузить), но копим сколько нужно
+    if len(buffer) > 500:
+        buffer = buffer[:500]
+        await message.answer("⚠️ Достигнут максимум 500 человек за раз.")
+
+    await state.update_data(grant_buffer=buffer, grant_not_found=not_found)
+
+    # Показываем накопленный буфер + кнопки
+    names_preview = ", ".join(n for _, n in buffer[:20])
+    if len(buffer) > 20:
+        names_preview += f" … и ещё {len(buffer)-20}"
+    nf_note = ""
+    if not_found:
+        nf_note = f"\n\n⚠️ Не найдены (пропущены): {', '.join(not_found[:10])}"
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить ещё", callback_data="grantmore")
+    kb.button(text=f"💾 Сохранить и выдать ({len(buffer)})",
+              callback_data="grantsave")
+    kb.button(text="🗑 Очистить буфер", callback_data="grantclear")
+    kb.button(text="❌ Отмена", callback_data="opens:cancel")
+    kb.adjust(1)
+    await message.answer(
+        f"📋 <b>Буфер выдачи доступа</b>\n\n"
+        f"Накоплено: <b>{len(buffer)}</b> человек\n"
+        f"{names_preview}{nf_note}\n\n"
+        f"Можешь прислать ещё @username (частями, сколько нужно), "
+        f"потом нажми «💾 Сохранить и выдать».",
+        reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "grantmore", IsAdmin())
+async def cb_grant_more(call: CallbackQuery, state: FSMContext):
+    await call.message.answer(
+        "👤 Пришли ещё @username или tg_id (до 15 за раз):")
+    await call.answer()
+
+
+@router.callback_query(F.data == "grantclear", IsAdmin())
+async def cb_grant_clear(call: CallbackQuery, state: FSMContext):
+    await state.update_data(grant_buffer=[])
+    await call.answer("Буфер очищен", show_alert=True)
+    try:
+        await call.message.edit_text("🗑 Буфер очищен. Присылай пользователей заново.")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "grantsave", IsAdmin())
+async def cb_grant_buffer_save(call: CallbackQuery, state: FSMContext):
+    """Сохранить буфер — перейти к выбору срока."""
+    data = await state.get_data()
+    buffer = data.get('grant_buffer', [])
+    if not buffer:
+        await call.answer("Буфер пуст. Добавь пользователей.", show_alert=True)
         return
-
-    # Сохраняем в state
-    await state.update_data(grant_targets=found_users, grant_not_found=not_found)
-
-    # Спрашиваем срок
+    await call.answer()
+    # Переносим буфер в grant_targets для существующей логики срока
+    await state.update_data(grant_targets=buffer)
     kb = InlineKeyboardBuilder()
     for label, days in [("⏱ 7 дней", 7), ("📅 30 дней", 30),
                          ("🗓 90 дней", 90), ("♾ Бессрочно", 0)]:
         kb.button(text=label, callback_data=f"opensdays:{days}")
-    kb.button(text="✏️ Ввести вручную", callback_data="opensdays:custom")
-    kb.button(text="❌ Отмена", callback_data="opens:back")
     kb.adjust(2)
-
-    summary = "\n".join(
-        f"• <b>{utils.escape_html(name)}</b> (<code>{tg}</code>)"
-        for tg, name in found_users[:15])
-    extra = ""
-    if not_found:
-        extra = f"\n\n⚠️ Не нашёл: {', '.join(not_found[:5])}"
-
-    await state.set_state(PrivateAccessStates.waiting_days_for_grant)
-    await message.answer(
-        f"👥 Распознано: <b>{len(found_users)}</b>\n\n"
-        f"{summary}{extra}\n\n"
+    await call.message.answer(
+        f"✅ В буфере {len(buffer)} человек.\n\n"
         f"⏱ <b>На какой срок выдать доступ?</b>",
         reply_markup=kb.as_markup(), parse_mode="HTML")
+
 
 
 @router.callback_query(F.data.startswith("opensdays:"), IsAdmin())
@@ -542,10 +590,19 @@ async def cb_grant_save(call: CallbackQuery, state: FSMContext):
         if tst:
             tests_to_grant.append(dict(tst))
 
+    from datetime import datetime, timedelta, timezone
+    ALMATY = timezone(timedelta(hours=5))
+    now_almaty = datetime.now(ALMATY)
+    granted_at_iso = now_almaty.isoformat()
+
     expires_at = None
+    expires_label = "бессрочно"
     if days > 0:
-        from datetime import datetime, timedelta
-        expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+        # Отсчёт от текущего момента по Астане, срок истекает в ТО ЖЕ время
+        exp_dt = now_almaty + timedelta(days=days)
+        # Храним в UTC для корректного сравнения
+        expires_at = exp_dt.astimezone(timezone.utc).isoformat()
+        expires_label = exp_dt.strftime("%d.%m.%Y %H:%M") + " (Астана)"
 
     granted_count = 0
     notified_count = 0
@@ -554,13 +611,14 @@ async def cb_grant_save(call: CallbackQuery, state: FSMContext):
             try:
                 db.execute(
                     """INSERT INTO private_test_access
-                          (test_id, user_tg_id, granted_by, expires_at, notified_expired)
-                       VALUES (?,?,?,?,0)
+                          (test_id, user_tg_id, granted_by, granted_at, expires_at, notified_expired)
+                       VALUES (?,?,?,?,?,0)
                        ON CONFLICT(test_id, user_tg_id) DO UPDATE SET
                           expires_at=excluded.expires_at,
                           granted_by=excluded.granted_by,
+                          granted_at=excluded.granted_at,
                           notified_expired=0""",
-                    (tst['id'], tg_id, call.from_user.id, expires_at))
+                    (tst['id'], tg_id, call.from_user.id, granted_at_iso, expires_at))
                 granted_count += 1
             except Exception as e:
                 log.warning("grant fail tg=%s: %s", tg_id, e)
@@ -572,16 +630,30 @@ async def cb_grant_save(call: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
-    duration_label = "бессрочно" if days == 0 else f"{days} дней"
+    duration_label = "бессрочно" if days == 0 else f"{days} дней (до {expires_label})"
     summary = (
         f"✅ <b>Доступ выдан!</b>\n\n"
         f"👥 Пользователей: <b>{len(targets)}</b>\n"
         f"🔐 Тестов: <b>{len(tests_to_grant)}</b>\n"
         f"⏱ Срок: <b>{duration_label}</b>\n"
+        f"🕐 Выдано: {now_almaty.strftime('%d.%m.%Y %H:%M')} (Астана)\n"
         f"📊 Записей: <b>{granted_count}</b>\n"
         f"📩 Уведомлено: <b>{notified_count}</b>"
     )
     await call.message.answer(summary, parse_mode="HTML")
+    # Лог выдачи доступа в чат админов
+    try:
+        from services import admin_log_service as _als
+        target_names = ", ".join(n for _, n in targets[:15])
+        if len(targets) > 15:
+            target_names += f" … +{len(targets)-15}"
+        test_title = tests_to_grant[0]['title'] if len(tests_to_grant) == 1 else f"{len(tests_to_grant)} тестов"
+        await _als.log_access_granted(
+            call.bot, call.from_user.id,
+            f"{len(targets)} чел: {target_names}",
+            test_title, duration_label)
+    except Exception:
+        pass
     await state.clear()
     await call.answer("✅")
 
@@ -615,11 +687,15 @@ async def cb_opens_grant_test(call: CallbackQuery, state: FSMContext):
             return
         tests_to_grant = [dict(test)]
 
-    # Вычисляем expires_at
+    # Вычисляем expires_at по времени Астаны (UTC+5)
+    from datetime import datetime, timedelta, timezone
+    ALMATY = timezone(timedelta(hours=5))
+    now_almaty = datetime.now(ALMATY)
+    granted_at_iso = now_almaty.isoformat()
     expires_at = None
     if days > 0:
-        from datetime import datetime, timedelta
-        expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+        exp_dt = now_almaty + timedelta(days=days)
+        expires_at = exp_dt.astimezone(timezone.utc).isoformat()
 
     granted_count = 0
     notified_count = 0
@@ -630,13 +706,14 @@ async def cb_opens_grant_test(call: CallbackQuery, state: FSMContext):
                 # UPSERT — если запись есть, обновляем expires_at
                 db.execute(
                     """INSERT INTO private_test_access
-                          (test_id, user_tg_id, granted_by, expires_at, notified_expired)
-                       VALUES (?,?,?,?,0)
+                          (test_id, user_tg_id, granted_by, granted_at, expires_at, notified_expired)
+                       VALUES (?,?,?,?,?,0)
                        ON CONFLICT(test_id, user_tg_id) DO UPDATE SET
                           expires_at=excluded.expires_at,
                           granted_by=excluded.granted_by,
+                          granted_at=excluded.granted_at,
                           notified_expired=0""",
-                    (tst['id'], tg_id, call.from_user.id, expires_at))
+                    (tst['id'], tg_id, call.from_user.id, granted_at_iso, expires_at))
                 granted_count += 1
             except Exception as e:
                 log.warning("Ошибка выдачи доступа tg=%s test=%s: %s", tg_id, tst['id'], e)
@@ -667,18 +744,25 @@ async def cb_opens_grant_test(call: CallbackQuery, state: FSMContext):
 async def _notify_user_grant(bot: Bot, target_tg_id: int,
                               test: dict = None, all_tests: bool = False,
                               days: int = 0):
-    """Уведомляем пользователя о новом доступе."""
-    duration_label = "♾ Доступ бессрочный" if days == 0 else f"⏱ Срок: <b>{days} дней</b>"
+    """Уведомляем пользователя о новом доступе — ПРОСТО и ПОНЯТНО где найти."""
+    duration_label = "♾ Доступ навсегда" if days == 0 else f"⏱ Доступ на {days} дней"
+    # Имя бота для deep-link
+    import config as _cfg
+    bot_un = getattr(_cfg, 'BOT_USERNAME', '') or ''
     try:
         if all_tests:
             text = (
-                f"🎉 <b>Вам открыт закрытый доступ!</b>\n\n"
-                f"Администратор открыл вам доступ ко <b>всем приватным тестам</b>.\n\n"
+                "🎉 <b>Тебе открыли доступ к приватным тестам!</b>\n\n"
                 f"{duration_label}\n\n"
-                f"Перейдите в каталог тестов."
+                "📍 <b>Где найти:</b>\n"
+                "1️⃣ Нажми /start\n"
+                "2️⃣ Открой «📚 Тесты»\n"
+                "3️⃣ Приватные разделы теперь видны тебе 🔐\n\n"
+                "Или просто нажми кнопку ниже 👇"
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="📚 Открыть каталог", callback_data="m:tests")
+                InlineKeyboardButton(text="📚 Открыть каталог тестов",
+                                      callback_data="m:tests")
             ]])
         else:
             title = utils.escape_html(test.get('title') or '—')
@@ -686,18 +770,28 @@ async def _notify_user_grant(bot: Bot, target_tg_id: int,
                 "SELECT COUNT(*) AS c FROM questions WHERE test_id=?",
                 (test['id'],))['c']
             text = (
-                f"🎉 <b>Вам открыт закрытый доступ!</b>\n\n"
-                f"🔐 Тест: <b>{title}</b>\n"
+                f"🎉 <b>Тебе открыли доступ к приватному тесту!</b>\n\n"
+                f"🔐 <b>«{title}»</b>\n"
                 f"📚 Вопросов: {qcount}\n"
-                f"⏱ Время: {test.get('time_per_question') or 30} сек/вопрос\n\n"
                 f"{duration_label}\n\n"
-                f"Этот тест не виден другим пользователям — "
-                f"только тем, кому администратор лично открыл."
+                "📍 <b>Где найти этот тест:</b>\n"
+                "1️⃣ Нажми /start\n"
+                "2️⃣ Открой «📚 Тесты»\n"
+                f"3️⃣ Найди раздел с тестом «{title}» — теперь он виден тебе 🔐\n\n"
+                "Или просто нажми кнопку ниже — откроется сразу 👇"
             )
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🔓 Открыть тест",
-                                      callback_data=f"opentest:{test['id']}")
-            ]])
+            # Прямая кнопка-ссылка (откроет тест даже из другого чата)
+            if bot_un:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🚀 Открыть тест сейчас",
+                        url=f"https://t.me/{bot_un}?start=test_{test['id']}")
+                ]])
+            else:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="🚀 Открыть тест сейчас",
+                                          callback_data=f"opentest:{test['id']}")
+                ]])
         await bot.send_message(target_tg_id, text,
                                 reply_markup=kb, parse_mode="HTML")
     except Exception as e:
@@ -948,3 +1042,4 @@ async def expiry_check_loop(bot: Bot):
         except Exception as e:
             log.warning("expiry_check_loop error: %s", e)
         await asyncio.sleep(3600)  # раз в час
+
