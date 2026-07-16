@@ -23,9 +23,21 @@ import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
                        homework, rating, inline, admin, group_quiz,
-                       private_access, categories, question_editor, autopub,
+                       private_access, categories, autopub,
                        appeals, profile_subjects, moderation, daily, notes,
-                       backup, zip_import)
+                       backup, zip_import, payments, announce,
+                       modes, flashcards, learning, modes_admin,
+                       premium, referral)
+
+# question_editor импортируем отдельно с защитой — если файл вдруг
+# не доехал на хостинг, бот всё равно стартует (без редактора вопросов).
+try:
+    from handlers import question_editor
+except ImportError as _qe_err:
+    import logging as _lg
+    _lg.getLogger(__name__).error(
+        "question_editor не загружен: %s — бот запустится без него", _qe_err)
+    question_editor = None
 
 
 def setup_logging() -> None:
@@ -85,9 +97,8 @@ async def main() -> None:
     # Предупреждение если БД лежит в репозитории (не Volume)
     if not config.DB_PATH.startswith("/data") and not config.DB_PATH.startswith("/mnt"):
         log.warning(
-            "⚠️ DB_PATH=%s — БД лежит в репозитории и БУДЕТ СТЕРТА при следующем деплое! "
-            "Создай Volume на Railway (Settings → Volumes), смонтируй на /data, "
-            "и поставь переменную DB_PATH=/data/bot.db",
+            "⚠️ DB_PATH=%s — БД лежит в репозитории и БУДЕТ СТЕРТА при деплое! "
+            "Создай Volume на Railway, смонтируй на /data, DB_PATH=/data/bot.db",
             config.DB_PATH)
     log.info("База данных инициализирована: %s", config.DB_PATH)
 
@@ -171,6 +182,9 @@ async def main() -> None:
 
     # Routers — порядок важен (общие → специфичные)
     dp.include_router(common.router)
+    dp.include_router(payments.router)  # платежи Stars — рано
+    dp.include_router(announce.router)
+    dp.include_router(modes_admin.router) # админка режимов (callback, не текст)
     dp.include_router(appeals.router)
     dp.include_router(profile_subjects.router)
     dp.include_router(moderation.router)  # команды бан/мут — до group_quiz catch-all
@@ -186,11 +200,20 @@ async def main() -> None:
     dp.include_router(group_quiz.router)
     dp.include_router(private_access.router)
     dp.include_router(categories.router)
-    dp.include_router(question_editor.router)
+    if question_editor is not None:
+        dp.include_router(question_editor.router)
     dp.include_router(autopub.router)
     dp.include_router(backup.router)
     dp.include_router(zip_import.router)
     dp.include_router(admin.router)
+    # Режимы — В САМОМ КОНЦЕ. learning ловит любой текст, поэтому идёт
+    # после ВСЕХ FSM-хендлеров (создание теста, цены и т.д.), чтобы не
+    # перехватывать ввод. modes (callback-кнопки) и flashcards — тоже тут.
+    dp.include_router(modes.router)       # меню режимов (callback)
+    dp.include_router(flashcards.router)  # карточки (callback)
+    dp.include_router(premium.router)     # подписка Премиум + настройки
+    dp.include_router(referral.router)    # реферальная программа
+    dp.include_router(learning.router)    # заучивание — ПОСЛЕДНИЙ (ловит текст)
 
     await set_default_commands(bot)
 
@@ -205,6 +228,17 @@ async def main() -> None:
     # Фоновая задача: авто-публикация тестов по расписанию
     from services import autopub_service as _aps
     _aps.start_worker(bot)
+
+    # Фоновая задача: авто-бэкап главному админу каждый день
+    from services import backup_service as _bks
+    asyncio.create_task(_bks.daily_backup_loop(bot))
+    # Планировщик автозапуска тестов по расписанию
+    from services import auto_schedule_service as _ass
+    asyncio.create_task(_ass.scheduler_loop(bot))
+
+    # Сайт (лендинг + личный кабинет) — работает в этом же процессе на порту PORT
+    from webapp import server as _web
+    asyncio.create_task(_web.start_web_server())
 
     log.info("Запуск polling...")
     try:
