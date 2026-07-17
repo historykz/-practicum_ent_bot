@@ -1,34 +1,4 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{% block title %}Smart ENT — подготовка к ЕНТ{% endblock %}</title>
-<link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-<header class="site-header">
-  <div class="container header-inner">
-    <a href="/" class="logo">📘 Smart ENT</a>
-    <nav>
-      {% if logged_in %}
-        <a href="/cabinet">Личный кабинет</a>
-        <a href="/logout">Выйти</a>
-      {% else %}
-        <a href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">Открыть бота</a>
-      {% endif %}
-    </nav>
-  </div>
-</header>
-
-<main class="container">
-  {% block content %}{% endblock %}
-</main>
-
-<footer class="site-footer">
-  <div class="container">
-    <p>Smart ENT — онлайн-школа подготовки к ЕНТ. Бот: <a href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">@{{ bot_username }}</a></p>
-  </div>
-</footer>
-</body>
-</html>
+📘 Smart ENT
+{% if logged_in %} Начать обучение Личный кабинет {% if is_admin %}Админка{% endif %} Выйти {% else %} Открыть бота {% endif %}
+{% block content %}{% endblock %}
+Smart ENT — онлайн-школа подготовки к ЕНТ. Бот: @{{ bot_username }}
