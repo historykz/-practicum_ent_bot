@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ subject.title }} — Smart ENT{% endblock %}
+{% block content %}
+
+<p><a href="/learn">&larr; Все предметы</a></p>
+<h1>{{ subject.title }}</h1>
+{% if subject.description %}<p class="muted">{{ subject.description }}</p>{% endif %}
+
+{% for item in sections %}
+<section class="section-card">
+  <h2>{{ item.section.title }}</h2>
+  {% if item.lessons %}
+  <ul class="lesson-list">
+    {% for lesson in item.lessons %}
+      <li>
+        {% if lesson.status == 'open' %}
+          <a href="/learn/lesson/{{ lesson.id }}">
+            {% if lesson.viewed %}✅{% else %}📖{% endif %} {{ lesson.title }}
+          </a>
+        {% else %}
+          <span class="muted">🔒 {{ lesson.title }}</span>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    <p class="muted">Уроков пока нет.</p>
+  {% endif %}
+</section>
+{% else %}
+<p class="muted">Разделов пока нет.</p>
+{% endfor %}
+
+{% endblock %}

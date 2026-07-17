@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}{{ lesson.title }} — Smart ENT{% endblock %}
+{% block content %}
+
+<p>
+  <a href="/learn">Все предметы</a> &rarr;
+  <a href="/learn/{{ subject.id }}">{{ subject.title }}</a>
+</p>
+<h1>{{ lesson.title }}</h1>
+{% if lesson.description %}<p class="muted">{{ lesson.description }}</p>{% endif %}
+
+{% if error == "attempts_exceeded" %}
+  <div class="alert">Попытки для этого теста закончились.</div>
+{% endif %}
+
+<div class="lesson-content">{{ lesson.content_html }}</div>
+
+{% if test_info %}
+<section class="lesson-test-card">
+  <h2>📝 Проверьте себя</h2>
+  <p>Тест: {{ test_info.questions_count }} вопрос(ов)
+    {% if test_info.attempts_limit %} · попыток использовано {{ test_info.attempts_used }} из {{ test_info.attempts_limit }}{% endif %}
+  </p>
+  {% if test_info.blocked %}
+    <p class="muted">Попытки закончились.</p>
+  {% else %}
+    <a class="btn btn-primary" href="/learn/lesson/{{ lesson.id }}/test">Пройти тест</a>
+  {% endif %}
+</section>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Админка обучения — Smart ENT{% endblock %}
+{% block content %}
+
+<h1>⚙️ Управление обучением</h1>
+
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
+<section class="admin-card">
+  <h2>Новый предмет</h2>
+  <form method="post" action="/admin/learn/subjects/create" class="admin-form">
+    <input type="text" name="title" placeholder="Название предмета" required>
+    <textarea name="description" placeholder="Описание (необязательно)"></textarea>
+    <label class="admin-checkbox"><input type="checkbox" name="is_open"> Открыт всем без выдачи доступа</label>
+    <button type="submit" class="btn btn-primary">Создать предмет</button>
+  </form>
+</section>
+
+{% for s in subjects %}
+<section class="admin-card">
+  {% if edit_subject == s.id|string %}
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/edit" class="admin-form">
+      <input type="text" name="title" value="{{ s.title }}" required>
+      <textarea name="description">{{ s.description }}</textarea>
+      <label class="admin-checkbox"><input type="checkbox" name="is_open" {% if s.is_open %}checked{% endif %}> Открыт всем без выдачи доступа</label>
+      <button type="submit" class="btn-small">Сохранить</button>
+      <a href="/admin/learn" class="btn-small">Отмена</a>
+    </form>
+  {% else %}
+    <h2>
+      {{ s.title }}
+      <span class="muted">({{ s.status }}{% if s.is_open %}, открыт всем{% endif %})</span>
+    </h2>
+    {% if s.description %}<p class="muted">{{ s.description }}</p>{% endif %}
+
+    <a href="/admin/learn?edit_subject={{ s.id }}" class="btn-small">Редактировать</a>
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/toggle" style="display:inline">
+      <button type="submit" class="btn-small">
+        {% if s.status == 'active' %}Скрыть предмет{% else %}Показать предмет{% endif %}
+      </button>
+    </form>
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/delete" style="display:inline"
+          onsubmit="return confirm('Удалить предмет «{{ s.title }}» вместе со всеми разделами, уроками и тестами? Это необратимо.');">
+      <button type="submit" class="btn-small btn-danger">Удалить предмет</button>
+    </form>
+  {% endif %}
+
+  {% if not s.is_open %}
+  <form method="post" action="/admin/learn/subjects/{{ s.id }}/access/grant" class="admin-form admin-inline">
+    <input type="text" name="user_tg_id" placeholder="Telegram ID ученика" required>
+    <input type="number" name="days" placeholder="Дней доступа (0 = навсегда)" value="0">
+    <button type="submit" class="btn-small">Выдать доступ</button>
+  </form>
+  {% endif %}
+
+  <h3>Разделы</h3>
+  {% for sec in s.sections %}
+  <div class="admin-section-block">
+    {% if edit_section == sec.id|string %}
+      <form method="post" action="/admin/learn/sections/{{ sec.id }}/edit" class="admin-form admin-inline">
+        <input type="text" name="title" value="{{ sec.title }}" required>
+        <button type="submit" class="btn-small">Сохранить</button>
+        <a href="/admin/learn" class="btn-small">Отмена</a>
+      </form>
+    {% else %}
+      <strong>{{ sec.title }}</strong>
+      <a href="/admin/learn?edit_section={{ sec.id }}" class="btn-small">Изменить</a>
+      <form method="post" action="/admin/learn/sections/{{ sec.id }}/delete" style="display:inline"
+            onsubmit="return confirm('Удалить раздел «{{ sec.title }}» со всеми уроками и тестами?');">
+        <button type="submit" class="btn-small btn-danger">Удалить раздел</button>
+      </form>
+    {% endif %}
+    <ul class="lesson-list">
+      {% for lesson in sec.lessons %}
+      <li>
+        <a href="/admin/learn/lessons/{{ lesson.id }}/edit">{{ lesson.title }}</a>
+        <span class="muted">({{ lesson.status }}{% if lesson.test_id %}, с тестом{% endif %})</span>
+        <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/toggle" style="display:inline">
+          <button type="submit" class="btn-small">
+            {% if lesson.status == 'open' %}Закрыть{% else %}Открыть{% endif %}
+          </button>
+        </form>
+      </li>
+      {% else %}
+      <li class="muted">Уроков нет</li>
+      {% endfor %}
+    </ul>
+
+    <details class="admin-details">
+      <summary>+ Новый урок в разделе "{{ sec.title }}"</summary>
+      <form method="post" action="/admin/learn/sections/{{ sec.id }}/lessons/create"
+            enctype="multipart/form-data" class="admin-form">
+        <input type="text" name="title" placeholder="Название урока" required>
+        <textarea name="description" placeholder="Краткое описание (необязательно)"></textarea>
+        <textarea name="content" placeholder="Текст конспекта" rows="6"></textarea>
+
+        <label class="admin-radio"><input type="radio" name="test_mode" value="none" checked> Без теста</label>
+        <label class="admin-radio"><input type="radio" name="test_mode" value="text"> Вставить тест текстом</label>
+        <textarea name="test_text" placeholder="Текст вопроса&#10;A) вариант&#10;B) вариант *&#10;C) вариант&#10;D) вариант"></textarea>
+        <label class="admin-radio"><input type="radio" name="test_mode" value="zip"> Загрузить ZIP (questions.txt + images/)</label>
+        <input type="file" name="test_zip" accept=".zip">
+        <p class="muted" style="margin:0;">После загрузки будет показан предпросмотр вопросов — тест сохранится только после подтверждения.</p>
+
+        <button type="submit" class="btn btn-primary">Далее</button>
+      </form>
+    </details>
+  </div>
+  {% else %}
+  <p class="muted">Разделов нет.</p>
+  {% endfor %}
+
+  <details class="admin-details">
+    <summary>+ Новый раздел в "{{ s.title }}"</summary>
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/sections/create" class="admin-form admin-inline">
+      <input type="text" name="title" placeholder="Название раздела" required>
+      <button type="submit" class="btn-small">Создать раздел</button>
+    </form>
+  </details>
+</section>
+{% endfor %}
+
+{% endblock %}

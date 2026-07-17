@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Начать обучение — Smart ENT{% endblock %}
+{% block content %}
+
+<h1>🎓 Начать обучение</h1>
+
+{% if subjects %}
+<div class="subjects-grid">
+  {% for s in subjects %}
+  <a class="subject-card" href="/learn/{{ s.id }}">
+    {% if s.cover_url %}<img src="{{ s.cover_url }}" alt="" class="subject-cover">{% endif %}
+    <h3>{{ s.title }}</h3>
+    {% if s.description %}<p class="muted">{{ s.description }}</p>{% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<p class="muted">Пока нет доступных предметов. Если у школы есть закрытые материалы — попросите куратора выдать вам доступ.</p>
+{% endif %}
+
+{% endblock %}
