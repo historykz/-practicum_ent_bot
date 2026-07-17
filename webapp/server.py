@@ -19,7 +19,7 @@ from aiohttp_session.cookie_storage import EncryptedCookieStorage
 
 import config
 import utils
-from webapp import auth, queries
+from webapp import auth, queries, learning
 
 log = logging.getLogger(__name__)
 
@@ -40,13 +40,8 @@ def _session_secret_bytes() -> bytes:
 
 
 async def index(request: web.Request) -> web.Response:
-    tg_id = await auth.get_logged_in_tg_id(request)
-    error = request.query.get("error")
-    context = {
-        "bot_username": config.WEB_BOT_USERNAME,
-        "logged_in": tg_id is not None,
-        "error": error,
-    }
+    context = await auth.nav_context(request)
+    context["error"] = request.query.get("error")
     return aiohttp_jinja2.render_template("landing.html", request, context)
 
 
@@ -79,8 +74,7 @@ async def cabinet(request: web.Request) -> web.Response:
         await auth.log_out(request)
         return web.HTTPFound("/?error=no_account")
 
-    data["bot_username"] = config.WEB_BOT_USERNAME
-    data["logged_in"] = True
+    data.update(await auth.nav_context(request))
     return aiohttp_jinja2.render_template("cabinet.html", request, data)
 
 
@@ -90,7 +84,7 @@ async def logout(request: web.Request) -> web.Response:
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(client_max_size=64 * 1024 * 1024)  # до 64МБ — загрузка zip с тестами/картинками
 
     setup_session(app, EncryptedCookieStorage(
         _session_secret_bytes(),
@@ -109,6 +103,8 @@ def create_app() -> web.Application:
     app.router.add_get("/cabinet", cabinet)
     app.router.add_get("/logout", logout)
     app.router.add_static("/static/", path=str(BASE_DIR / "static"), name="static")
+
+    learning.register_routes(app)
 
     return app
 
