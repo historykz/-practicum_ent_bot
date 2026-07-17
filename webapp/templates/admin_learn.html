@@ -1,0 +1,39 @@
+{% extends "base.html" %} {% block title %}РђРґРјРёРЅРєР° РѕР±СѓС‡РµРЅРёСЏ вЂ” Smart ENT{% endblock %} {% block content %}
+вљ™пёЏ РЈРїСЂР°РІР»РµРЅРёРµ РѕР±СѓС‡РµРЅРёРµРј
+
+{% if message %}
+{{ message }}
+{% endif %}
+РќРѕРІС‹Р№ РїСЂРµРґРјРµС‚
+
+     РћС‚РєСЂС‹С‚ РІСЃРµРј Р±РµР· РІС‹РґР°С‡Рё РґРѕСЃС‚СѓРїР°  РЎРѕР·РґР°С‚СЊ РїСЂРµРґРјРµС‚
+{% for s in subjects %}
+{% if edit_subject == s.id|string %}
+     РћС‚РєСЂС‹С‚ РІСЃРµРј Р±РµР· РІС‹РґР°С‡Рё РґРѕСЃС‚СѓРїР°  РЎРѕС…СЂР°РЅРёС‚СЊ РћС‚РјРµРЅР°
+{% else %}
+{{ s.title }} ({{ s.status }}{% if s.is_open %}, РѕС‚РєСЂС‹С‚ РІСЃРµРј{% endif %})
+
+{% if s.description %}
+{{ s.description }}
+
+{% endif %} Р РµРґР°РєС‚РёСЂРѕРІР°С‚СЊ  {% if s.status == 'active' %}РЎРєСЂС‹С‚СЊ РїСЂРµРґРјРµС‚{% else %}РџРѕРєР°Р·Р°С‚СЊ РїСЂРµРґРјРµС‚{% endif %} РЈРґР°Р»РёС‚СЊ РїСЂРµРґРјРµС‚ {% endif %} {% if not s.is_open %}
+    Р’С‹РґР°С‚СЊ РґРѕСЃС‚СѓРї
+{% endif %}
+Р Р°Р·РґРµР»С‹
+
+{% for sec in s.sections %}
+{% if edit_section == sec.id|string %}
+  РЎРѕС…СЂР°РЅРёС‚СЊ РћС‚РјРµРЅР°
+{% else %} {{ sec.title }} РР·РјРµРЅРёС‚СЊ  РЈРґР°Р»РёС‚СЊ СЂР°Р·РґРµР» {% endif %}
+{% for lesson in sec.lessons %}
+{{ lesson.title }} ({{ lesson.status }}{% if lesson.test_id %}, СЃ С‚РµСЃС‚РѕРј{% endif %}) {% if lesson.status == 'open' %}Р—Р°РєСЂС‹С‚СЊ{% else %}РћС‚РєСЂС‹С‚СЊ{% endif %}
+{% else %}
+РЈСЂРѕРєРѕРІ РЅРµС‚
+{% endfor %}
++ РќРѕРІС‹Р№ СѓСЂРѕРє РІ СЂР°Р·РґРµР»Рµ "{{ sec.title }}"
+{% else %}
+Р Р°Р·РґРµР»РѕРІ РЅРµС‚.
+
+{% endfor %}
++ РќРѕРІС‹Р№ СЂР°Р·РґРµР» РІ "{{ s.title }}"
+{% endfor %} {% endblock %}
