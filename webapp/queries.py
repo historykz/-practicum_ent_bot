@@ -131,3 +131,4 @@ def _dashboard_data_sync(tg_id: int) -> Optional[dict]:
 async def get_dashboard_data(tg_id: int) -> Optional[dict]:
     """Собирает все данные для личного кабинета одним вызовом в отдельном потоке."""
     return await asyncio.to_thread(_dashboard_data_sync, tg_id)
+
