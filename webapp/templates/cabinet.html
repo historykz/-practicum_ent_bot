@@ -1,93 +1,46 @@
-{% extends "base.html" %}
-{% block title %}Личный кабинет — Smart ENT{% endblock %}
-{% block content %}
+{% extends "base.html" %} {% block title %}Р›РёС‡РЅС‹Р№ РєР°Р±РёРЅРµС‚ вЂ” Smart ENT{% endblock %} {% block content %}
+РџСЂРёРІРµС‚, {{ user.first_name or user.username or "РґСЂСѓРі" }}!
 
-<section class="profile-card">
-  <h1>Привет, {{ user.first_name or user.username or "друг" }}!</h1>
-  {% if user.school %}<p class="muted">{{ user.school }}{% if user.city %}, {{ user.city }}{% endif %}</p>{% endif %}
+{% if user.school %}
+{{ user.school }}{% if user.city %}, {{ user.city }}{% endif %}
 
-  <div class="stat-row">
-    <div class="stat-box">
-      <div class="stat-value">{{ tests_done }}</div>
-      <div class="stat-label">Тестов пройдено</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-value">{{ user.current_streak or 0 }}</div>
-      <div class="stat-label">Серия дней подряд</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-value">{{ user.best_streak or 0 }}</div>
-      <div class="stat-label">Лучшая серия</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-value">{% if rating.position %}#{{ rating.position }}{% else %}—{% endif %}</div>
-      <div class="stat-label">Место в рейтинге</div>
-    </div>
-  </div>
-</section>
+{% endif %}
+{{ tests_done }}
+РўРµСЃС‚РѕРІ РїСЂРѕР№РґРµРЅРѕ
+{{ user.current_streak or 0 }}
+РЎРµСЂРёСЏ РґРЅРµР№ РїРѕРґСЂСЏРґ
+{{ user.best_streak or 0 }}
+Р›СѓС‡С€Р°СЏ СЃРµСЂРёСЏ
+{% if rating.position %}#{{ rating.position }}{% else %}вЂ”{% endif %}
+РњРµСЃС‚Рѕ РІ СЂРµР№С‚РёРЅРіРµ
+{% if is_premium %}
+в­ђ РџСЂРµРјРёСѓРј Р°РєС‚РёРІРµРЅ
 
-<section class="premium-card {% if is_premium %}premium-active{% endif %}">
-  {% if is_premium %}
-    <h2>⭐ Премиум активен</h2>
-    {% if premium_lifetime %}
-      <p>Доступ ко всем тестам и режимам — навсегда.</p>
-    {% else %}
-      <p>Доступ ко всем тестам и режимам до <strong>{{ premium_expires_at_fmt }}</strong> (время Астаны).</p>
-    {% endif %}
-  {% else %}
-    <h2>Премиум не активен</h2>
-    <p>Оформите Премиум в боте, чтобы открыть все тесты и режимы без ограничений.</p>
-    <a class="btn btn-primary" href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">Оформить в боте</a>
-  {% endif %}
-</section>
+{% if premium_lifetime %}
+Р”РѕСЃС‚СѓРї РєРѕ РІСЃРµРј С‚РµСЃС‚Р°Рј Рё СЂРµР¶РёРјР°Рј вЂ” РЅР°РІСЃРµРіРґР°.
 
-<section class="referral-card">
-  <h2>🎁 Пригласить друзей</h2>
-  <p>
-    Приглашено друзей: <strong>{{ referral.total }}</strong>,
-    засчитано (подписались на канал): <strong>{{ referral.counted }}</strong>.
-    Ещё <strong>{{ referral.remaining_for_reward }}</strong> друзей до
-    {{ referral.reward_days }} дней Премиума в подарок.
-  </p>
-  <div class="ref-link-row">
-    <input type="text" readonly value="{{ referral.link }}" id="ref-link">
-    <button type="button" onclick="copyRefLink()">Скопировать</button>
-  </div>
-</section>
+{% else %}
+Р”РѕСЃС‚СѓРї РєРѕ РІСЃРµРј С‚РµСЃС‚Р°Рј Рё СЂРµР¶РёРјР°Рј РґРѕ {{ premium_expires_at_fmt }} (РІСЂРµРјСЏ РђСЃС‚Р°РЅС‹).
 
-<section class="history-card">
-  <h2>📈 История тестов</h2>
-  {% if history %}
-  <div class="table-scroll">
-    <table>
-      <thead>
-        <tr><th>Тест</th><th>Верно</th><th>Неверно</th><th>Пропущено</th><th>Дата</th></tr>
-      </thead>
-      <tbody>
-        {% for row in history %}
-        <tr>
-          <td>{{ row.title }}</td>
-          <td>{{ row.correct }}</td>
-          <td>{{ row.wrong }}</td>
-          <td>{{ row.skipped }}</td>
-          <td>{{ row.created_at_fmt }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% else %}
-    <p class="muted">Пока нет завершённых тестов. Пройдите первый тест в боте!</p>
-  {% endif %}
-</section>
+{% endif %} {% else %}
+РџСЂРµРјРёСѓРј РЅРµ Р°РєС‚РёРІРµРЅ
 
-<script>
-function copyRefLink() {
-  const input = document.getElementById('ref-link');
-  input.select();
-  input.setSelectionRange(0, 99999);
-  navigator.clipboard.writeText(input.value);
-}
-</script>
+РћС„РѕСЂРјРёС‚Рµ РџСЂРµРјРёСѓРј РІ Р±РѕС‚Рµ, С‡С‚РѕР±С‹ РѕС‚РєСЂС‹С‚СЊ РІСЃРµ С‚РµСЃС‚С‹ Рё СЂРµР¶РёРјС‹ Р±РµР· РѕРіСЂР°РЅРёС‡РµРЅРёР№.
 
+РћС„РѕСЂРјРёС‚СЊ РІ Р±РѕС‚Рµ {% endif %}
+рџЋЃ РџСЂРёРіР»Р°СЃРёС‚СЊ РґСЂСѓР·РµР№
+
+РџСЂРёРіР»Р°С€РµРЅРѕ РґСЂСѓР·РµР№: {{ referral.total }}, Р·Р°СЃС‡РёС‚Р°РЅРѕ (РїРѕРґРїРёСЃР°Р»РёСЃСЊ РЅР° РєР°РЅР°Р»): {{ referral.counted }}. Р•С‰С‘ {{ referral.remaining_for_reward }} РґСЂСѓР·РµР№ РґРѕ {{ referral.reward_days }} РґРЅРµР№ РџСЂРµРјРёСѓРјР° РІ РїРѕРґР°СЂРѕРє.
+
+  РЎРєРѕРїРёСЂРѕРІР°С‚СЊ
+рџ“€ РСЃС‚РѕСЂРёСЏ С‚РµСЃС‚РѕРІ
+
+{% if history %}
+{% for row in history %} {% endfor %}
+РўРµСЃС‚	Р’РµСЂРЅРѕ	РќРµРІРµСЂРЅРѕ	РџСЂРѕРїСѓС‰РµРЅРѕ	Р”Р°С‚Р°
+{{ row.title }}	{{ row.correct }}	{{ row.wrong }}	{{ row.skipped }}	{{ row.created_at_fmt }}
+{% else %}
+РџРѕРєР° РЅРµС‚ Р·Р°РІРµСЂС€С‘РЅРЅС‹С… С‚РµСЃС‚РѕРІ. РџСЂРѕР№РґРёС‚Рµ РїРµСЂРІС‹Р№ С‚РµСЃС‚ РІ Р±РѕС‚Рµ!
+
+{% endif %}
 {% endblock %}
