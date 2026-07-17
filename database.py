@@ -811,6 +811,86 @@ def init_db() -> None:
             pass
 
         # --- Профильные предметы юзера (CSV из category_id) ---
+        # Обязательная подписка на канал по разделу (category_id) + флаг активности
+        try:
+            cur.execute("ALTER TABLE required_channels ADD COLUMN category_id INTEGER")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE required_channels ADD COLUMN is_active INTEGER DEFAULT 1")
+        except Exception:
+            pass
+        # --- Планировщик автозапуска тестов по расписанию ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auto_schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,           -- куда публиковать
+                category_id INTEGER,             -- раздел (NULL = все)
+                start_date TEXT NOT NULL,        -- дата начала YYYY-MM-DD
+                end_date TEXT NOT NULL,          -- дата окончания
+                daily_time TEXT NOT NULL,        -- время запуска HH:MM (Астана)
+                tests_per_day INTEGER DEFAULT 1, -- сколько тестов в день
+                allow_paid INTEGER DEFAULT 0,    -- разрешить платные
+                allow_private INTEGER DEFAULT 0, -- разрешить приватные
+                status TEXT DEFAULT 'active',    -- active | stopped | finished
+                last_run_date TEXT,              -- когда последний раз запускал
+                bot_username TEXT,
+                created_by INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Лог запусков тестов планировщиком (для умного выбора + статистики)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auto_schedule_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schedule_id INTEGER NOT NULL,
+                test_id INTEGER NOT NULL,
+                run_date TEXT,                   -- когда запущен
+                participants INTEGER DEFAULT 0,  -- сколько участвовало
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sched_runs "
+                    "ON auto_schedule_runs(schedule_id, test_id)")
+        # Участники чата за период (для статистики активности)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                user_tg_id INTEGER NOT NULL,
+                joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, user_tg_id)
+            )
+        """)
+        # Канал для анонса (отдельно от чата) + задержка перед стартом
+        try:
+            cur.execute("ALTER TABLE auto_schedule ADD COLUMN channel_id TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE auto_schedule ADD COLUMN announce_delay INTEGER DEFAULT 60")
+        except Exception:
+            pass
+
+        # --- Реферальная программа: кого пригласил (сохраняем ВСЕХ, даже отписавшихся) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS referral_invites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inviter_tg_id INTEGER NOT NULL,
+                invited_tg_id INTEGER NOT NULL,
+                subscribed INTEGER DEFAULT 0,     -- подписался ли на канал
+                counted INTEGER DEFAULT 0,        -- засчитан ли (подписан + уникален)
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(inviter_tg_id, invited_tg_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_refinv_inviter "
+                    "ON referral_invites(inviter_tg_id)")
+        # Награды за рефералов (сколько раз уже выдавали премиум за 10 друзей)
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN referral_rewards_given INTEGER DEFAULT 0")
+        except Exception:
+            pass
         try:
             cur.execute("ALTER TABLE users ADD COLUMN profile_subjects TEXT")
         except Exception:
@@ -844,6 +924,142 @@ def init_db() -> None:
             )
         """)
 
+        # --- Цена в звёздах для тестов ---
+        try:
+            cur.execute("ALTER TABLE tests ADD COLUMN price_stars INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        # --- Настройки режимов Карточки/Заучивание для теста ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS test_modes (
+                test_id INTEGER PRIMARY KEY,
+                flashcards_enabled INTEGER DEFAULT 1,
+                learning_enabled INTEGER DEFAULT 1,
+                fc_price_1 INTEGER DEFAULT 5,
+                fc_price_10 INTEGER DEFAULT 10,
+                fc_price_redo INTEGER DEFAULT 2,
+                ln_price_1 INTEGER DEFAULT 5,
+                ln_price_10 INTEGER DEFAULT 10,
+                ln_price_redo INTEGER DEFAULT 2,
+                is_free INTEGER DEFAULT 0
+            )
+        """)
+
+        # --- Купленные прохождения режимов ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mode_passes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                test_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,          -- flashcards | learning
+                purchased INTEGER DEFAULT 0, -- сколько куплено
+                used INTEGER DEFAULT 0,      -- сколько использовано
+                charge_id TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_tg_id, test_id, mode)
+            )
+        """)
+
+        # --- Активные/незавершённые сессии режимов (переживают рестарт) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mode_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                test_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,          -- flashcards | learning
+                question_ids TEXT,           -- JSON список id вопросов
+                current_index INTEGER DEFAULT 0,
+                statuses TEXT,               -- JSON {qid: status}
+                answers TEXT,                -- JSON {qid: [попытки]} (learning)
+                know_count INTEGER DEFAULT 0,
+                dontknow_count INTEGER DEFAULT 0,
+                correct_first INTEGER DEFAULT 0,
+                correct_retry INTEGER DEFAULT 0,
+                wrong_count INTEGER DEFAULT 0,
+                skipped_count INTEGER DEFAULT 0,
+                main_message_id INTEGER,
+                photo_message_id INTEGER,
+                side TEXT DEFAULT 'question', -- question | answer (flashcards)
+                is_redo INTEGER DEFAULT 0,    -- сессия повтора ошибок (за 2⭐️)
+                pass_charged INTEGER DEFAULT 0, -- списано ли прохождение
+                status TEXT DEFAULT 'active', -- active | finished
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_action_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_modesess_user "
+                    "ON mode_sessions(user_tg_id, status)")
+
+        # --- История завершённых прохождений режимов ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mode_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                test_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                total INTEGER DEFAULT 0,
+                know_count INTEGER DEFAULT 0,
+                dontknow_count INTEGER DEFAULT 0,
+                correct_first INTEGER DEFAULT 0,
+                correct_retry INTEGER DEFAULT 0,
+                wrong_count INTEGER DEFAULT 0,
+                skipped_count INTEGER DEFAULT 0,
+                details TEXT,                -- JSON подробности
+                duration_sec INTEGER DEFAULT 0,
+                is_redo INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_moderes_user "
+                    "ON mode_results(user_tg_id, mode)")
+
+        # --- Доп. допустимые ответы для вопроса (для Заучивания) ---
+        try:
+            cur.execute("ALTER TABLE questions ADD COLUMN accepted_answers TEXT")
+        except Exception:
+            pass
+
+        # --- Покупки (звёзды) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,          -- test | category | gift | redo
+                test_id INTEGER,
+                category_id INTEGER,
+                gifted_to_tg_id INTEGER,     -- кому подарен (для gift)
+                stars_amount INTEGER DEFAULT 0,
+                charge_id TEXT,              -- telegram_payment_charge_id (для refund)
+                gift_code TEXT,              -- код для подарка по ссылке
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_user "
+                    "ON purchases(user_tg_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_test "
+                    "ON purchases(test_id)")
+
+        # --- Приглашения на дуэль (в БД, чтобы ссылка пережила рестарт) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS duel_invites (
+                code TEXT PRIMARY KEY,
+                host_tg_id INTEGER NOT NULL,
+                host_chat_id INTEGER,
+                host_lang TEXT DEFAULT 'ru',
+                category_id INTEGER,         -- раздел дуэли (NULL = все)
+                guest_tg_id INTEGER,
+                duel_id INTEGER,
+                status TEXT DEFAULT 'waiting', -- waiting | started | expired
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Раздел в дуэли
+        try:
+            cur.execute("ALTER TABLE duels ADD COLUMN category_id INTEGER")
+        except Exception:
+            pass
+
         # --- Предупреждения за ссылки ---
         cur.execute("""
             CREATE TABLE IF NOT EXISTS link_warnings (
@@ -873,5 +1089,99 @@ def init_db() -> None:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_autopub_status_time "
                     "ON autopub_queue(status, run_at)")
+
+        # === Раздел "Начать обучение" (сайт) ===
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS subjects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                cover_url TEXT,
+                sort_order INTEGER DEFAULT 0,
+                is_open INTEGER DEFAULT 0,     -- 0=нужен доступ, 1=открыт всем
+                status TEXT DEFAULT 'active',  -- active | hidden
+                created_by INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS subject_access (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL,
+                user_tg_id INTEGER NOT NULL,
+                granted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT,
+                granted_by_admin INTEGER,
+                UNIQUE(subject_id, user_tg_id),
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_subj_access_user "
+                    "ON subject_access(user_tg_id)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sections_subject "
+                    "ON sections(subject_id)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS lessons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                section_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                content_html TEXT DEFAULT '',
+                test_id INTEGER,
+                sort_order INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'open',    -- open | closed
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (section_id) REFERENCES sections(id) ON DELETE CASCADE
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_lessons_section "
+                    "ON lessons(section_id)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS lesson_progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                lesson_id INTEGER NOT NULL,
+                viewed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_tg_id, lesson_id),
+                FOREIGN KEY (lesson_id) REFERENCES lessons(id) ON DELETE CASCADE
+            )
+        """)
+        # Веб-путь к картинке вопроса (для сайта, отдельно от Telegram file_id)
+        try:
+            cur.execute("ALTER TABLE questions ADD COLUMN web_image_path TEXT")
+        except Exception:
+            pass
+
+        # Показывать ли результаты (счёт/процент) ученику после теста
+        try:
+            cur.execute("ALTER TABLE tests ADD COLUMN show_results INTEGER DEFAULT 1")
+        except Exception:
+            pass
+
+        # Черновики импорта теста для урока — превью перед подтверждением
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS lesson_test_drafts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_tg_id INTEGER NOT NULL,
+                section_id INTEGER NOT NULL,
+                lesson_id INTEGER,              -- NULL = новый урок, иначе замена теста существующего
+                lesson_title TEXT NOT NULL,
+                lesson_description TEXT DEFAULT '',
+                lesson_content TEXT DEFAULT '',
+                questions_json TEXT NOT NULL,   -- распарсенные вопросы (текст+варианты+картинка)
+                errors_json TEXT DEFAULT '[]',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
         logger.info("База данных инициализирована")
