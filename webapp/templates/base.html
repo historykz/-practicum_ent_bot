@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Smart ENT — подготовка к ЕНТ{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a href="/" class="logo">📘 Smart ENT</a>
+    <nav>
+      {% if logged_in %}
+        <a href="/learn" class="nav-learn">Начать обучение</a>
+        <a href="/cabinet">Личный кабинет</a>
+        {% if is_admin %}<a href="/admin/learn">Админка</a>{% endif %}
+        <a href="/logout">Выйти</a>
+      {% else %}
+        <a href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">Открыть бота</a>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+
+{% if watermark_svg %}
+<div class="watermark-overlay" id="watermark-overlay" style="background-image:url('{{ watermark_svg }}');"></div>
+<div id="copy-toast" class="copy-toast"></div>
+<script>
+(function() {
+  var el = document.getElementById('watermark-overlay');
+  if (el) {
+    setInterval(function() {
+      var x = Math.floor(Math.random() * 80);
+      var y = Math.floor(Math.random() * 80);
+      el.style.backgroundPosition = x + 'px ' + y + 'px';
+    }, 4000);
+  }
+
+  var toastEl = document.getElementById('copy-toast');
+  var toastTimer = null;
+  function showToast() {
+    toastEl.textContent = 'Копирование учебных материалов запрещено. Все материалы защищены авторским правом и содержат персональную маркировку пользователя.';
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { toastEl.classList.remove('show'); }, 3500);
+  }
+
+  document.addEventListener('copy', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('cut', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('contextmenu', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('keydown', function(e) {
+    var k = e.key.toLowerCase();
+    var mod = e.ctrlKey || e.metaKey;
+    if (mod && (k === 'c' || k === 'x' || k === 's' || k === 'p')) {
+      e.preventDefault();
+      showToast();
+    }
+  });
+})();
+</script>
+{% endif %}
+
+<main class="container">
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>Smart ENT — онлайн-школа подготовки к ЕНТ. Бот: <a href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">@{{ bot_username }}</a></p>
+  </div>
+</footer>
+</body>
+</html>
