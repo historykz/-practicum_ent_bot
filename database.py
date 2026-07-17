@@ -1184,4 +1184,23 @@ def init_db() -> None:
             )
         """)
 
+        # Видео урока: своё загруженное (video_url, отдаётся с диска рядом с БД)
+        # или встроенное с YouTube (youtube_id)
+        try:
+            cur.execute("ALTER TABLE lessons ADD COLUMN video_url TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE lessons ADD COLUMN youtube_id TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE lesson_test_drafts ADD COLUMN video_url TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE lesson_test_drafts ADD COLUMN youtube_id TEXT")
+        except Exception:
+            pass
+
         logger.info("База данных инициализирована")
