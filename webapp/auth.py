@@ -4,6 +4,7 @@
 Алгоритм проверки подписи — официальный, описан в
 https://core.telegram.org/widgets/login#checking-authorization
 """
+import asyncio
 import hashlib
 import hmac
 import time
@@ -13,6 +14,7 @@ from aiohttp import web
 from aiohttp_session import get_session
 
 import config
+import utils
 
 # Сколько секунд считаем результат виджета свежим (сутки — как рекомендует Telegram)
 MAX_AUTH_AGE_SECONDS = 86400
@@ -67,3 +69,16 @@ async def get_logged_in_tg_id(request: web.Request) -> Optional[int]:
 async def log_out(request: web.Request) -> None:
     session = await get_session(request)
     session.pop(SESSION_USER_KEY, None)
+
+
+async def nav_context(request: web.Request) -> dict:
+    """Общие поля для шаблонов: вошёл ли, админ ли — для навигации в base.html."""
+    tg_id = await get_logged_in_tg_id(request)
+    is_admin = False
+    if tg_id is not None:
+        is_admin = await asyncio.to_thread(utils.is_admin, tg_id)
+    return {
+        "bot_username": config.WEB_BOT_USERNAME,
+        "logged_in": tg_id is not None,
+        "is_admin": is_admin,
+    }
