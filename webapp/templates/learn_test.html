@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Тест: {{ lesson.title }} — Smart ENT{% endblock %}
+{% block content %}
+
+<h1>📝 {{ lesson.title }}</h1>
+
+<div class="quiz-progress">
+  <span id="quiz-progress-text"></span>
+  <span id="quiz-timer" class="quiz-timer"></span>
+  <div class="quiz-progress-bar"><div id="quiz-progress-fill"></div></div>
+</div>
+
+<div id="quiz-card" class="quiz-card"></div>
+
+<script id="quiz-data" type="application/json">{{ questions_json | safe }}</script>
+<script>
+const attemptId = {{ attempt_id }};
+const questions = JSON.parse(document.getElementById('quiz-data').textContent);
+const timePerQuestion = {{ time_per_question|default(0) }};
+let current = 0;
+let answered = false;
+let timerInterval = null;
+
+const card = document.getElementById('quiz-card');
+const progressText = document.getElementById('quiz-progress-text');
+const progressFill = document.getElementById('quiz-progress-fill');
+const timerEl = document.getElementById('quiz-timer');
+
+function renderQuestion() {
+  answered = false;
+  const q = questions[current];
+  progressText.textContent = `Вопрос ${current + 1} из ${questions.length}`;
+  progressFill.style.width = ((current) / questions.length * 100) + '%';
+
+  let html = '';
+  if (q.web_image_path) {
+    html += `<img src="${q.web_image_path}" class="quiz-image" alt="">`;
+  }
+  html += `<h2 class="quiz-question">${escapeHtml(q.text)}</h2>`;
+  html += '<div class="quiz-options">';
+  q.options.forEach(opt => {
+    html += `<button class="quiz-option" data-option-id="${opt.id}">${escapeHtml(opt.text)}</button>`;
+  });
+  html += '</div>';
+  html += '<button id="quiz-continue" class="btn btn-primary quiz-continue" style="display:none">Продолжить</button>';
+  card.innerHTML = html;
+
+  card.querySelectorAll('.quiz-option').forEach(btn => {
+    btn.addEventListener('click', onAnswerClick);
+  });
+  document.getElementById('quiz-continue').addEventListener('click', onContinue);
+
+  startTimer();
+}
+
+function startTimer() {
+  clearInterval(timerInterval);
+  if (!timePerQuestion) { timerEl.textContent = ''; return; }
+  let left = timePerQuestion;
+  timerEl.textContent = `⏱ ${left}с`;
+  timerInterval = setInterval(() => {
+    left -= 1;
+    timerEl.textContent = `⏱ ${left}с`;
+    if (left <= 0) {
+      clearInterval(timerInterval);
+      if (!answered) onAnswerTimeout();
+    }
+  }, 1000);
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function showFeedback(result, chosenOptionId) {
+  card.querySelectorAll('.quiz-option').forEach(btn => {
+    btn.disabled = true;
+    const btnOptionId = parseInt(btn.getAttribute('data-option-id'));
+    if (result.correct === null || result.correct === undefined) return; // показ ответа выключен админом
+    if (btnOptionId === chosenOptionId) {
+      btn.classList.add(result.correct ? 'quiz-correct' : 'quiz-wrong');
+    } else if (btnOptionId === result.correct_option_id) {
+      btn.classList.add('quiz-correct');
+    }
+  });
+  document.getElementById('quiz-continue').style.display = 'inline-block';
+}
+
+async function onAnswerClick(e) {
+  if (answered) return;
+  answered = true;
+  clearInterval(timerInterval);
+  const optionId = parseInt(e.currentTarget.getAttribute('data-option-id'));
+  const q = questions[current];
+
+  const resp = await fetch(`/learn/api/test/${attemptId}/answer`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_id: q.id, option_id: optionId}),
+  });
+  const result = await resp.json();
+  showFeedback(result, optionId);
+}
+
+async function onAnswerTimeout() {
+  if (answered) return;
+  answered = true;
+  const q = questions[current];
+  const resp = await fetch(`/learn/api/test/${attemptId}/answer`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_id: q.id, option_id: null}),
+  });
+  const result = await resp.json();
+  showFeedback(result, null);
+}
+
+async function onContinue() {
+  current += 1;
+  if (current < questions.length) {
+    renderQuestion();
+  } else {
+    clearInterval(timerInterval);
+    progressFill.style.width = '100%';
+    const resp = await fetch(`/learn/api/test/${attemptId}/finish`, {method: 'POST'});
+    await resp.json();
+    window.location.href = `/learn/test/${attemptId}/result`;
+  }
+}
+
+renderQuestion();
+</script>
+
+{% endblock %}
