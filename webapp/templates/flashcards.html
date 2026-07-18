@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}Карточки: {{ lesson.title }} — Smart ENT{% endblock %}
+{% block content %}
+
+<p><a href="/learn/lesson/{{ lesson.id }}">&larr; {{ lesson.title }}</a></p>
+<h1>🃏 Карточки</h1>
+
+<div id="fc-progress" class="quiz-progress">
+  <span id="fc-progress-text"></span>
+  <div class="quiz-progress-bar"><div id="fc-progress-fill"></div></div>
+</div>
+
+<div id="fc-root"></div>
+
+<script id="fc-data" type="application/json">{{ questions_json | safe }}</script>
+<script>
+const ALL_CARDS = JSON.parse(document.getElementById('fc-data').textContent);
+const lessonId = {{ lesson.id }};
+let cards = ALL_CARDS.slice();
+let index = 0;
+let flipped = false;
+let known = [];
+let unknown = [];
+let history = [];
+let startTime = Date.now();
+
+const root = document.getElementById('fc-root');
+const progressText = document.getElementById('fc-progress-text');
+const progressFill = document.getElementById('fc-progress-fill');
+
+function escapeHtml(t) {
+  const d = document.createElement('div');
+  d.textContent = t;
+  return d.innerHTML;
+}
+
+function renderStart() {
+  document.getElementById('fc-progress').style.display = 'none';
+  root.innerHTML = `
+    <section class="quiz-card" style="text-align:center;">
+      <p>${cards.length} карточек в этом уроке.</p>
+      <button id="fc-shuffle" class="btn-small">🔀 Перемешать</button>
+      <div class="hero-actions" style="margin-top:16px;">
+        <button id="fc-begin" class="btn btn-primary">Начать</button>
+      </div>
+    </section>`;
+  document.getElementById('fc-shuffle').onclick = function() {
+    cards.sort(function() { return Math.random() - 0.5; });
+  };
+  document.getElementById('fc-begin').onclick = function() {
+    document.getElementById('fc-progress').style.display = 'block';
+    startTime = Date.now();
+    renderCard();
+  };
+}
+
+function renderCard() {
+  flipped = false;
+  const c = cards[index];
+  progressText.textContent = `Карточка ${index + 1} из ${cards.length}`;
+  progressFill.style.width = (index / cards.length * 100) + '%';
+
+  root.innerHTML = `
+    <div class="flashcard" id="fc-card">
+      <div class="flashcard-inner">
+        <div class="flashcard-face flashcard-front">
+          ${c.web_image_path ? `<img src="${c.web_image_path}" class="quiz-image" alt="">` : ''}
+          <div>${escapeHtml(c.text)}</div>
+        </div>
+        <div class="flashcard-face flashcard-back">
+          <div>${escapeHtml(c.answer)}</div>
+        </div>
+      </div>
+    </div>
+    <p class="muted" style="text-align:center;">Нажмите на карточку, чтобы увидеть ответ</p>
+    <div class="flashcard-actions">
+      <button id="fc-dontknow" class="btn-fc btn-fc-no">❌ Не знаю</button>
+      <button id="fc-know" class="btn-fc btn-fc-yes">✅ Знаю</button>
+    </div>
+    <div class="hero-actions">
+      <button id="fc-back" class="btn-small" ${history.length ? '' : 'disabled'}>⬅️ Назад</button>
+    </div>`;
+
+  const cardEl = document.getElementById('fc-card');
+  cardEl.addEventListener('click', function() {
+    flipped = !flipped;
+    cardEl.classList.toggle('flipped', flipped);
+  });
+
+  document.getElementById('fc-know').onclick = function() { answer(true); };
+  document.getElementById('fc-dontknow').onclick = function() { answer(false); };
+  document.getElementById('fc-back').onclick = goBack;
+
+  attachSwipe(cardEl);
+}
+
+function attachSwipe(el) {
+  let startX = null;
+  el.addEventListener('touchstart', function(e) { startX = e.touches[0].clientX; }, {passive: true});
+  el.addEventListener('touchmove', function(e) {
+    if (startX === null) return;
+    const dx = e.touches[0].clientX - startX;
+    el.style.transform = `translateX(${dx}px) rotate(${dx / 20}deg)`;
+  }, {passive: true});
+  el.addEventListener('touchend', function(e) {
+    if (startX === null) return;
+    const dx = e.changedTouches[0].clientX - startX;
+    el.style.transform = '';
+    startX = null;
+    if (dx > 80) answer(true);
+    else if (dx < -80) answer(false);
+  });
+}
+
+function answer(know) {
+  const c = cards[index];
+  history.push({card: c, know: know});
+  if (know) known.push(c); else unknown.push(c);
+  index += 1;
+  if (index < cards.length) {
+    renderCard();
+  } else {
+    finishRound();
+  }
+}
+
+function goBack() {
+  if (!history.length) return;
+  const last = history.pop();
+  if (last.know) known = known.filter(function(c) { return c !== last.card; });
+  else unknown = unknown.filter(function(c) { return c !== last.card; });
+  index -= 1;
+  renderCard();
+}
+
+function finishRound() {
+  progressFill.style.width = '100%';
+  const total = known.length + unknown.length;
+  const pct = total ? Math.round(known.length / total * 100) : 0;
+  let grade = '📚 Надо повторить';
+  if (pct >= 85) grade = '🔥 Отлично!';
+  else if (pct >= 60) grade = '💪 Неплохо';
+
+  fetch('/learn/api/flashcards/' + lessonId + '/finish', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({total: total, know: known.length, dontknow: unknown.length,
+                           duration_sec: Math.round((Date.now() - startTime) / 1000)}),
+  });
+
+  root.innerHTML = `
+    <section class="profile-card" style="text-align:center;">
+      <h2>${grade}</h2>
+      <div class="stat-row">
+        <div class="stat-box"><div class="stat-value">${known.length}</div><div class="stat-label">Знаю</div></div>
+        <div class="stat-box"><div class="stat-value">${unknown.length}</div><div class="stat-label">Не знаю</div></div>
+        <div class="stat-box"><div class="stat-value">${pct}%</div><div class="stat-label">Результат</div></div>
+      </div>
+      <div class="hero-actions" style="margin-top:20px;">
+        ${unknown.length ? '<button id="fc-retry" class="btn btn-primary">🔁 Повторить не знал</button>' : ''}
+        <a class="btn btn-primary" href="/learn/lesson/${lessonId}">🏠 К уроку</a>
+      </div>
+    </section>`;
+  if (unknown.length) {
+    document.getElementById('fc-retry').onclick = function() {
+      cards = unknown.slice();
+      unknown = []; known = []; index = 0; history = [];
+      document.getElementById('fc-progress').style.display = 'block';
+      renderCard();
+    };
+  }
+}
+
+renderStart();
+</script>
+
+{% endblock %}
