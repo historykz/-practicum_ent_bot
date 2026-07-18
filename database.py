@@ -1203,4 +1203,27 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # --- Платные конспекты (отдельно от доступа к предмету) ---
+        try:
+            cur.execute("ALTER TABLE lessons ADD COLUMN is_paid INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS lesson_access (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lesson_id INTEGER NOT NULL,
+                user_tg_id INTEGER NOT NULL,
+                granted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                granted_by_admin INTEGER,
+                UNIQUE(lesson_id, user_tg_id),
+                FOREIGN KEY (lesson_id) REFERENCES lessons(id) ON DELETE CASCADE
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_lesson_access_user "
+                    "ON lesson_access(user_tg_id)")
+        try:
+            cur.execute("ALTER TABLE lesson_test_drafts ADD COLUMN is_paid INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
         logger.info("База данных инициализирована")
