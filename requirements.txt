@@ -9,3 +9,7 @@ aiohttp-jinja2>=1.6
 aiohttp-session>=2.12
 cryptography>=42
 
+# Импорт конспектов уроков из Word/PDF
+python-docx>=1.1
+pypdf>=4.0
+
