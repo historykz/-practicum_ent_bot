@@ -1104,6 +1104,21 @@ def init_db() -> None:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Приватный предмет: не показывается в общем каталоге вообще,
+        # виден и открывается только тем, кому выдан доступ (subject_access).
+        try:
+            cur.execute("ALTER TABLE subjects ADD COLUMN is_private INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS site_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS subject_access (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
