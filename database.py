@@ -1112,6 +1112,11 @@ def init_db() -> None:
             cur.execute("ALTER TABLE subjects ADD COLUMN is_private INTEGER DEFAULT 0")
         except Exception:
             pass
+        # Обязательная подписка на канал для предмета сайта (required_channels.subject_id)
+        try:
+            cur.execute("ALTER TABLE required_channels ADD COLUMN subject_id INTEGER")
+        except Exception:
+            pass
         cur.execute("""
             CREATE TABLE IF NOT EXISTS site_channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
