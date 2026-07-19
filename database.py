@@ -27,11 +27,13 @@ def get_conn() -> sqlite3.Connection:
     """Получить (или создать) глобальное соединение с БД."""
     global _conn
     if _conn is None:
-        _conn = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
+        _conn = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None,
+                                 timeout=30)
         _conn.row_factory = sqlite3.Row
         _conn.execute("PRAGMA journal_mode=WAL;")
         _conn.execute("PRAGMA foreign_keys=ON;")
         _conn.execute("PRAGMA synchronous=NORMAL;")
+        _conn.execute("PRAGMA busy_timeout=30000;")
     return _conn
 
 
