@@ -60,18 +60,18 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
 
 
 def find_user_by_arg(arg: str) -> Optional[dict]:
-    """Найти пользователя по '@username' или числовому tg_id."""
+    """Найти пользователя по '@username' (без учёта регистра, как в Telegram) или числовому tg_id."""
     arg = arg.strip()
     if not arg:
         return None
     if arg.startswith("@"):
         uname = arg[1:]
-        row = db.fetchone("SELECT * FROM users WHERE username = ?", (uname,))
+        row = db.fetchone("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (uname,))
         return dict(row) if row else None
     if arg.isdigit():
         return get_user_by_tg(int(arg))
     # Возможно, username без @
-    row = db.fetchone("SELECT * FROM users WHERE username = ?", (arg,))
+    row = db.fetchone("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (arg,))
     return dict(row) if row else None
 
 
