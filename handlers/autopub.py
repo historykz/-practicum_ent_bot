@@ -125,7 +125,7 @@ def _settings_card_text() -> str:
 def _main_menu_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🚀 Запустить серию тестов", callback_data="apub:start")
-    kb.button(text="⏰ Автозапуск по расписанию", callback_data="sched:menu")
+    kb.button(text="📅 Вопросы в канал по расписанию", callback_data="qp:menu")
     kb.button(text="🎲 10 случайных вопросов на канал",
               callback_data="apub:random_canal")
     kb.button(text="📋 Очередь публикаций", callback_data="apub:queue")
