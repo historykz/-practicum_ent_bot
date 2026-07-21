@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Приватные тесты — Smart ENT{% endblock %}
+{% block content %}
+
+<h1>🔒 Приватные тесты</h1>
+
+{% if tests %}
+<div class="subjects-grid">
+  {% for t in tests %}
+  <a class="subject-card" href="/private-tests/{{ t.id }}/start">
+    <h3>🔒 {{ t.title }}</h3>
+    {% if t.description %}<p class="muted">{{ t.description }}</p>{% endif %}
+    {% if t.access_expires_at %}<p class="muted">Доступ до {{ t.access_expires_at[:10] }}</p>{% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<p class="muted">У вас пока нет доступа ни к одному приватному тесту. Обратитесь к куратору/админу за доступом.</p>
+{% endif %}
+
+{% endblock %}
