@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}{{ lesson.title }} — Smart ENT{% endblock %}
+{% block content %}
+
+<p>
+  <a href="/learn">Все предметы</a> &rarr;
+  <a href="/learn/{{ subject.id }}">{{ subject.title }}</a>
+</p>
+<h1>{{ lesson.title }}</h1>
+{% if lesson.description %}<p class="muted">{{ lesson.description }}</p>{% endif %}
+
+{% if access_state == "need_login" %}
+<section class="login-card">
+  <h2>🔒 Войдите, чтобы открыть урок</h2>
+  <p>Этот конспект доступен только вошедшим ученикам.</p>
+  <script async src="https://telegram.org/js/telegram-widget.js?22"
+    data-telegram-login="{{ bot_username }}"
+    data-size="large"
+    data-radius="10"
+    data-auth-url="/auth/telegram-callback?next=/learn/lesson/{{ lesson.id }}"
+    data-request-access="write"></script>
+</section>
+
+{% elif access_state == "need_subject_access" %}
+<section class="lesson-test-card">
+  <h2>🔒 Нужен доступ к предмету «{{ subject.title }}»</h2>
+  <p class="muted">Обратитесь к преподавателю, чтобы открыть доступ.</p>
+  {% if site_contact_username %}
+    <a class="btn btn-primary" href="https://t.me/{{ site_contact_username }}" target="_blank" rel="noopener">Написать преподавателю</a>
+  {% endif %}
+</section>
+
+{% elif access_state == "need_payment" %}
+<section class="lesson-test-card">
+  <h2>💎 Конспект платный</h2>
+  <p>В тесте к этому уроку: <strong>{{ paid_questions_count }}</strong> вопрос(ов).</p>
+  <p class="muted" style="white-space:pre-wrap;">{{ premium_benefits_text }}</p>
+  <div class="hero-actions">
+    <a class="btn btn-primary" href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">⭐ Оформить Премиум в боте</a>
+    {% if site_contact_username %}
+      <a class="btn btn-primary" href="https://t.me/{{ site_contact_username }}" target="_blank" rel="noopener">Купить доступ к уроку</a>
+    {% endif %}
+  </div>
+</section>
+
+{% else %}
+
+{% if error == "attempts_exceeded" %}
+  <div class="alert">Попытки для этого теста закончились.</div>
+{% endif %}
+
+{% if lesson.youtube_id %}
+<div class="lesson-video">
+  <iframe src="https://www.youtube-nocookie.com/embed/{{ lesson.youtube_id }}?modestbranding=1&rel=0&disablekb=1"
+    allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen
+    oncontextmenu="return false"></iframe>
+</div>
+{% elif lesson.video_url %}
+<div class="lesson-video">
+  <video src="{{ lesson.video_url }}" controls controlsList="nodownload noremoteplayback"
+    disablepictureinpicture oncontextmenu="return false"></video>
+</div>
+{% endif %}
+
+<div class="lesson-content">{{ lesson.content_html }}</div>
+
+{% if lesson_images %}
+<div class="lesson-images">
+  {% for img in lesson_images %}
+  <img src="{{ img.image_path }}" class="lesson-photo" alt="" loading="lazy" draggable="false">
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if test_info %}
+<section class="lesson-test-card">
+  <h2>📝 Проверьте себя</h2>
+  <p>Тест: {{ test_info.questions_count }} вопрос(ов)
+    {% if test_info.attempts_limit %} · попыток использовано {{ test_info.attempts_used }} из {{ test_info.attempts_limit }}{% endif %}
+  </p>
+  {% if test_info.blocked %}
+    <p class="muted">Попытки закончились.</p>
+  {% else %}
+    <a class="btn btn-primary" href="/learn/lesson/{{ lesson.id }}/test">Пройти тест</a>
+  {% endif %}
+  <a class="btn btn-primary" href="/learn/lesson/{{ lesson.id }}/flashcards">🃏 Карточки</a>
+  <a class="btn btn-primary" href="/learn/lesson/{{ lesson.id }}/study">🧠 Заучивание</a>
+</section>
+{% endif %}
+
+{% endif %}
+
+{% endblock %}
