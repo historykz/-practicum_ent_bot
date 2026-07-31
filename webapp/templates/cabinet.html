@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Личный кабинет — Smart ENT{% endblock %}
+{% block content %}
+
+{% include "_ent_countdown.html" %}
+
+{% if channels or applicant_chat_url %}
+<section class="channels-card">
+  <h2>📡 Наши каналы</h2>
+  <div class="channels-grid">
+    {% for c in channels %}
+    <a class="channel-chip" href="{{ c.url }}" target="_blank" rel="noopener">📢 {{ c.title }}</a>
+    {% endfor %}
+    {% if applicant_chat_url %}
+    <a class="channel-chip channel-chip-chat" href="{{ applicant_chat_url }}" target="_blank" rel="noopener">💬 Общий чат абитуриентов</a>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+<section class="profile-card">
+  <h1>Привет, {{ user.first_name or user.username or "друг" }}!</h1>
+  {% if user.school %}<p class="muted">{{ user.school }}{% if user.city %}, {{ user.city }}{% endif %}</p>{% endif %}
+
+  <div class="stat-row">
+    <div class="stat-box">
+      <div class="stat-value">{{ tests_done }}</div>
+      <div class="stat-label">Тестов пройдено</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-value">{{ user.current_streak or 0 }}</div>
+      <div class="stat-label">Серия дней подряд</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-value">{{ user.best_streak or 0 }}</div>
+      <div class="stat-label">Лучшая серия</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-value">{% if rating.position %}#{{ rating.position }}{% else %}—{% endif %}</div>
+      <div class="stat-label">Место в рейтинге</div>
+    </div>
+  </div>
+</section>
+
+<section class="premium-card {% if is_premium %}premium-active{% endif %}">
+  {% if is_premium %}
+    <h2>⭐ Премиум активен</h2>
+    {% if premium_lifetime %}
+      <p>Доступ ко всем тестам и режимам — навсегда.</p>
+    {% else %}
+      <p>Доступ ко всем тестам и режимам до <strong>{{ premium_expires_at_fmt }}</strong> (время Астаны).</p>
+    {% endif %}
+  {% else %}
+    <h2>Премиум не активен</h2>
+    <p>Оформите Премиум в боте, чтобы открыть все тесты и режимы без ограничений.</p>
+    <a class="btn btn-primary" href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">Оформить в боте</a>
+  {% endif %}
+</section>
+
+<section class="referral-card">
+  <h2>🎁 Пригласить друзей</h2>
+  <p>
+    Приглашено друзей: <strong>{{ referral.total }}</strong>,
+    засчитано (подписались на канал): <strong>{{ referral.counted }}</strong>.
+    Ещё <strong>{{ referral.remaining_for_reward }}</strong> друзей до
+    {{ referral.reward_days }} дней Премиума в подарок.
+  </p>
+  <div class="ref-link-row">
+    <input type="text" readonly value="{{ referral.link }}" id="ref-link">
+    <button type="button" onclick="copyRefLink()">Скопировать</button>
+  </div>
+</section>
+
+<section class="history-card">
+  <h2>📈 История тестов</h2>
+  {% if history %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>Тест</th><th>Верно</th><th>Неверно</th><th>Пропущено</th><th>Дата</th></tr>
+      </thead>
+      <tbody>
+        {% for row in history %}
+        <tr>
+          <td>{{ row.title }}</td>
+          <td>{{ row.correct }}</td>
+          <td>{{ row.wrong }}</td>
+          <td>{{ row.skipped }}</td>
+          <td>{{ row.created_at_fmt }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <p class="muted">Пока нет завершённых тестов. Пройдите первый тест в боте!</p>
+  {% endif %}
+</section>
+
+<script>
+function copyRefLink() {
+  const input = document.getElementById('ref-link');
+  input.select();
+  input.setSelectionRange(0, 99999);
+  navigator.clipboard.writeText(input.value);
+}
+</script>
+
+{% endblock %}
