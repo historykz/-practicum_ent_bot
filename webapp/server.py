@@ -19,7 +19,7 @@ from aiohttp_session.cookie_storage import EncryptedCookieStorage
 
 import config
 import utils
-from webapp import auth, queries, learning, modes, zachet
+from webapp import auth, queries, learning, modes, zachet, live
 
 log = logging.getLogger(__name__)
 
@@ -174,6 +174,7 @@ def create_app() -> web.Application:
     learning.register_routes(app)
     modes.register_routes(app)
     zachet.register_routes(app)
+    live.register_routes(app)
 
     return app
 
