@@ -1317,6 +1317,61 @@ def init_db() -> None:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_za_lesson_user "
                     "ON zachet_attempts(lesson_id, user_tg_id)")
+
+        # === Live-режим (Kahoot-style онлайн-викторина в реальном времени) ===
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS live_rooms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                test_id INTEGER NOT NULL,
+                host_tg_id INTEGER NOT NULL,
+                status TEXT DEFAULT 'lobby',      -- lobby | question | stats | finished
+                current_index INTEGER DEFAULT -1,
+                question_started_at TEXT,          -- серверное время старта вопроса (UTC iso)
+                time_per_question INTEGER DEFAULT 20,
+                mode TEXT DEFAULT 'competitive',   -- competitive | study
+                locked INTEGER DEFAULT 0,          -- запрет входа новых
+                rating_visibility TEXT DEFAULT 'full',  -- full | top5 | self | hidden
+                question_order TEXT,               -- JSON список question_id
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_live_code ON live_rooms(code)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS live_players (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id INTEGER NOT NULL,
+                tg_id INTEGER NOT NULL,
+                name TEXT,
+                score INTEGER DEFAULT 0,
+                correct INTEGER DEFAULT 0,
+                streak INTEGER DEFAULT 0,
+                best_streak INTEGER DEFAULT 0,
+                total_time_ms INTEGER DEFAULT 0,
+                kicked INTEGER DEFAULT 0,
+                last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+                joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(room_id, tg_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_live_players_room ON live_players(room_id)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS live_answers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id INTEGER NOT NULL,
+                question_index INTEGER NOT NULL,
+                question_id INTEGER,
+                tg_id INTEGER NOT NULL,
+                option_id INTEGER,
+                is_correct INTEGER DEFAULT 0,
+                answer_ms INTEGER DEFAULT 0,
+                points INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(room_id, question_index, tg_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_live_ans_room ON live_answers(room_id, question_index)")
+
         # Веб-путь к картинке вопроса (для сайта, отдельно от Telegram file_id)
         try:
             cur.execute("ALTER TABLE questions ADD COLUMN web_image_path TEXT")
