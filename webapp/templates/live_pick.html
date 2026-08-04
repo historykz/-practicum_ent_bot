@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Запустить Live-тест — Smart ENT{% endblock %}
+{% block content %}
+<h1>🎮 Live-тест (онлайн-викторина)</h1>
+{% if error == 'no_questions' %}<div class="alert alert-ok">В этом тесте нет вопросов.</div>{% endif %}
+<p class="muted">Выберите тест — создастся комната с кодом, ссылкой и QR. Ученики подключаются по коду, отвечают синхронно, за скорость — до 1000 баллов.</p>
+{% if tests %}
+<div class="admin-list">
+  {% for t in tests %}
+  <form method="post" action="/admin/live/create/{{ t.id }}" class="live-pick-row">
+    <span>{{ t.title }} <span class="muted">({{ t.qn }} вопр.)</span></span>
+    <button type="submit" class="btn-small" {% if not t.qn %}disabled{% endif %}>🚀 Запустить Live</button>
+  </form>
+  {% endfor %}
+</div>
+{% else %}
+<p class="muted">У вас пока нет тестов. Создайте тест в боте.</p>
+{% endif %}
+{% endblock %}
