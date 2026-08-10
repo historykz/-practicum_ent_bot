@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Присоединиться к Live — Smart ENT{% endblock %}
+{% block content %}
+<div class="live-join">
+  <h1>🎮 Присоединиться к Live-тесту</h1>
+  <p class="muted">Введите код комнаты от преподавателя.</p>
+  <input type="tel" id="code-input" class="st-input live-code-input" placeholder="Код комнаты"
+         maxlength="8" value="{{ prefill_code }}" autocomplete="off">
+  <button id="go" class="btn btn-primary">Войти в игру</button>
+  <p id="join-err" class="muted"></p>
+</div>
+<script>
+const inp=document.getElementById('code-input');
+document.getElementById('go').onclick=function(){
+  const c=(inp.value||'').replace(/\D/g,'');
+  if(c.length<4){ document.getElementById('join-err').textContent='Введите код комнаты'; return; }
+  window.location.href='/live/'+c;
+};
+inp.addEventListener('keydown',function(e){ if(e.key==='Enter') document.getElementById('go').click(); });
+{% if prefill_code %}window.location.href='/live/{{ prefill_code }}';{% endif %}
+</script>
+{% endblock %}
