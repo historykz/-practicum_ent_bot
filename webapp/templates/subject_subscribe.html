@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Подпишитесь на каналы — Smart ENT{% endblock %}
+{% block content %}
+
+<section class="subscribe-card">
+  <div class="subscribe-lock">🔒</div>
+  <h1>Подпишитесь на каналы</h1>
+  <p class="muted">Для доступа к этому предмету необходимо подписаться на все каналы.</p>
+
+  <div class="subscribe-list">
+    {% for ch in channels %}
+    <a class="btn btn-primary subscribe-btn" href="https://t.me/{{ ch.channel_username }}"
+       target="_blank" rel="noopener">
+      Подписаться на @{{ ch.channel_username }}{% if ch.title %} — {{ ch.title }}{% endif %}
+    </a>
+    {% endfor %}
+  </div>
+
+  <a class="btn subscribe-done" href="{{ recheck_url }}">✅ Я подписался</a>
+</section>
+
+{% endblock %}
