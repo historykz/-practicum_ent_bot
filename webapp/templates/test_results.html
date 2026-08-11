@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Результаты теста — Smart ENT{% endblock %}
+{% block content %}
+<p><a href="/admin/learn">&larr; В админку</a></p>
+<h1>📊 Результаты: {{ test.title }}</h1>
+<p class="muted">Попыток: {{ count }} · <a href="/admin/learn/tests/{{ test.id }}/results.csv">📥 Скачать Excel (CSV)</a></p>
+
+{% if attempts %}
+<div class="table-scroll">
+  <table class="results-table">
+    <thead>
+      <tr><th>#</th><th>Ученик</th><th>Верно</th><th>Неверно</th><th>Проп.</th><th>%</th><th>Попытка</th><th>Время</th><th>Когда</th></tr>
+    </thead>
+    <tbody>
+      {% for a in attempts %}
+      <tr class="{% if a.percent >= 70 %}res-good{% elif a.percent < 40 %}res-bad{% endif %}">
+        <td>{{ loop.index }}</td>
+        <td>{{ a.who }}</td>
+        <td>{{ a.correct }}</td>
+        <td>{{ a.wrong }}</td>
+        <td>{{ a.skipped }}</td>
+        <td><b>{{ a.percent }}%</b></td>
+        <td>№{{ a.attempt_num }}</td>
+        <td>{{ a.duration or '—' }}</td>
+        <td>{{ a.when }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="muted">Пока никто не проходил этот тест.</p>
+{% endif %}
+{% endblock %}
