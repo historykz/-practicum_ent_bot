@@ -27,7 +27,8 @@ from handlers import (common, profile, user, quiz, duel,
                        appeals, profile_subjects, moderation, daily, notes,
                        backup, zip_import, payments, announce,
                        modes, flashcards, learning, modes_admin,
-                       premium, referral, conspects, auto_schedule)
+                       premium, referral, conspects, auto_schedule,
+                       notes_admin)
 
 # question_editor импортируем отдельно с защитой — если файл вдруг
 # не доехал на хостинг, бот всё равно стартует (без редактора вопросов).
@@ -204,6 +205,7 @@ async def main() -> None:
         dp.include_router(question_editor.router)
     dp.include_router(autopub.router)
     dp.include_router(auto_schedule.router)  # автозапуск тестов по расписанию (кнопка sched:menu)
+    dp.include_router(notes_admin.router)  # конспекты и ДЗ прямо в боте
     dp.include_router(backup.router)
     dp.include_router(zip_import.router)
     dp.include_router(admin.router)
@@ -235,6 +237,10 @@ async def main() -> None:
     from services import backup_service as _bks
     asyncio.create_task(_bks.daily_backup_loop(bot))
     # Планировщик автозапуска тестов по расписанию
+    # Тихое автоудаление конспектов из Telegram через 24 часа
+    from handlers.lesson_notes import cleanup_notes_loop as _cnl
+    asyncio.create_task(_cnl(bot))
+
     from services import auto_schedule_service as _ass
     asyncio.create_task(_ass.scheduler_loop(bot))
 
