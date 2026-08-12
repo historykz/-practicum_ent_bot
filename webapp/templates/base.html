@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Smart ENT — подготовка к ЕНТ{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+<script>
+(function() {
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg) return;
+  tg.ready();
+  try { tg.expand(); } catch (_) {}
+  document.documentElement.classList.add('in-miniapp');
+
+  // Куда звала ссылка из канала: ?startapp=subj_12 / lesson_34.
+  // Переходим туда сразу — иначе человек попадал бы на общий каталог
+  // и предмет из объявления пришлось бы искать руками.
+  function gotoStartParam() {
+    var p = '';
+    try { p = (tg.initDataUnsafe && tg.initDataUnsafe.start_param) || ''; } catch (_) {}
+    if (!p || sessionStorage.getItem('startapp_done') === p) return;
+    sessionStorage.setItem('startapp_done', p);
+    var m = /^subj_(\d+)$/.exec(p);
+    if (m) { window.location.replace('/learn/' + m[1]); return; }
+    m = /^lesson_(\d+)$/.exec(p);
+    if (m) { window.location.replace('/learn/lesson/' + m[1]); return; }
+  }
+
+  var loggedIn = {{ 'true' if logged_in else 'false' }};
+  if (loggedIn) { gotoStartParam(); return; }
+  if (!tg.initData) return;   // открыто не из Telegram — обычный вход на сайте
+  fetch('/auth/webapp', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({init_data: tg.initData}),
+  }).then(function(r) { return r.json(); }).then(function(res) {
+    if (res && res.ok) window.location.reload();
+  }).catch(function() {});
+})();
+</script>
+<header class="site-header">
+  <div class="container header-inner">
+    <a href="/" class="logo">📘 Smart ENT</a>
+    <nav>
+      {% if logged_in %}
+        {# В мини-приложении подписи короче: ленту навигации листают пальцем,
+           и длинные названия заставляли бы листать её ради каждой кнопки. #}
+        <a href="/learn" class="nav-learn">🎓 <span class="nav-full">Начать </span>обучение</a>
+        {# Админские кнопки идут сразу за обучением: в узкой ленте всё, что
+           дальше третьей позиции, приходится долистывать, а админ заходит
+           именно в них. Ученику этих ссылок не видно. #}
+        {% if is_admin %}
+          <a href="/admin/learn">⚙️ Админка</a>
+          <a href="/admin/live">🎮 Live</a>
+          <a href="/admin/live/history">📜 Отчёты</a>
+        {% endif %}
+        <a href="/cabinet">👤 <span class="nav-full">Личный </span>кабинет</a>
+        {% if has_private_tests %}<a href="/private-tests">🔒 <span class="nav-full">Приватные </span>тесты</a>{% endif %}
+        <a href="/logout">🚪 Выйти</a>
+      {% else %}
+        <a href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">Открыть бота</a>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+
+{% if watermark_svg %}
+<div class="watermark-overlay" id="watermark-overlay" style="background-image:url('{{ watermark_svg }}');"></div>
+<div id="copy-toast" class="copy-toast"></div>
+<script>
+(function() {
+  var el = document.getElementById('watermark-overlay');
+  if (el) {
+    setInterval(function() {
+      var x = Math.floor(Math.random() * 80);
+      var y = Math.floor(Math.random() * 80);
+      el.style.backgroundPosition = x + 'px ' + y + 'px';
+    }, 4000);
+  }
+
+  var toastEl = document.getElementById('copy-toast');
+  var toastTimer = null;
+  function showToast() {
+    toastEl.textContent = 'Копирование учебных материалов запрещено. Все материалы защищены авторским правом и содержат персональную маркировку пользователя.';
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { toastEl.classList.remove('show'); }, 3500);
+  }
+
+  document.addEventListener('copy', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('cut', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('contextmenu', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('keydown', function(e) {
+    var k = e.key.toLowerCase();
+    var mod = e.ctrlKey || e.metaKey;
+    if (mod && (k === 'c' || k === 'x' || k === 's' || k === 'p')) {
+      e.preventDefault();
+      showToast();
+    }
+  });
+})();
+</script>
+{% endif %}
+
+<main class="container">
+  {% block content %}{% endblock %}
+</main>
+
+<div id="upload-progress-overlay" class="upload-progress-overlay">
+  <div class="upload-progress-box">
+    <p id="upload-progress-label">Загрузка… 0%</p>
+    <div class="upload-progress-bar"><div id="upload-progress-fill"></div></div>
+    <p class="muted" style="margin-top:8px;font-size:0.82rem;">Не закрывайте страницу, пока идёт загрузка.</p>
+  </div>
+</div>
+<script>
+(function() {
+  var overlay = document.getElementById('upload-progress-overlay');
+  var label = document.getElementById('upload-progress-label');
+  var fill = document.getElementById('upload-progress-fill');
+
+  document.querySelectorAll('form[data-progress-upload]').forEach(function(form) {
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      var formData = new FormData(form);
+      var xhr = new XMLHttpRequest();
+      xhr.open(form.method || 'POST', form.action, true);
+
+      overlay.classList.add('show');
+      label.textContent = 'Загрузка… 0%';
+      fill.style.width = '0%';
+
+      xhr.upload.addEventListener('progress', function(ev) {
+        if (ev.lengthComputable) {
+          var pct = Math.round((ev.loaded / ev.total) * 100);
+          fill.style.width = pct + '%';
+          label.textContent = 'Загрузка… ' + pct + '% (' +
+            (ev.loaded / 1048576).toFixed(1) + ' из ' + (ev.total / 1048576).toFixed(1) + ' МБ)';
+        }
+      });
+
+      xhr.addEventListener('load', function() {
+        label.textContent = 'Готово, открываем…';
+        fill.style.width = '100%';
+        window.location.href = xhr.responseURL || form.action;
+      });
+
+      xhr.addEventListener('error', function() {
+        overlay.classList.remove('show');
+        alert('Не удалось загрузить файл — проверьте интернет-соединение и размер файла (до 20МБ), затем попробуйте снова.');
+      });
+
+      xhr.send(formData);
+    });
+  });
+})();
+</script>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>Smart ENT — онлайн-школа подготовки к ЕНТ. Бот: <a href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">@{{ bot_username }}</a></p>
+  </div>
+</footer>
+</body>
+</html>
