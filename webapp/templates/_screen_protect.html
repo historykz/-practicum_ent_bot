@@ -1,0 +1,74 @@
+{# Защита закрытого контента в Telegram Mini App: белый экран при потере
+   фокуса/сворачивании + запрет контекстного меню, перетаскивания и сохранения.
+   Полностью запретить скриншот в WebView Telegram не позволяет — это делается
+   на максимально доступном уровне (снимок пойманного момента = белый экран). #}
+<div id="screen-guard" aria-hidden="true"></div>
+<style>
+  #screen-guard {
+    position: fixed; inset: 0; z-index: 2147483647;
+    background: #ffffff; display: none;
+  }
+  #screen-guard.on { display: block; }
+  /* Запрет выделения/копирования защищённого контента */
+  .lesson-content, .lesson-images, .quiz-card, .quiz-question, .quiz-options,
+  .flashcard, .lesson-video, .fc-text, .lesson-photo, .quiz-image, .fc-image {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+</style>
+<script>
+(function() {
+  var guard = document.getElementById('screen-guard');
+  var reverifying = false;
+
+  function show() { guard.classList.add('on'); }
+  function hide() { guard.classList.remove('on'); }
+
+  // Мгновенно прячем контент при любой потере фокуса/сворачивании/переключении
+  function onHide() { show(); }
+  function onShow() {
+    // Возврат в приложение — перед показом контента перепроверяем доступ
+    if (reverifying) return;
+    reverifying = true;
+    fetch('/auth/ping', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function(r) {
+        reverifying = false;
+        if (r.ok) hide();
+        else window.location.reload(); // доступ пропал — на страницу входа
+      })
+      .catch(function() { reverifying = false; hide(); });
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) onHide(); else onShow();
+  });
+  window.addEventListener('blur', onHide);
+  window.addEventListener('focus', onShow);
+  window.addEventListener('pagehide', onHide);
+  window.addEventListener('pageshow', onShow);
+
+  // Telegram WebView-события, если доступны
+  try {
+    var tg = window.Telegram && window.Telegram.WebApp;
+    if (tg && typeof tg.onEvent === 'function') {
+      // при разворачивании/изменении окна пере-проверяем
+      tg.onEvent('viewportChanged', onShow);
+    }
+  } catch (_) {}
+
+  // Запрет контекстного меню, перетаскивания и сохранения картинок
+  document.addEventListener('contextmenu', function(e) {
+    if (e.target.closest('.lesson-content, .lesson-images, .quiz-card, .flashcard, .lesson-video')) {
+      e.preventDefault();
+    }
+  });
+  document.addEventListener('dragstart', function(e) {
+    if (e.target.tagName === 'IMG') e.preventDefault();
+  });
+  // Запрет длинного тапа-сохранения на изображениях
+  document.querySelectorAll('img').forEach(function(img) {
+    img.setAttribute('draggable', 'false');
+    img.oncontextmenu = function() { return false; };
+  });
+})();
+</script>
