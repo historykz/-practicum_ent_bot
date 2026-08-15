@@ -1160,6 +1160,15 @@ def init_db() -> None:
                 cur.execute(_sql)
             except Exception:
                 pass
+        # Разрешить ученику прогнать заново только те вопросы, где он ошибся.
+        # Включается отдельно у каждого теста: не всякий тест этого хочет.
+        for _col, _sql in (
+            ("allow_retry_wrong", "ALTER TABLE tests ADD COLUMN allow_retry_wrong INTEGER DEFAULT 0"),
+        ):
+            try:
+                cur.execute(_sql)
+            except Exception:
+                pass
         # Обязательная подписка на канал для предмета сайта (required_channels.subject_id)
         try:
             cur.execute("ALTER TABLE required_channels ADD COLUMN subject_id INTEGER")
