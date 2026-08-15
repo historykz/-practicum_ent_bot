@@ -26,7 +26,8 @@ from handlers import (common, profile, user, quiz, duel,
                        private_access, categories, autopub,
                        appeals, profile_subjects, moderation, daily, notes,
                        backup,
-    restore, zip_import, payments, announce,
+    restore,
+    subscription_watch, zip_import, payments, announce,
                        modes, flashcards, learning, modes_admin,
                        premium, referral, conspects, auto_schedule,
                        notes_admin)
@@ -209,6 +210,7 @@ async def main() -> None:
     dp.include_router(notes_admin.router)  # конспекты и ДЗ прямо в боте
     dp.include_router(backup.router)
     dp.include_router(restore.router)
+    dp.include_router(subscription_watch.router)  # мгновенная реакция на отписку
     dp.include_router(zip_import.router)
     dp.include_router(admin.router)
     # Режимы — В САМОМ КОНЦЕ. learning ловит любой текст, поэтому идёт
@@ -267,7 +269,11 @@ async def main() -> None:
 
     log.info("Запуск polling...")
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        _upd = dp.resolve_used_update_types()
+        for _u in ("chat_member", "my_chat_member"):
+            if _u not in _upd:
+                _upd.append(_u)   # без этого Telegram не шлёт события выхода из канала
+        await dp.start_polling(bot, allowed_updates=_upd)
     finally:
         await bot.session.close()
         log.info("Бот остановлен.")
