@@ -1,0 +1,357 @@
+{% extends "base.html" %}
+{% block title %}Тест: {{ lesson.title }} — Smart ENT{% endblock %}
+{% block page_title %}Тест{% endblock %}
+{% block content %}
+
+<h1>📝 {{ lesson.title }}</h1>
+
+{# Тест часто открывают из раздела «Тесты», минуя страницу урока — а конспект
+   к нему прочитать всё равно надо. Даём ссылку прямо здесь. #}
+{% if has_note %}
+<section class="test-note-strip">
+  <div>
+    <b>📖 Конспект к этому уроку</b>
+    <p class="muted">Откроется в личных сообщениях бота — с вашей персональной
+       меткой, без возможности переслать. Прочитайте и возвращайтесь к тесту:
+       эта страница никуда не денется.</p>
+  </div>
+  <a class="btn btn-primary" target="_blank" rel="noopener"
+     href="https://t.me/{{ bot_username }}?start=lesson_{{ lesson.url_id or lesson.id }}">
+     Открыть конспект</a>
+</section>
+{% endif %}
+
+{% if is_resume %}
+<div id="resume-banner" class="alert alert-ok">
+  📌 У вас есть незавершённая попытка — продолжаем с того же места.
+  <a href="?restart=1" onclick="return confirm('Начать тест заново? Текущий прогресс будет сброшен.');"
+     style="margin-left:8px;">🔄 Начать заново</a>
+</div>
+{% endif %}
+
+<div class="quiz-progress">
+  <span id="quiz-progress-text"></span>
+  <span id="quiz-timer" class="quiz-timer"></span>
+  <div class="quiz-progress-bar"><div id="quiz-progress-fill"></div></div>
+</div>
+
+<div id="quiz-card" class="quiz-card"></div>
+<div id="quiz-status" class="quiz-status muted" style="display:none;"></div>
+<div class="quiz-bottom-bar" id="quiz-bottom-bar" style="display:none;">
+  <button id="quiz-continue" class="btn btn-primary quiz-continue">Продолжить</button>
+</div>
+
+<script id="quiz-data" type="application/json">{{ questions_json | safe }}</script>
+<script id="quiz-answered" type="application/json">{{ answered_json | safe }}</script>
+<script>
+// === Telegram Mini App: стабильность внутри webview ===
+(function() {
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg) return;
+  try { tg.ready(); } catch (_) {}
+  try { if (typeof tg.expand === 'function') tg.expand(); } catch (_) {}
+  try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (_) {}
+})();
+
+const attemptId = {{ attempt_id }};
+const questions = JSON.parse(document.getElementById('quiz-data').textContent);
+const answeredMap = JSON.parse(document.getElementById('quiz-answered').textContent || '{}');
+const timePerQuestion = {{ time_per_question|default(0) }};
+const lessonId = {{ lesson.id or 0 }};
+
+// Состояния вопроса: 'loading' | 'question' | 'answered' | 'error' | 'finishing'
+let uiState = 'loading';
+let current = 0;
+let deadline = null;        // таймер по абсолютному времени — переживает сворачивание
+let timerInterval = null;
+let transitioning = false;  // защита от двойного «Продолжить»
+let finishing = false;
+
+const card = document.getElementById('quiz-card');
+const progressText = document.getElementById('quiz-progress-text');
+const progressFill = document.getElementById('quiz-progress-fill');
+const timerEl = document.getElementById('quiz-timer');
+const statusEl = document.getElementById('quiz-status');
+const bottomBar = document.getElementById('quiz-bottom-bar');
+const continueBtn = document.getElementById('quiz-continue');
+
+function log(stage, extra) {
+  try {
+    console.info('[quiz]', stage, JSON.stringify(Object.assign({
+      attempt: attemptId, idx: current,
+      qid: questions[current] ? questions[current].id : null,
+      state: uiState,
+      tg: !!(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData),
+    }, extra || {})));
+  } catch (_) {}
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function setStatus(text) {
+  statusEl.style.display = text ? 'block' : 'none';
+  statusEl.textContent = text || '';
+}
+
+// === Надёжная отправка: ретраи с паузой, тайм-аут на запрос ===
+async function apiPost(url, body, attempts) {
+  attempts = attempts || 3;
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const ctl = new AbortController();
+      const to = setTimeout(function() { ctl.abort(); }, 12000);
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: body ? JSON.stringify(body) : null,
+        signal: ctl.signal,
+      });
+      clearTimeout(to);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return await resp.json();
+    } catch (e) {
+      lastErr = e;
+      log('retry', {try: i + 1, err: String(e)});
+      if (i < attempts - 1) await new Promise(r => setTimeout(r, 800 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+function firstUnansweredIndex() {
+  for (let i = 0; i < questions.length; i++) {
+    if (!answeredMap[String(questions[i].id)]) return i;
+  }
+  return questions.length; // всё отвечено
+}
+
+function sendAppeal(questionId, btn) {
+  const text = window.prompt(
+    'Что не так с этим вопросом?\n\n' +
+    'Например: «правильный ответ B, а не A» или «в вопросе опечатка».\n' +
+    'Опишите коротко — админ проверит.');
+  if (text === null) return;
+  if (text.trim().length < 5) { alert('Опишите проблему хотя бы парой слов.'); return; }
+  btn.disabled = true;
+  fetch('/appeals/create', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_id: questionId, text: text.trim()}),
+  }).then(r => r.json()).then(res => {
+    if (res && res.ok) {
+      btn.textContent = '✅ Апелляция отправлена';
+    } else {
+      alert((res && res.error) || 'Не удалось отправить апелляцию.');
+      btn.disabled = false;
+    }
+  }).catch(() => { alert('Нет связи. Попробуйте ещё раз.'); btn.disabled = false; });
+}
+
+function renderQuestion() {
+  const q = questions[current];
+  if (!q) { doFinish(); return; }
+  uiState = 'question';
+  transitioning = false;
+  progressText.textContent = `Вопрос ${current + 1} из ${questions.length}`;
+  progressFill.style.width = (current / questions.length * 100) + '%';
+  setStatus('');
+  bottomBar.style.display = 'none';
+  continueBtn.disabled = false;
+  continueBtn.textContent = current + 1 >= questions.length ? 'Завершить тест' : 'Продолжить';
+
+  let html = '';
+  if (q.web_image_path) {
+    html += `<img src="${q.web_image_path}" class="quiz-image" alt="" draggable="false">`;
+  }
+  html += `<h2 class="quiz-question">${escapeHtml(q.text)}</h2>`;
+  html += '<div class="quiz-options">';
+  q.options.forEach(opt => {
+    html += `<button class="quiz-option" data-option-id="${opt.id}">${escapeHtml(opt.text)}</button>`;
+  });
+  html += '</div>';
+  // Кнопка апелляции под каждым вопросом — как в боте. Жалоба уходит админу
+  // и копится на странице «Апелляции» в админке.
+  html += `<div class="quiz-appeal"><button type="button" data-appeal="${q.id}">⚠️ Пожаловаться на вопрос</button></div>`;
+  card.innerHTML = html;
+
+  card.querySelectorAll('.quiz-option').forEach(btn => {
+    btn.addEventListener('click', onAnswerClick);
+  });
+  const appealBtn = card.querySelector('[data-appeal]');
+  if (appealBtn) appealBtn.addEventListener('click', () => sendAppeal(q.id, appealBtn));
+
+  // Уже отвеченный вопрос (продолжение после возврата) — показать и идти дальше
+  const prev = answeredMap[String(q.id)];
+  if (prev) {
+    applyFeedback(prev, prev.selected_option_id);
+    return;
+  }
+  startTimer();
+  log('question_rendered');
+}
+
+function startTimer() {
+  clearInterval(timerInterval);
+  timerInterval = null;
+  if (!timePerQuestion) { timerEl.textContent = ''; deadline = null; return; }
+  deadline = Date.now() + timePerQuestion * 1000;
+  tickTimer();
+  timerInterval = setInterval(tickTimer, 500);
+}
+
+function tickTimer() {
+  if (deadline === null) return;
+  const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+  timerEl.textContent = `⏱ ${left}с`;
+  if (left <= 0) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+    deadline = null;
+    if (uiState === 'question') submitAnswer(null); // время вышло — пропуск
+  }
+}
+
+function applyFeedback(result, chosenOptionId) {
+  uiState = 'answered';
+  clearInterval(timerInterval);
+  timerInterval = null;
+  deadline = null;
+  timerEl.textContent = '';
+  card.querySelectorAll('.quiz-option').forEach(btn => {
+    btn.disabled = true;
+    const btnOptionId = parseInt(btn.getAttribute('data-option-id'));
+    if (result.correct === null || result.correct === undefined) {
+      if (btnOptionId === chosenOptionId) btn.classList.add('quiz-chosen');
+      return; // показ ответа выключен админом
+    }
+    if (btnOptionId === chosenOptionId) {
+      btn.classList.add(result.correct ? 'quiz-correct' : 'quiz-wrong');
+    } else if (btnOptionId === result.correct_option_id) {
+      btn.classList.add('quiz-correct');
+    }
+  });
+  bottomBar.style.display = 'flex';
+  continueBtn.disabled = false;
+}
+
+function showError(message, retryFn) {
+  uiState = 'error';
+  setStatus('');
+  const box = document.createElement('div');
+  box.className = 'quiz-error-box';
+  box.innerHTML = `<p>⚠️ ${escapeHtml(message)}</p>`;
+  const retry = document.createElement('button');
+  retry.className = 'btn btn-primary';
+  retry.textContent = '🔁 Повторить';
+  retry.onclick = function() { box.remove(); retryFn(); };
+  box.appendChild(retry);
+  card.appendChild(box);
+}
+
+async function submitAnswer(optionId) {
+  if (uiState !== 'question') return; // двойной клик / гонка с таймером
+  uiState = 'saving';
+  clearInterval(timerInterval);
+  timerInterval = null;
+  const q = questions[current];
+  // Мгновенная визуальная реакция
+  card.querySelectorAll('.quiz-option').forEach(btn => {
+    btn.disabled = true;
+    if (optionId !== null && parseInt(btn.getAttribute('data-option-id')) === optionId) {
+      btn.classList.add('quiz-chosen');
+    }
+  });
+  setStatus('Сохраняем ответ…');
+  log('answer_submit', {opt: optionId});
+  try {
+    const result = await apiPost(`/learn/api/test/${attemptId}/answer`,
+                                 {question_id: q.id, option_id: optionId});
+    if (result.error) throw new Error(result.error);
+    answeredMap[String(q.id)] = {
+      selected_option_id: optionId,
+      correct: result.correct,
+      correct_option_id: result.correct_option_id,
+      skipped: !!result.skipped,
+    };
+    setStatus('');
+    applyFeedback(result, optionId);
+    log('answer_saved');
+  } catch (e) {
+    log('answer_failed', {err: String(e)});
+    setStatus('');
+    uiState = 'question';
+    // Возвращаем кнопки в кликабельное состояние и предлагаем повторить
+    card.querySelectorAll('.quiz-option').forEach(btn => { btn.disabled = false; });
+    showError('Не удалось сохранить ответ (проблема с сетью). Проверьте интернет и попробуйте ещё раз.',
+              function() { submitAnswer(optionId); });
+  }
+}
+
+function onAnswerClick(e) {
+  submitAnswer(parseInt(e.currentTarget.getAttribute('data-option-id')));
+}
+
+async function onContinue() {
+  if (transitioning || uiState !== 'answered') return;
+  transitioning = true;
+  continueBtn.disabled = true;
+  try {
+    current += 1;
+    if (current < questions.length) {
+      renderQuestion(); // сбросит transitioning
+    } else {
+      await doFinish();
+    }
+  } finally {
+    if (uiState !== 'finishing') transitioning = false;
+  }
+}
+
+async function doFinish() {
+  if (finishing) return;
+  finishing = true;
+  uiState = 'finishing';
+  clearInterval(timerInterval);
+  progressFill.style.width = '100%';
+  bottomBar.style.display = 'none';
+  setStatus('Подводим итоги…');
+  log('finish_start');
+  try {
+    await apiPost(`/learn/api/test/${attemptId}/finish`, null);
+    window.location.href = `/learn/test/${attemptId}/result`;
+  } catch (e) {
+    log('finish_failed', {err: String(e)});
+    finishing = false;
+    uiState = 'answered';
+    setStatus('');
+    showError('Не удалось завершить тест (сеть). Ответы сохранены — нажмите «Повторить».',
+              doFinish);
+    bottomBar.style.display = 'flex';
+    continueBtn.disabled = false;
+  }
+}
+
+continueBtn.addEventListener('click', onContinue);
+
+// Возврат в Mini App после сворачивания: пересчитать таймер по дедлайну
+document.addEventListener('visibilitychange', function() {
+  if (!document.hidden && deadline !== null) tickTimer();
+});
+
+// Старт: при продолжении перескакиваем на первый неотвеченный вопрос
+current = firstUnansweredIndex();
+if (current >= questions.length) {
+  doFinish();
+} else {
+  renderQuestion();
+}
+log('test_start', {total: questions.length, resume: {{ 'true' if is_resume else 'false' }}});
+</script>
+
+{% include "_screen_protect.html" %}
+
+{% endblock %}
