@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}{{ lesson.title }} — Smart ENT{% endblock %}
+{% block page_title %}{{ lesson.title }}{% endblock %}
+{% block content %}
+
+<p>
+  <a href="/learn">Все предметы</a> &rarr;
+  <a href="/learn/{{ subject.id }}">{{ subject.title }}</a>
+</p>
+<h1>{{ lesson.title }}</h1>
+{% if lesson.description %}<p class="muted">{{ lesson.description }}</p>{% endif %}
+
+{% if access_state == "need_login" %}
+<section class="auth-card">
+  <h2>🔒 Войдите, чтобы открыть урок</h2>
+  <p class="muted">Материалы урока доступны только вошедшим ученикам.
+     Внутри Telegram вход происходит сам — открывать ничего не нужно.</p>
+  <div class="hero-actions" style="justify-content:flex-start;">
+    <a class="btn btn-primary" href="/cabinet">Войти</a>
+    <a class="btn" href="/register?next=/learn/lesson/{{ lesson.url_id or lesson.id }}">Создать аккаунт</a>
+  </div>
+  <p class="muted" style="margin-top:12px;">Проще всего — открыть Smart ENT
+     прямо в Telegram: аккаунт создастся автоматически.</p>
+  <a class="btn" href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">Открыть бота</a>
+</section>
+
+{% elif access_state == "need_subject_access" %}
+<section class="lesson-test-card">
+  <h2>🔒 Нужен доступ к предмету «{{ subject.title }}»</h2>
+  <p class="muted">Обратитесь к преподавателю, чтобы открыть доступ.</p>
+  {% if site_contact_username %}
+    <a class="btn btn-primary" href="https://t.me/{{ site_contact_username }}" target="_blank" rel="noopener">Написать преподавателю</a>
+  {% endif %}
+</section>
+
+{% elif access_state == "need_payment" %}
+<section class="lesson-test-card paywall-card">
+  <h2>💎 Урок платный</h2>
+  <p>В тесте к этому уроку: <strong>{{ paid_questions_count }}</strong> вопрос(ов).</p>
+
+  <div class="paywall-what">
+    <p><b>Что открывается после покупки — по предмету «{{ subject.title }}»:</b></p>
+    <ul>
+      <li>📖 <b>все конспекты</b> предмета — приходят в Telegram с вашей меткой</li>
+      <li>📝 все домашние задания и тесты</li>
+      <li>🃏 карточки и режим заучивания</li>
+      <li>⏱ пошаговое обучение: минимум времени на уроке и порог сдачи
+          включаются <b>после покупки</b> — до неё уроки просто закрыты ценником</li>
+    </ul>
+    <p class="paywall-term">Срок доступа: <b>{{ premium_days_text }}</b> с момента покупки.</p>
+  </div>
+
+  <p class="muted" style="white-space:pre-wrap;">{{ premium_benefits_text }}</p>
+
+  <div class="hero-actions paywall-actions">
+    {% if subject.premium_ignored %}
+      <p class="paywall-term">Этот курс продаётся отдельно{% if subject.own_price %}: <b>{{ subject.own_price }}</b>{% endif %}.
+         Общий Премиум его не открывает — доступ выдаёт преподаватель.</p>
+    {% endif %}
+    <a class="btn btn-primary btn-buy-manager"
+       href="{{ premium_pay_url or ('https://t.me/' ~ bot_username) }}"
+       target="_blank" rel="noopener">💳 Купить у менеджера за деньги{% if premium_price_money and premium_price_money != '0' %} — {{ premium_price_money }} {{ premium_currency }}{% endif %}</a>
+    {% if premium_stars_enabled and not subject.premium_ignored %}
+      <a class="btn btn-primary" href="https://t.me/{{ bot_username }}?start=premium"
+         target="_blank" rel="noopener">⭐ Оформить Премиум в боте{% if premium_price_stars %} — {{ premium_price_stars }} ⭐{% endif %}</a>
+    {% endif %}
+  </div>
+</section>
+
+{% else %}
+
+{% if error == "attempts_exceeded" %}
+  <div class="alert">Попытки для этого теста закончились.</div>
+{% elif error == "need_read" %}
+  <div class="alert">⏱ Прошло меньше {{ min_read_min }} мин. Прочитайте конспект — тест откроется автоматически.</div>
+{% elif error == "need_prev" %}
+  <div class="alert">🔒 Сначала сдайте предыдущий урок{% if pass_percent %} на {{ pass_percent }}%+{% endif %}, чтобы открыть этот тест.</div>
+{% endif %}
+
+{% if lesson.youtube_id %}
+<div class="lesson-video">
+  <iframe src="https://www.youtube-nocookie.com/embed/{{ lesson.youtube_id }}?modestbranding=1&rel=0&disablekb=1"
+    allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen
+    oncontextmenu="return false"></iframe>
+</div>
+{% elif lesson.video_url %}
+<div class="lesson-video">
+  <video src="{{ lesson.video_url }}" controls controlsList="nodownload noremoteplayback"
+    disablepictureinpicture oncontextmenu="return false"></video>
+</div>
+{% endif %}
+
+{# Конспект больше не показывается на сайте — только в Telegram с персональным
+   водяным знаком (защита от слива). Файлы конспектов остаются в базе. #}
+{% if lesson.content_html or lesson_images %}
+<section class="note-tg-card">
+  <div class="note-tg-emoji">📖</div>
+  <h2>Конспект урока — в Telegram</h2>
+  <p class="muted">Конспект придёт в Telegram <b>владельцу этого аккаунта</b> —
+     с персональной меткой и без возможности переслать. Даже если в аккаунт
+     войдут с чужого устройства, материал получите только вы.</p>
+  <button type="button" class="btn btn-primary note-tg-btn"
+     data-send-note="{{ lesson.url_id or lesson.id }}">📖 ОТКРЫТЬ КОНСПЕКТ</button>
+  <p class="muted note-owner-note" id="note-result-{{ lesson.url_id or lesson.id }}"></p>
+  <p class="muted note-tg-hint">После изучения вернитесь и выполните ДЗ 👇</p>
+</section>
+{% endif %}
+
+{# Видео, загруженное через бота, живёт в Telegram — там же и открывается,
+   с запретом на пересылку и сохранение. #}
+{% if lesson.video_file_id %}
+<section class="note-tg-card">
+  <div class="note-tg-emoji">🎬</div>
+  <h2>Видео урока — в Telegram</h2>
+  <p class="muted">Видео придёт в личные сообщения бота. Переслать или сохранить
+     его нельзя.</p>
+  <a class="btn btn-primary note-tg-btn"
+     href="https://t.me/{{ bot_username }}?start=video_{{ lesson.url_id or lesson.id }}"
+     target="_blank" rel="noopener">🎬 СМОТРЕТЬ ВИДЕО</a>
+</section>
+{% endif %}
+{% if lesson.quizlet_url or subject.quizlet_url %}
+<div class="quizlet-row">
+  <a class="btn btn-primary quizlet-btn" target="_blank" rel="noopener"
+     href="{{ lesson.quizlet_url or subject.quizlet_url }}">🃏 Карточки Quizlet</a>
+</div>
+{% endif %}
+
+
+{% if test_info %}
+<section class="lesson-test-card">
+  <h2>📝 Проверьте себя</h2>
+  <p>Тест: {{ test_info.questions_count }} вопрос(ов)
+    {% if test_info.attempts_limit %} · попыток использовано {{ test_info.attempts_used }} из {{ test_info.attempts_limit }}{% endif %}
+    {% if pass_percent %} · порог сдачи {{ pass_percent }}%{% endif %}
+  </p>
+  {% if prev_gate %}
+    <p class="alert">🔒 Сначала сдайте урок «{{ prev_gate.prev_title }}»{% if prev_gate.pass_percent %} на {{ prev_gate.pass_percent }}%+{% endif %} — тогда откроется этот тест.</p>
+  {% elif test_info.blocked %}
+    <p class="muted">Попытки закончились.</p>
+  {% elif read_seconds_left and read_seconds_left > 0 %}
+    <p class="alert" id="read-gate-msg">📖 Прочитайте конспект. Тест откроется через <b id="read-countdown"></b></p>
+    <a class="btn btn-primary" id="test-btn" href="/learn/lesson/{{ lesson.url_id or lesson.id }}/test" style="pointer-events:none;opacity:.5;">Пройти тест</a>
+    <script>
+      (function() {
+        var left = {{ read_seconds_left }};
+        var btn = document.getElementById('test-btn');
+        var cd = document.getElementById('read-countdown');
+        var msg = document.getElementById('read-gate-msg');
+        function fmt(s){var m=Math.floor(s/60),ss=s%60;return m+':'+(ss<10?'0':'')+ss;}
+        cd.textContent = fmt(left);
+        var t = setInterval(function() {
+          left -= 1;
+          if (left <= 0) {
+            clearInterval(t);
+            btn.style.pointerEvents = ''; btn.style.opacity = '';
+            if (msg) msg.innerHTML = '✅ Конспект прочитан — можно проходить тест!';
+          } else { cd.textContent = fmt(left); }
+        }, 1000);
+      })();
+    </script>
+  {% else %}
+    <a class="btn btn-primary" href="/learn/lesson/{{ lesson.url_id or lesson.id }}/test">Пройти тест</a>
+  {% endif %}
+  <a class="btn btn-primary" href="/learn/lesson/{{ lesson.url_id or lesson.id }}/flashcards">🃏 Карточки</a>
+  <a class="btn btn-primary" href="/learn/lesson/{{ lesson.url_id or lesson.id }}/study">🧠 Заучивание</a>
+</section>
+{% endif %}
+
+{% endif %}
+
+{% include "_screen_protect.html" %}
+
+<script>
+(function () {
+  document.querySelectorAll('[data-send-note]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-send-note');
+      var out = document.getElementById('note-result-' + id);
+      btn.disabled = true; btn.textContent = '⏳ Отправляю в Telegram…';
+      fetch('/notes/send/' + id, {method: 'POST'})
+        .then(function (r) { return r.json().then(function (j) { return [r.status, j]; }); })
+        .then(function (pair) {
+          var res = pair[1];
+          btn.disabled = false; btn.textContent = '📖 ОТКРЫТЬ КОНСПЕКТ';
+          if (res.ok) {
+            // Сразу уводим в переписку с ботом — конспект уже там,
+            // искать его вручную не нужно.
+            out.innerHTML = (res.already
+              ? res.error
+              : '✅ Конспект отправлен вам в Telegram.') +
+              ' <a class="btn btn-primary" style="margin-top:8px;display:inline-block;" href="' +
+              (res.bot_url || '') + '" target="_blank" rel="noopener">Открыть Telegram</a>';
+            if (res.bot_url) {
+              var tg = window.Telegram && window.Telegram.WebApp;
+              if (tg && tg.openTelegramLink) {
+                // Внутри мини-приложения открываем чат с ботом штатным способом
+                try { tg.openTelegramLink(res.bot_url); } catch (e) {}
+                if (tg.close) setTimeout(function () { try { tg.close(); } catch (e) {} }, 400);
+              } else {
+                // В браузере window.open после fetch блокируется как всплывающее
+                // окно — поэтому уходим обычным переходом на ту же вкладку.
+                setTimeout(function () { window.location.href = res.bot_url; }, 700);
+              }
+            }
+            return;
+          }
+          if (res.need_bot && res.bot_url) {
+            out.innerHTML = res.error + ' <a class="btn btn-primary" style="margin-top:8px;display:inline-block;" href="' +
+              res.bot_url + '" target="_blank" rel="noopener">Открыть бота</a>';
+          } else {
+            out.textContent = res.error || 'Не получилось отправить.';
+          }
+        })
+        .catch(function () {
+          btn.disabled = false; btn.textContent = '📖 ОТКРЫТЬ КОНСПЕКТ';
+          out.textContent = 'Нет связи. Попробуйте ещё раз.';
+        });
+    });
+  });
+})();
+</script>
+
+{% endblock %}
