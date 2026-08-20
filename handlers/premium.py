@@ -166,6 +166,11 @@ def build_premium_offer(user: dict) -> tuple:
         f"🃏 Карточкалар мен Жаттау тегін\n\n"
         f"💰 Бағасы: {price_str} {days} күнге{prem_note}"
     )
+    # Текст преимуществ, который админ пишет в панели, — показываем как есть
+    benefits = _setting('premium_benefits_text', '').strip()
+    if benefits:
+        text += f"\n\n{benefits}"
+
     kb = InlineKeyboardBuilder()
     # Выключённый админом способ оплаты не показываем вообще
     if stars_enabled():
@@ -173,10 +178,11 @@ def build_premium_offer(user: dict) -> tuple:
     if money_enabled() and pay_url:
         label = f"💳 Оплатить {money} {cur}" if money else "💳 Оплатить деньгами"
         kb.button(text=label, url=pay_url)
-    if not stars_enabled() and not money_enabled():
-        contact = _setting('site_contact_username', '').lstrip('@').strip()
-        if contact:
-            kb.button(text="✍️ Написать преподавателю", url=f"https://t.me/{contact}")
+    # Менеджер должен быть всегда: даже когда включены звёзды, кому-то удобнее
+    # заплатить деньгами через человека.
+    contact = _setting('site_contact_username', '').lstrip('@').strip()
+    if contact and not (money_enabled() and pay_url):
+        kb.button(text="✍️ Написать менеджеру", url=f"https://t.me/{contact}")
     kb.button(text="🎁 Или пригласи 10 друзей (бесплатно)",
               callback_data="premium:refer")
     kb.button(text="🔙 Назад", callback_data="m:menu")
