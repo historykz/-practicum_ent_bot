@@ -1,0 +1,771 @@
+{% extends "base.html" %}
+{% block title %}Админка обучения — Smart ENT{% endblock %}
+{% block content %}
+
+<h1>⚙️ Управление обучением</h1>
+
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
+{% set back_url = '/admin/learn' + ('?subject=' ~ sel_subject.id if sel_subject else '')
+                  + ('&section=' ~ sel_section_id if sel_subject and sel_section_id else '') %}
+
+{% if sel_subject %}
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a>
+  <span>›</span>
+  <a href="/admin/learn?subject={{ sel_subject.id }}">📘 {{ sel_subject.title }}</a>
+  {% for sec in sel_subject.sections %}{% if sel_section_id == sec.id %}
+    <span>›</span><span class="crumb-current">📂 {{ sec.title }}</span>
+  {% endif %}{% endfor %}
+</nav>
+{% endif %}
+
+{% if not sel_subject %}
+<section class="admin-card">
+  <h2>Настройки сайта</h2>
+  <form method="post" action="/admin/learn/settings" class="admin-form">
+    <label>Telegram для связи (кнопка "Купить доступ" будет вести сюда)</label>
+    <input type="text" name="site_contact_username" value="{{ site_contact_username }}" placeholder="username без @">
+    <label>Текст о преимуществах Премиум (показывается на платных уроках)</label>
+    <textarea name="premium_benefits_text" rows="4">{{ premium_benefits_text }}</textarea>
+    <label>Ссылка на общий чат абитуриентов (кнопка в личном кабинете)</label>
+    <input type="text" name="applicant_chat_url" value="{{ applicant_chat_url }}" placeholder="https://t.me/+...">
+    <label>Дата и время ЕНТ (для обратного отсчёта на сайте, время Астаны)</label>
+    <input type="datetime-local" name="ent_exam_date" value="{{ ent_exam_date }}">
+    <button type="submit" class="btn-small">Сохранить настройки</button>
+  </form>
+  <p style="margin-top:14px;">
+    <a class="btn-small" href="/admin/backup.zip">💾 Скачать полный бэкап (база + файлы)</a>
+    <a class="btn-small" href="/admin/learn/notes-log">📑 Журнал: кто открывал конспекты</a>
+    <a class="btn-small" href="/admin/learn/top-mistakes">🔥 Частые ошибки учеников</a>
+    <a class="btn-small" href="/admin/appeals">⚠️ Апелляции на вопросы{% if appeals_pending %} ({{ appeals_pending }}){% endif %}</a>
+    <a class="btn-small" href="/admin/learn/premium-log">👑 Премиум: цены и кто как получил</a>
+  </p>
+  <details class="admin-details">
+    <summary>♻️ Восстановить из бэкапа</summary>
+    <p class="muted">Выберите скачанный ранее backup_*.zip — файл любого размера
+      (заливается кусками по 8МБ автоматически). Восстановятся: предметы, уроки,
+      конспекты, тесты, доступы, результаты, премиумы, файлы.
+      <strong>Текущие данные будут заменены!</strong></p>
+    <input type="file" id="restore-file" accept=".zip">
+    <button type="button" id="restore-btn" class="btn-small btn-danger">♻️ Восстановить</button>
+    <div class="restore-progress" id="restore-progress" style="display:none;">
+      <div class="restore-progress-bar"><div id="restore-progress-fill"></div></div>
+      <div id="restore-status" class="muted"></div>
+    </div>
+  </details>
+</section>
+
+<script>
+(function() {
+  const CHUNK = 8 * 1024 * 1024;   // куски по 8МБ — быстрее проходят прокси
+  const fileInput = document.getElementById('restore-file');
+  const btn = document.getElementById('restore-btn');
+  const status = document.getElementById('restore-status');
+  const progressBox = document.getElementById('restore-progress');
+  const progressFill = document.getElementById('restore-progress-fill');
+
+  function setProgress(pct, text) {
+    progressBox.style.display = 'block';
+    progressFill.style.width = pct + '%';
+    status.textContent = text;
+  }
+
+  async function postWithRetry(url, body, tries) {
+    let lastErr = null;
+    for (let i = 0; i < (tries || 3); i++) {
+      try {
+        const r = await fetch(url, {method: 'POST', body: body});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return await r.json();
+      } catch (e) {
+        lastErr = e;
+        await new Promise(res => setTimeout(res, 1200 * (i + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
+  btn.addEventListener('click', async function() {
+    const f = fileInput.files[0];
+    if (!f) { setProgress(0, 'Сначала выберите файл.'); return; }
+    if (!confirm('Восстановить из бэкапа? ТЕКУЩИЕ данные будут заменены данными из архива.')) return;
+    btn.disabled = true;
+    try {
+      // 1) Загрузка кусками с прогрессом и ретраями
+      const totalChunks = Math.ceil(f.size / CHUNK);
+      for (let i = 0; i < totalChunks; i++) {
+        const pct = Math.round(i / totalChunks * 70);
+        setProgress(pct, `⬆️ Загрузка файла: ${i + 1} из ${totalChunks} (${pct}%)…`);
+        const blob = f.slice(i * CHUNK, (i + 1) * CHUNK);
+        await postWithRetry(`/admin/backup/upload-chunk?index=${i}&total=${totalChunks}`, blob);
+      }
+      setProgress(70, '⚙️ Файл загружен. Запускаем восстановление…');
+
+      // 2) Восстановление в фоне + опрос статуса (обходит таймаут прокси Railway)
+      const start = await postWithRetry('/admin/backup/restore', null);
+      if (!start.ok) throw new Error(start.error || 'не удалось запустить');
+      const deadline = Date.now() + 10 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise(res => setTimeout(res, 2000));
+        let st = null;
+        try {
+          const r = await fetch('/admin/backup/restore-status');
+          st = await r.json();
+        } catch (_) { continue; } // мигнула сеть — просто опросим ещё раз
+        if (st.state === 'done') {
+          setProgress(100, '✅ Готово! Всё восстановлено.');
+          setTimeout(function() { window.location.href = '/admin/learn?message=Бэкап восстановлен'; }, 900);
+          return;
+        }
+        if (st.state === 'error') throw new Error(st.error || 'ошибка восстановления');
+        setProgress(85, '♻️ Восстанавливаем базу и файлы… (не закрывайте страницу)');
+      }
+      throw new Error('восстановление длится слишком долго — обновите страницу и проверьте данные');
+    } catch (e) {
+      setProgress(0, '⚠️ Ошибка: ' + e.message);
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
+
+{% if is_owner %}
+<section class="admin-card">
+  <h2>🔑 Админы сайта</h2>
+  <p class="muted">Доступ к этой админке сайта. Бот-админы сюда НЕ входят — только те, кого добавите здесь. Пользователь должен был хоть раз запустить бота.</p>
+  <form method="post" action="/admin/site-admins/add" class="admin-form admin-inline">
+    <input type="text" name="ident" placeholder="@username или Telegram ID" required>
+    <button type="submit" class="btn-small">Дать доступ к сайту</button>
+  </form>
+  {% if site_admins %}
+  <ul class="lesson-list">
+    {% for a in site_admins %}
+    <li>
+      {% if a.username %}@{{ a.username }}{% else %}ID:{{ a.tg_id }}{% endif %}
+      <span class="muted">(ID:{{ a.tg_id }})</span>
+      <form method="post" action="/admin/site-admins/{{ a.tg_id }}/remove" style="display:inline">
+        <button type="submit" class="btn-small btn-danger">Убрать</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">Пока только вы (главный админ).</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="admin-card">
+  <h2>💎 Премиум: оплата и доступ</h2>
+  <form method="post" action="/admin/learn/premium/settings" class="admin-form">
+    <input type="hidden" name="next" value="{{ back_url }}">
+    <label class="admin-checkbox">
+      <input type="checkbox" name="premium_stars_enabled" {% if premium_stars_enabled %}checked{% endif %}>
+      ⭐️ Разрешить оплату через Telegram Stars
+    </label>
+    <label>Цена в Stars</label>
+    <input type="number" name="premium_price_stars" min="1" max="100000" value="{{ premium_price_stars }}">
+
+    <label class="admin-checkbox">
+      <input type="checkbox" name="premium_money_enabled" {% if premium_money_enabled %}checked{% endif %}>
+      💳 Разрешить оплату деньгами
+    </label>
+    <label>Цена деньгами</label>
+    <input type="number" name="premium_price_money" min="0" max="10000000" value="{{ premium_price_money }}">
+    <label>Валюта (подпись)</label>
+    <input type="text" name="premium_currency" maxlength="8" value="{{ premium_currency }}" placeholder="₸">
+    <label>Ссылка на оплату деньгами (Kaspi / платёжная страница)</label>
+    <input type="text" name="premium_pay_url" value="{{ premium_pay_url }}" placeholder="https://...">
+    <p class="muted" style="margin:0;">Если ссылки нет — кнопка оплаты деньгами ведёт к преподавателю в Telegram.</p>
+
+    <label>Срок Премиума при покупке, дней</label>
+    <input type="number" name="premium_days" min="1" max="3650" value="{{ premium_days }}">
+    <button type="submit" class="btn btn-primary">Сохранить настройки оплаты</button>
+  </form>
+  {% if not premium_any_payment %}
+  <p class="alert">⚠️ Оба способа оплаты выключены — ученики не увидят ни одной кнопки покупки.
+     Премиум можно будет выдавать только вручную.</p>
+  {% endif %}
+
+  <h3>Выдать Премиум вручную</h3>
+  <form method="post" action="/admin/learn/premium/grant" class="admin-form">
+    <input type="hidden" name="next" value="{{ back_url }}">
+    <textarea name="ident" rows="2" placeholder="@username1, @username2, 123456789 — через запятую/пробел/строку, до 100 за раз" required></textarea>
+    <input type="number" name="days" value="30" min="0" max="3650" placeholder="Дней (0 = навсегда)">
+    <button type="submit" class="btn-small">Выдать Премиум</button>
+  </form>
+
+  {% if premium_users %}
+  <details class="admin-details">
+    <summary>У кого сейчас Премиум ({{ premium_users|length }})</summary>
+    <ul class="lesson-list">
+      {% for u in premium_users %}
+      <li>
+        {% if u.username %}@{{ u.username }}{% else %}{{ u.first_name or 'без имени' }}{% endif %}
+        <span class="muted">(ID:{{ u.tg_id }}{% if u.forever %}, бессрочно{% else %}, до {{ u.expires_at[:10] }}{% endif %})</span>
+        <form method="post" action="/admin/learn/premium/{{ u.tg_id }}/revoke" style="display:inline"
+              onsubmit="return confirm('Забрать Премиум?');">
+          <input type="hidden" name="next" value="{{ back_url }}">
+          <button type="submit" class="btn-small btn-danger">Забрать</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% else %}
+  <p class="muted">Пока ни у кого нет активного Премиума.</p>
+  {% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>Наши каналы (личный кабинет)</h2>
+  <form method="post" action="/admin/learn/channels/create" class="admin-form admin-inline">
+    <input type="text" name="title" placeholder="Название канала" required>
+    <input type="text" name="url" placeholder="https://t.me/..." required>
+    <button type="submit" class="btn-small">Добавить канал</button>
+  </form>
+  {% if channels %}
+  <ul class="lesson-list">
+    {% for c in channels %}
+    <li>
+      <a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.title }}</a>
+      <form method="post" action="/admin/learn/channels/{{ c.id }}/delete" style="display:inline">
+        <button type="submit" class="btn-small btn-danger">Удалить</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">Каналов пока нет.</p>
+  {% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>Обязательная подписка — все предметы</h2>
+  <p class="muted">Эти каналы требуются для входа в любой предмет. Бот должен быть админом канала, иначе проверка подписки пропускается.</p>
+  <form method="post" action="/admin/learn/reqchannels/create" class="admin-form admin-inline">
+    <input type="text" name="channel_username" placeholder="@канал" required>
+    <input type="text" name="title" placeholder="Название (необязательно)">
+    <button type="submit" class="btn-small">Добавить</button>
+  </form>
+  {% if global_required_channels %}
+  <ul class="lesson-list">
+    {% for c in global_required_channels %}
+    <li>
+      @{{ c.channel_username }}{% if c.title %} — {{ c.title }}{% endif %}
+      <form method="post" action="/admin/learn/reqchannels/{{ c.id }}/delete" style="display:inline">
+        <button type="submit" class="btn-small btn-danger">Удалить</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">Глобальных обязательных каналов нет.</p>
+  {% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>Новый предмет</h2>
+  <form method="post" action="/admin/learn/subjects/create" class="admin-form">
+    <input type="text" name="title" placeholder="Название предмета" required>
+    <textarea name="description" placeholder="Описание (необязательно)"></textarea>
+    <fieldset class="admin-mode-box">
+      <legend>🔐 Доступ к предмету</legend>
+      <label class="admin-radio"><input type="radio" name="access_mode" value="open"> 🌍 Открыт всем без выдачи доступа</label>
+      <label class="admin-radio"><input type="radio" name="access_mode" value="closed" checked> 🔑 Виден в каталоге, весь контент только по выданному доступу</label>
+      <label class="admin-radio"><input type="radio" name="access_mode" value="premium"> 💎 Премиум-доступ: виден всем, бесплатные уроки открыты, платные — по Премиуму или выданному доступу</label>
+      <label class="admin-radio"><input type="radio" name="access_mode" value="private"> 🔒 Приватный: не виден в каталоге, только по выданному доступу</label>
+    </fieldset>
+    <fieldset class="admin-progress-box">
+      <legend>⏱ Стоп-уроки (прогрессия обучения)</legend>
+      <label>Минимум минут на уроке перед тестом (0 = выключено)</label>
+      <input type="number" name="min_read_min" min="0" max="120" value="0" placeholder="5">
+      <label class="admin-checkbox"><input type="checkbox" name="require_sequential"> Следующий урок только после сдачи ДЗ предыдущего</label>
+      <label class="admin-checkbox"><input type="checkbox" name="live_code_enabled"> 🎮 Инлайн-режим: показать ученикам поле ввода кода Live-теста внутри предмета</label>
+      <label>Порог сдачи теста, % (0 = засчитать любой результат)</label>
+      <input type="number" name="pass_percent" min="0" max="100" value="0" placeholder="90">
+    </fieldset>
+    <label>🃏 Ссылка на карточки Quizlet для всего предмета (кнопка появится во всех уроках)</label>
+    <input type="text" name="quizlet_url" placeholder="https://quizlet.com/...">
+    <fieldset class="admin-progress-box">
+      <legend>💰 Продаётся отдельно</legend>
+      <label class="admin-checkbox">
+        <input type="checkbox" name="premium_ignored">
+        Общий Премиум НЕ открывает этот предмет — только доступ, выданный именно на него
+      </label>
+      <label>Своя цена (текстом, показывается ученику: «12 000 ₸ за курс»)</label>
+      <input type="text" name="own_price" placeholder="12 000 ₸ за курс">
+          <label class="admin-checkbox">
+        <input type="checkbox" name="unit_sale_enabled">
+        ⭐️ Разрешить покупку отдельных уроков и разделов за Stars
+      </label>
+      <label>Цена урока по умолчанию, Stars (свою цену можно задать на уроке и разделе)</label>
+      <input type="number" name="unit_price_stars" min="0" value="" placeholder="80">
+</fieldset>
+    <button type="submit" class="btn btn-primary">Создать предмет</button>
+  </form>
+</section>
+
+<section class="admin-card">
+  <h2>📚 Предметы</h2>
+  <p class="muted">Выберите предмет — откроются только его разделы и уроки.</p>
+  <ul class="admin-tree">
+    {% for s in subjects %}
+    <li class="admin-tree-item{% if s.is_pinned %} subject-pinned{% endif %}">
+      {% if s.is_pinned %}<span class="pin-flag">📌 Закреплён первым у всех</span><br>{% endif %}
+      <a class="admin-tree-link" href="/admin/learn?subject={{ s.id }}">📘 {{ s.title }}</a>
+      <span class="order-btns">
+        <form method="post" action="/admin/learn/subjects/{{ s.id }}/move" style="display:inline">
+          <input type="hidden" name="next" value="/admin/learn">
+          <input type="hidden" name="dir" value="up">
+          <button type="submit" title="Выше">▲</button>
+        </form>
+        <form method="post" action="/admin/learn/subjects/{{ s.id }}/move" style="display:inline">
+          <input type="hidden" name="next" value="/admin/learn">
+          <input type="hidden" name="dir" value="down">
+          <button type="submit" title="Ниже">▼</button>
+        </form>
+        <form method="post" action="/admin/learn/subjects/{{ s.id }}/pin" style="display:inline">
+          <input type="hidden" name="next" value="/admin/learn">
+          <button type="submit" title="{% if s.is_pinned %}Открепить{% else %}Закрепить первым у всех{% endif %}">📌</button>
+        </form>
+      </span>
+      <span class="muted">{{ s.status }}{% if s.is_open %}, открыт всем{% endif %}{% if s.is_private %}, 🔒 приватный{% endif %}
+        · разделов: {{ s.sections_count }} · уроков: {{ s.lessons_count }}</span>
+    </li>
+    {% else %}
+    <li class="muted">Предметов пока нет — создайте первый выше.</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% for s in subjects if sel_subject %}
+<section class="admin-card">
+  {# Ссылка-витрина: её кидают в канал, чтобы показать именно этот предмет #}
+  <details class="admin-details">
+    <summary>🔗 Ссылка на этот предмет для канала</summary>
+    <div class="share-box">
+      <p class="muted">Опубликуйте её в канале. Человек нажимает — <b>прямо в Telegram
+        открывается мини-приложение</b> сразу на этом предмете. Вход происходит сам,
+        отдельная регистрация на сайте не нужна.</p>
+      <input type="text" readonly value="{{ miniapp_base }}?startapp=subj_{{ s.id }}"
+             onclick="this.select()" data-share-link>
+      <div class="share-row">
+        <button type="button" class="btn-small" data-copy-share>📋 Скопировать</button>
+        <a class="btn-small" href="/learn/{{ s.id }}" target="_blank">👁 Как увидит ученик</a>
+      </div>
+      <details class="admin-details">
+        <summary>Другие ссылки на этот предмет</summary>
+        <p class="muted">Карточкой в переписке с ботом:<br>
+           <code>https://t.me/{{ bot_username }}?start=subj_{{ s.id }}</code></p>
+        <p class="muted">Обычной страницей сайта:<br>
+           <code>{{ site_url }}/learn/{{ s.id }}</code></p>
+      </details>
+      {% if s.mode == 'private' %}
+      <p class="alert">⚠️ Предмет приватный — по ссылке карточка не откроется.
+         Переключите доступ на «открытый» или «премиум».</p>
+      {% endif %}
+    </div>
+  </details>
+
+  {% if edit_subject == s.id|string %}
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/edit" class="admin-form">
+      <input type="hidden" name="next" value="{{ back_url }}">
+      <input type="text" name="title" value="{{ s.title }}" required>
+      <textarea name="description">{{ s.description }}</textarea>
+      <fieldset class="admin-mode-box">
+        <legend>🔐 Доступ к предмету</legend>
+        {% set cur_mode = s.mode or 'closed' %}
+        <label class="admin-radio"><input type="radio" name="access_mode" value="open" {% if cur_mode == 'open' %}checked{% endif %}> 🌍 Открыт всем без выдачи доступа</label>
+        <label class="admin-radio"><input type="radio" name="access_mode" value="closed" {% if cur_mode == 'closed' %}checked{% endif %}> 🔑 Виден в каталоге, весь контент только по выданному доступу</label>
+        <label class="admin-radio"><input type="radio" name="access_mode" value="premium" {% if cur_mode == 'premium' %}checked{% endif %}> 💎 Премиум-доступ: виден всем, бесплатные уроки открыты, платные — по Премиуму или выданному доступу</label>
+        <label class="admin-radio"><input type="radio" name="access_mode" value="private" {% if cur_mode == 'private' %}checked{% endif %}> 🔒 Приватный: не виден в каталоге, только по выданному доступу</label>
+      </fieldset>
+      <fieldset class="admin-progress-box">
+        <legend>⏱ Стоп-уроки (прогрессия обучения)</legend>
+        <label>Минимум минут на уроке перед тестом (0 = выключено)</label>
+        <input type="number" name="min_read_min" min="0" max="120" value="{{ s.min_read_min or 0 }}">
+        <label class="admin-checkbox"><input type="checkbox" name="require_sequential" {% if s.require_sequential %}checked{% endif %}> Следующий урок только после сдачи ДЗ предыдущего</label>
+        <label class="admin-checkbox"><input type="checkbox" name="live_code_enabled" {% if s.live_code_enabled %}checked{% endif %}> 🎮 Инлайн-режим: поле ввода кода Live-теста внутри предмета</label>
+        <label>Порог сдачи теста, % (0 = засчитать любой результат)</label>
+        <input type="number" name="pass_percent" min="0" max="100" value="{{ s.pass_percent or 0 }}">
+      </fieldset>
+      <label>🃏 Ссылка на карточки Quizlet для всего предмета (кнопка во всех уроках)</label>
+      <input type="text" name="quizlet_url" value="{{ s.quizlet_url or '' }}" placeholder="https://quizlet.com/...">
+      <fieldset class="admin-progress-box">
+        <legend>💰 Продаётся отдельно</legend>
+        <label class="admin-checkbox">
+          <input type="checkbox" name="premium_ignored" {% if s.premium_ignored %}checked{% endif %}>
+          Общий Премиум НЕ открывает этот предмет — только доступ, выданный именно на него
+        </label>
+        <label>Своя цена (текстом, показывается ученику)</label>
+        <input type="text" name="own_price" value="{{ s.own_price or '' }}" placeholder="12 000 ₸ за курс">
+            <label class="admin-checkbox">
+        <input type="checkbox" name="unit_sale_enabled"{% if s.unit_sale_enabled %} checked{% endif %}>
+        ⭐️ Разрешить покупку отдельных уроков и разделов за Stars
+      </label>
+      <label>Цена урока по умолчанию, Stars (свою цену можно задать на уроке и разделе)</label>
+      <input type="number" name="unit_price_stars" min="0" value="{{ s.unit_price_stars or '' }}" placeholder="80">
+</fieldset>
+      <button type="submit" class="btn-small">Сохранить</button>
+      <a href="{{ back_url }}" class="btn-small">Отмена</a>
+    </form>
+  {% else %}
+    <h2>
+      {% if s.original_id %}🔗 {% endif %}{{ s.title }}
+      <span class="muted">({{ s.status }}{% if s.mode == 'open' %}, 🌍 открыт всем{% elif s.mode == 'premium' %}, 💎 премиум{% elif s.mode == 'private' %}, 🔒 приватный{% else %}, 🔑 по доступу{% endif %})</span>
+    </h2>
+    {% if s.original_id %}
+    <p class="copy-note">🔗 Это копия-витрина. Контент, прогресс и доступ живут в оригинале —
+       здесь настраиваются только показ и платность.
+       <a href="/admin/learn?subject={{ s.original_id }}">Открыть оригинал</a></p>
+    {% endif %}
+    {% if s.description %}<p class="muted">{{ s.description }}</p>{% endif %}
+
+    <a href="{{ back_url }}{% if '?' in back_url %}&{% else %}?{% endif %}edit_subject={{ s.id }}" class="btn-small">Редактировать</a>
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/toggle" style="display:inline">
+      <input type="hidden" name="next" value="{{ back_url }}">
+      <button type="submit" class="btn-small">
+        {% if s.status == 'active' %}Скрыть предмет{% else %}Показать предмет{% endif %}
+      </button>
+    </form>
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/delete" style="display:inline"
+          onsubmit="return confirm('Удалить предмет «{{ s.title }}» вместе со всеми разделами, уроками и тестами? Это необратимо.');">
+      <button type="submit" class="btn-small btn-danger">Удалить предмет</button>
+    </form>
+    <details class="admin-details">
+      <summary>🔗 Сделать копию-витрину предмета</summary>
+      <p class="muted">Создаст лёгкую копию: только названия уроков и разделов.
+         Конспекты, тесты, карточки и заучивание останутся в одном месте — в оригинале.
+         Прогресс общий. Доступ, выданный на оригинал, откроет платные уроки и здесь.</p>
+      <form method="post" action="/admin/learn/subjects/{{ s.id }}/copy" class="admin-form admin-inline">
+        <input type="hidden" name="next" value="{{ back_url }}">
+        <input type="text" name="title" placeholder="Название копии (по умолчанию «{{ s.title }} (копия)»)">
+        <button type="submit" class="btn-small">Создать копию</button>
+      </form>
+    </details>
+  {% endif %}
+
+  {% if not s.is_open %}
+  <form method="post" action="/admin/learn/subjects/{{ s.id }}/access/grant" class="admin-form">
+    <input type="hidden" name="next" value="{{ back_url }}">
+    <textarea name="user_tg_id" rows="2" placeholder="@username1, @username2, id123456 — через запятую/пробел/строку, до 100 за раз" required></textarea>
+    <input type="number" name="days" placeholder="Дней доступа (0 = навсегда)" value="0">
+    <button type="submit" class="btn-small">Выдать доступ</button>
+  </form>
+  {% if s.access_list %}
+  <details class="admin-details">
+    <summary>Кому выдан доступ ({{ s.access_list|length }})</summary>
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/access/revoke"
+          class="revoke-form" data-revoke-form
+          onsubmit="return confirm('Забрать доступ у выбранных?');">
+      <input type="hidden" name="next" value="{{ back_url }}">
+      <label class="admin-checkbox revoke-all-row">
+        <input type="checkbox" data-revoke-all> <strong>Выбрать всех</strong>
+      </label>
+      <ul class="lesson-list">
+        {% for a in s.access_list %}
+        <li>
+          <label class="admin-checkbox revoke-row">
+            <input type="checkbox" name="revoke_tg_id" value="{{ a.user_tg_id }}" data-revoke-cb>
+            {% if a.username %}@{{ a.username }}{% else %}{{ a.first_name or 'без имени' }}{% endif %}
+            <span class="muted">(ID:{{ a.user_tg_id }}{% if a.expires_at %}, до {{ a.expires_at[:10] }}{% else %}, бессрочно{% endif %})</span>
+          </label>
+        </li>
+        {% endfor %}
+      </ul>
+      <button type="submit" class="btn-small btn-danger revoke-submit" style="display:none;">
+        🚫 Забрать доступ (<span data-revoke-count>0</span>)
+      </button>
+    </form>
+  </details>
+  {% endif %}
+  {% if s.pending_list %}
+  <details class="admin-details">
+    <summary>⏳ Ждут первого /start ({{ s.pending_list|length }})</summary>
+    <ul class="lesson-list">
+      {% for p in s.pending_list %}
+      <li>@{{ p.username }} <span class="muted">({% if p.days %}{{ p.days }} дн.{% else %}бессрочно{% endif %} — доступ применится автоматически при запуске бота)</span></li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+  {% endif %}
+
+  <details class="admin-details">
+    <summary>📡 Обязательные каналы предмета ({{ (subject_required_channels.get(s.id) or [])|length }})</summary>
+    <form method="post" action="/admin/learn/reqchannels/create" class="admin-form admin-inline">
+      <input type="hidden" name="next" value="{{ back_url }}">
+      <input type="hidden" name="subject_id" value="{{ s.id }}">
+      <input type="text" name="channel_username" placeholder="@канал" required>
+      <input type="text" name="title" placeholder="Название (необязательно)">
+      <button type="submit" class="btn-small">Добавить</button>
+    </form>
+    {% for c in subject_required_channels.get(s.id) or [] %}
+    <li style="list-style:none;">
+      @{{ c.channel_username }}{% if c.title %} — {{ c.title }}{% endif %}
+      <form method="post" action="/admin/learn/reqchannels/{{ c.id }}/delete" style="display:inline">
+        <input type="hidden" name="next" value="{{ back_url }}">
+        <button type="submit" class="btn-small btn-danger">Удалить</button>
+      </form>
+    </li>
+    {% endfor %}
+  </details>
+
+  <h3>Разделы ({{ s.sections_count }})</h3>
+  {% for sec in s.sections %}
+  {% set is_open_sec = (sel_section_id == sec.id) %}
+  <div class="admin-section-block{% if is_open_sec %} section-open{% endif %}">
+    {% if edit_section == sec.id|string %}
+      <form method="post" action="/admin/learn/sections/{{ sec.id }}/edit" class="admin-form admin-inline">
+        <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">
+        <input type="text" name="title" value="{{ sec.title }}" required>
+        <label class="admin-checkbox">
+          <input type="checkbox" name="sale_enabled"{% if sec.sale_enabled %} checked{% endif %}>
+          ⭐️ Разрешить покупку этого раздела целиком
+        </label>
+        <label>Цена раздела, Stars (пусто = цена урока предмета × платные уроки)</label>
+        <input type="number" name="price_stars" min="0"
+               value="{{ sec.price_stars or '' }}" placeholder="300">
+        <button type="submit" class="btn-small">Сохранить</button>
+        <a href="/admin/learn?subject={{ s.id }}&section={{ sec.id }}" class="btn-small">Отмена</a>
+      </form>
+    {% else %}
+      {% if is_open_sec %}
+        <a class="admin-tree-link section-toggle" href="/admin/learn?subject={{ s.id }}">📂 {{ sec.title }} <span class="muted">— свернуть</span></a>
+      {% else %}
+        <a class="admin-tree-link section-toggle" href="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">📁 {{ sec.title }}</a>
+        <span class="muted">уроков: {{ sec.lessons_count }}{% if sec.paid_count %} · 💎 платных: {{ sec.paid_count }}{% endif %}{% if sec.free_count %} · 🆓 бесплатных: {{ sec.free_count }}{% endif %}</span>
+      {% endif %}
+      <span class="order-btns">
+        <form method="post" action="/admin/learn/sections/{{ sec.id }}/move" style="display:inline">
+          <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}">
+          <input type="hidden" name="dir" value="up">
+          <button type="submit" title="Раздел выше">▲</button>
+        </form>
+        <form method="post" action="/admin/learn/sections/{{ sec.id }}/move" style="display:inline">
+          <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}">
+          <input type="hidden" name="dir" value="down">
+          <button type="submit" title="Раздел ниже">▼</button>
+        </form>
+      </span>
+      <a href="/admin/learn?subject={{ s.id }}&section={{ sec.id }}&edit_section={{ sec.id }}" class="btn-small">Изменить</a>
+      {% if sec.original_id %}<span class="copy-badge" title="Копия-ярлык">🔗 копия</span>{% endif %}
+      <details class="admin-details admin-copy-details">
+        <summary>🔗 Копировать раздел</summary>
+        <form method="post" action="/admin/learn/sections/{{ sec.id }}/copy" class="admin-form admin-inline">
+          <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">
+          <select name="target_subject_id" required>
+            <option value="">— в какой предмет —</option>
+            {% for t in copy_subjects %}
+            <option value="{{ t.id }}">{{ t.title }}{% if t.original_id %} (копия){% endif %}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn-small">Скопировать ярлыком</button>
+        </form>
+      </details>
+      <form method="post" action="/admin/learn/sections/{{ sec.id }}/delete" style="display:inline"
+            onsubmit="return confirm('Удалить раздел «{{ sec.title }}» со всеми уроками и тестами?');">
+        <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}">
+        <button type="submit" class="btn-small btn-danger">Удалить раздел</button>
+      </form>
+    {% endif %}
+    {% if is_open_sec %}
+    {% if sec.lessons %}
+      {% if s.mode == 'premium' %}
+      <div class="paid-legend">
+        💎 Предмет в режиме <b>Премиум</b>: новые уроки создаются <b>платными</b>.
+        Что открыть бесплатно на витрину — жмите «Сделать бесплатным» у нужного урока.
+        <span class="tag tag-paid">💎 ПЛАТНЫЙ</span> — нужен Премиум или доступ ·
+        <span class="tag tag-free">🆓 БЕСПЛАТНЫЙ</span> — открыт всем
+      </div>
+      {% endif %}
+      <p class="muted" style="margin:4px 0;">↕️ Перетащите уроки, чтобы изменить порядок</p>
+    {% endif %}
+    <ul class="lesson-list lesson-sortable" data-section="{{ sec.id }}">
+      {% for lesson in sec.lessons %}
+      <li draggable="true" data-lesson="{{ lesson.id }}" class="{% if lesson.is_paid %}row-paid{% else %}row-free{% endif %}">
+        <span class="drag-handle">⋮⋮</span>
+        <span class="order-btns">
+          <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/move" style="display:inline">
+            <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">
+            <input type="hidden" name="dir" value="up">
+            <button type="submit" title="Урок выше">▲</button>
+          </form>
+          <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/move" style="display:inline">
+            <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">
+            <input type="hidden" name="dir" value="down">
+            <button type="submit" title="Урок ниже">▼</button>
+          </form>
+        </span>
+        {% if lesson.is_paid %}
+          <span class="tag tag-paid">💎 ПЛАТНЫЙ</span>
+        {% else %}
+          <span class="tag tag-free">🆓 БЕСПЛАТНЫЙ</span>
+        {% endif %}
+        <a href="/admin/learn/lessons/{{ lesson.id }}/edit">{% if lesson.is_zachet %}📝 {% endif %}{{ lesson.title }}</a>
+        {% if lesson.test_id %}<a class="btn-small" href="/admin/learn/tests/{{ lesson.test_id }}/questions?lesson_id={{ lesson.id }}">✏️ Вопросы</a>{% endif %}
+        <span class="muted">({{ lesson.status }}{% if lesson.is_zachet %}, ЗАЧЁТ{% elif lesson.test_id %}, с тестом{% endif %})</span>
+        <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/toggle-paid" style="display:inline">
+          <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">
+          <button type="submit" class="btn-small {% if lesson.is_paid %}btn-make-free{% else %}btn-make-paid{% endif %}">
+            {% if lesson.is_paid %}Сделать бесплатным{% else %}Сделать платным{% endif %}
+          </button>
+        </form>
+        {% if lesson.is_zachet %}
+        <a href="/admin/learn/lessons/{{ lesson.id }}/zachet" class="btn-small">🧩 Банк зачёта</a>
+        {% endif %}
+        {% if lesson.is_copy %}
+        <span class="copy-badge" title="Ярлык на «{{ lesson.orig_title }}»">🔗 копия</span>
+        {% endif %}
+        <details class="admin-details admin-copy-details">
+          <summary>🔗 Копировать</summary>
+          <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/copy" class="admin-form admin-inline">
+            <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">
+            <select name="target_section_id" required>
+              <option value="">— в какой раздел —</option>
+              {% for t in copy_sections %}
+              <option value="{{ t.id }}">{{ t.subject_title }} → {{ t.title }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn-small">Скопировать ярлыком</button>
+          </form>
+        </details>
+        <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/toggle" style="display:inline">
+          <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">
+          <button type="submit" class="btn-small">
+            {% if lesson.status == 'open' %}Закрыть{% else %}Открыть{% endif %}
+          </button>
+        </form>
+      </li>
+      {% else %}
+      <li class="muted">Уроков нет</li>
+      {% endfor %}
+    </ul>
+
+    <details class="admin-details">
+      <summary>+ Новый урок в разделе "{{ sec.title }}"</summary>
+      <form method="post" action="/admin/learn/sections/{{ sec.id }}/lessons/create"
+            enctype="multipart/form-data" class="admin-form" data-progress-upload>
+        <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}&section={{ sec.id }}">
+        <input type="text" name="title" placeholder="Название урока" required>
+        <textarea name="description" placeholder="Краткое описание (необязательно)"></textarea>
+        <textarea name="content" placeholder="Текст конспекта" rows="6"></textarea>
+        <label>Или загрузить конспект файлом (.docx / .pdf — текст возьмётся из файла)</label>
+        <input type="file" name="content_file" accept=".docx,.pdf">
+        <label>📷 Фото в конспект (можно выбрать несколько, до 40)</label>
+        <input type="file" name="lesson_images" accept="image/*" multiple>
+        <label class="admin-checkbox"><input type="checkbox" name="is_paid"> Платный урок (нужен Премиум или отдельный доступ)</label>
+        <label class="admin-checkbox"><input type="checkbox" name="is_zachet"> 📝 Это ЗАЧЁТ (симулятор по темам — банк вопросов настраивается после создания)</label>
+
+        <label class="admin-radio"><input type="radio" name="video_mode" value="none" checked> Без видео</label>
+        <label class="admin-radio"><input type="radio" name="video_mode" value="upload"> Загрузить видеофайл</label>
+        <input type="file" name="video_file" accept="video/*">
+        <p class="muted" style="margin:0;">До 20МБ (короткий ролик). Для длинного видео — YouTube ниже; для своего видео без ссылок на YouTube сожмите файл до 20МБ.</p>
+        <label class="admin-radio"><input type="radio" name="video_mode" value="youtube"> Ссылка на YouTube</label>
+        <input type="text" name="video_youtube_url" placeholder="https://youtube.com/watch?v=...">
+        <p class="muted" style="margin:0;">На встроенном YouTube-плеере всегда остаётся кликабельное название/лого (правила YouTube, отключить нельзя) — если это критично, используйте загрузку своего файла выше.</p>
+
+        <label class="admin-radio"><input type="radio" name="test_mode" value="none" checked> Без теста</label>
+        <label class="admin-radio"><input type="radio" name="test_mode" value="text"> Вставить тест текстом</label>
+        <textarea name="test_text" placeholder="Текст вопроса&#10;A) вариант&#10;B) вариант *&#10;C) вариант&#10;D) вариант"></textarea>
+        <label class="admin-radio"><input type="radio" name="test_mode" value="zip"> Загрузить ZIP (questions.txt + images/)</label>
+        <input type="file" name="test_zip" accept=".zip">
+        <label class="admin-radio"><input type="radio" name="test_mode" value="file"> Загрузить файл (.txt / .pdf) в том же формате вопросов</label>
+        <input type="file" name="test_file" accept=".txt,.pdf">
+        <p class="muted" style="margin:0;">После загрузки будет показан предпросмотр вопросов — тест сохранится только после подтверждения.</p>
+
+        <button type="submit" class="btn btn-primary">Далее</button>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">Разделов нет.</p>
+  {% endfor %}
+
+  <details class="admin-details">
+    <summary>+ Новый раздел в "{{ s.title }}"</summary>
+    <form method="post" action="/admin/learn/subjects/{{ s.id }}/sections/create" class="admin-form admin-inline">
+      <input type="hidden" name="next" value="/admin/learn?subject={{ s.id }}">
+      <input type="text" name="title" placeholder="Название раздела" required>
+      <button type="submit" class="btn-small">Создать раздел</button>
+    </form>
+  </details>
+</section>
+{% endfor %}
+
+<script>
+// Отзыв доступа галочками: кнопка появляется только когда что-то выбрано
+document.querySelectorAll('[data-revoke-form]').forEach(function(form) {
+  const boxes = form.querySelectorAll('[data-revoke-cb]');
+  const all = form.querySelector('[data-revoke-all]');
+  const btn = form.querySelector('.revoke-submit');
+  const counter = form.querySelector('[data-revoke-count]');
+
+  function refresh() {
+    const checked = form.querySelectorAll('[data-revoke-cb]:checked').length;
+    btn.style.display = checked ? 'inline-block' : 'none';
+    counter.textContent = checked;
+    if (all) all.checked = checked === boxes.length && boxes.length > 0;
+  }
+
+  boxes.forEach(function(cb) { cb.addEventListener('change', refresh); });
+  if (all) {
+    all.addEventListener('change', function() {
+      boxes.forEach(function(cb) { cb.checked = all.checked; });
+      refresh();
+    });
+  }
+});
+
+// Drag&drop порядка уроков внутри раздела
+document.querySelectorAll('.lesson-sortable').forEach(function(list) {
+  var dragging = null;
+  list.querySelectorAll('li[draggable="true"]').forEach(function(li) {
+    li.addEventListener('dragstart', function(e) {
+      dragging = li; li.classList.add('drag-active');
+      try { e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
+    });
+    li.addEventListener('dragend', function() {
+      li.classList.remove('drag-active'); dragging = null; saveOrder(list);
+    });
+  });
+  list.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    if (!dragging) return;
+    var after = null, items = list.querySelectorAll('li[draggable="true"]:not(.drag-active)');
+    for (var i = 0; i < items.length; i++) {
+      var box = items[i].getBoundingClientRect();
+      if (e.clientY < box.top + box.height / 2) { after = items[i]; break; }
+    }
+    if (after) list.insertBefore(dragging, after); else list.appendChild(dragging);
+  });
+});
+// Копирование ссылки-витрины
+document.querySelectorAll('[data-copy-share]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var inp = btn.closest('.share-box').querySelector('[data-share-link]');
+    inp.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    if (navigator.clipboard) { navigator.clipboard.writeText(inp.value).catch(function(){}); }
+    var was = btn.textContent;
+    btn.textContent = '✅ Скопировано';
+    setTimeout(function () { btn.textContent = was; }, 1600);
+  });
+});
+
+function saveOrder(list) {
+  var order = Array.from(list.querySelectorAll('li[draggable="true"]'))
+    .map(function(li) { return parseInt(li.getAttribute('data-lesson')); });
+  if (!order.length) return;
+  fetch('/admin/learn/sections/' + list.getAttribute('data-section') + '/reorder', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({order: order}),
+  }).catch(function() {});
+}
+</script>
+
+{% endblock %}
