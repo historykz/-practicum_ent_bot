@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Мои ошибки — Smart ENT{% endblock %}
+{% block page_title %}Мои ошибки{% endblock %}
+{% block content %}
+<h1>❌ Мои ошибки</h1>
+
+<section class="profile-card">
+  <div class="stat-row">
+    <div class="stat-box"><div class="stat-value">{{ total_answers }}</div><div class="stat-label">Всего ответов</div></div>
+    <div class="stat-box"><div class="stat-value">{{ correct_percent }}%</div><div class="stat-label">Верно</div></div>
+    <div class="stat-box"><div class="stat-value">{{ error_percent }}%</div><div class="stat-label">Ошибок</div></div>
+    <div class="stat-box"><div class="stat-value">{{ unfixed }}</div><div class="stat-label">Не исправлено</div></div>
+  </div>
+  <p class="muted" style="margin-top:12px;">Ошибки прорабатываются прямо здесь —
+     карточками или тестом. Скачивание отключено: материалы курса не выносятся
+     за пределы платформы. Разбор в файле при необходимости готовит преподаватель.</p>
+  <div class="hero-actions">
+    <a class="btn btn-primary" href="/cabinet/errors/cards">🃏 Карточки по ошибкам</a>
+    <a class="btn btn-primary" href="/cabinet/errors/retest">📝 Тест по ошибкам</a>
+  </div>
+</section>
+
+{% if weak_topics %}
+<section class="profile-card">
+  <h2>📚 Темы для повторения</h2>
+  <ul class="lesson-list">
+    {% for t in weak_topics %}
+    <li>
+      {% if t.percent >= 50 %}🔴{% elif t.percent >= 26 %}🟠{% elif t.percent >= 11 %}🟡{% else %}🟢{% endif %}
+      {{ t.topic }} — ошибок {{ t.wrong }} из {{ t.total }} <b>({{ t.percent }}%)</b>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="profile-card">
+  <h2>Список ошибок ({{ unique_errors }})</h2>
+  {% if mistakes %}
+  <div class="mistake-filters">
+    <input type="text" id="mist-search" class="st-input" placeholder="Поиск по вопросу/теме…">
+    <label class="admin-checkbox"><input type="checkbox" id="mist-unfixed"> Только неисправленные</label>
+  </div>
+  <div id="mist-list">
+    {% for m in mistakes %}
+    <div class="mistake-card"
+         data-text="{{ (m.qtext ~ ' ' ~ m.topic ~ ' ' ~ m.test_title)|lower }}"
+         data-status="{{ m.status }}">
+      <div class="mistake-q">{{ m.qtext }}</div>
+      <div class="mistake-ans">
+        <span class="mist-wrong">Ваш ответ: {{ m.user_ans }}</span>
+        <span class="mist-right">Правильный: {{ m.correct_ans }}</span>
+      </div>
+      <div class="mistake-meta">
+        {{ m.topic }} · {{ m.test_title }} · {{ m.source }} · ошибок {{ m.wrong_count }} · {{ m.last_wrong }}
+        <span class="mist-status mist-st-{{ 'fixed' if m.status=='Исправлена' else ('repeat' if m.status=='На повторении' else 'new') }}">{{ m.status }}</span>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">Ошибок пока нет — отлично! 🎉</p>
+  {% endif %}
+</section>
+
+<script>
+const mSearch=document.getElementById('mist-search'), mUnfixed=document.getElementById('mist-unfixed');
+function mApply(){
+  const q=(mSearch.value||'').toLowerCase().trim();
+  const onlyUnfixed=mUnfixed.checked;
+  document.querySelectorAll('.mistake-card').forEach(function(c){
+    const okText=!q || c.getAttribute('data-text').indexOf(q)>=0;
+    const okFix=!onlyUnfixed || c.getAttribute('data-status')!=='Исправлена';
+    c.style.display=(okText&&okFix)?'':'none';
+  });
+}
+if(mSearch){ mSearch.addEventListener('input',mApply); mUnfixed.addEventListener('change',mApply); }
+</script>
+{% endblock %}

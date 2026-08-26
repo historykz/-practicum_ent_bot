@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% block title %}Редактирование урока — Smart ENT{% endblock %}
+{% block content %}
+
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a>
+  {% if subject %}<span>›</span><a href="/admin/learn?subject={{ subject.id }}">📘 {{ subject.title }}</a>{% endif %}
+  {% if section %}<span>›</span><a href="{{ back_url }}">📂 {{ section.title }}</a>{% endif %}
+  <span>›</span><span class="crumb-current">✏️ {{ lesson.title }}</span>
+</nav>
+<h1>{% if is_copy %}🔗 {% endif %}✏️ {{ lesson.title }}</h1>
+
+{% if is_copy %}
+<div class="copy-note">
+  🔗 <strong>Это копия-ярлык.</strong> Конспект, фото, тест, карточки и заучивание живут
+  в оригинале{% if orig_lesson %} — уроке «{{ orig_lesson.title }}»{% endif %}, и здесь их
+  править нельзя (иначе разъедутся два места правки одного и того же).
+  Здесь настраиваются только обложка и платность.
+  {% if orig_lesson %}
+  <a class="btn-small" href="/admin/learn/lessons/{{ orig_lesson.id }}/edit">Открыть оригинал</a>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
+<section class="admin-card">
+  <h2>Основное</h2>
+  <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/edit" enctype="multipart/form-data" class="admin-form" data-progress-upload>
+    <input type="text" name="title" value="{{ lesson.title }}" required>
+    <textarea name="description" placeholder="Краткое описание">{{ lesson.description }}</textarea>
+    {% if not is_copy %}
+    <textarea name="content" rows="10" placeholder="Текст конспекта">{{ lesson.content_html }}</textarea>
+    <label>Или загрузить конспект файлом (.docx / .pdf — заменит текст выше)</label>
+    <input type="file" name="content_file" accept=".docx,.pdf">
+    <label>📷 Добавить фото в конспект (несколько, до 40)</label>
+    <input type="file" name="lesson_images" accept="image/*" multiple>
+    {% endif %}
+    <label>🃏 Ссылка на карточки Quizlet (кнопка у ученика под конспектом и в уроке)</label>
+    <input type="text" name="quizlet_url" value="{{ lesson.quizlet_url or '' }}" placeholder="https://quizlet.com/...">
+    <label class="admin-checkbox"><input type="checkbox" name="status" {% if lesson.status == 'open' %}checked{% endif %}> Урок открыт ученикам</label>
+    <label class="admin-checkbox"><input type="checkbox" name="is_paid" {% if lesson.is_paid %}checked{% endif %}> Платный урок (нужен Премиум или отдельный доступ)</label>
+    <label>⭐️ Своя цена урока в Stars (пусто = общая цена предмета)</label>
+    <input type="number" name="price_stars" min="0"
+           value="{{ lesson.price_stars or '' }}" placeholder="80">
+
+    {% if not is_copy %}
+    <p class="muted" style="margin:0;">Видео: {% if lesson.video_url %}своё загруженное{% elif lesson.youtube_id %}YouTube ({{ lesson.youtube_id }}){% else %}нет{% endif %}</p>
+    <label class="admin-radio"><input type="radio" name="video_mode" value="keep" checked> Оставить как есть</label>
+    <label class="admin-radio"><input type="radio" name="video_mode" value="remove"> Удалить видео</label>
+    <label class="admin-radio"><input type="radio" name="video_mode" value="upload"> Заменить: загрузить файл</label>
+    <input type="file" name="video_file" accept="video/*">
+    <p class="muted" style="margin:0;">До 20МБ.</p>
+    <label class="admin-radio"><input type="radio" name="video_mode" value="youtube"> Заменить: ссылка YouTube</label>
+    <input type="text" name="video_youtube_url" placeholder="https://youtube.com/watch?v=...">
+    <p class="muted" style="margin:0;">На YouTube-плеере всегда останется кликабельное название/лого — для полного отсутствия ссылок на YouTube используйте загрузку файла.</p>
+    {% endif %}
+
+    <button type="submit" class="btn btn-primary">Сохранить</button>
+  </form>
+  {% if not is_copy %}
+  <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/delete_content" style="display:inline"
+        onsubmit="return confirm('Удалить конспект этого урока? Тест не затронет.');">
+    <button type="submit" class="btn-small btn-danger">Удалить конспект</button>
+  </form>
+  {% endif %}
+
+  {% if lesson_images %}
+  <h3>📷 Страницы конспекта ({{ lesson_images|length }})</h3>
+  <p class="muted">Страницы с меткой «в Telegram» не занимают место на сервере —
+     здесь хранится только привязка к уроку и порядок. Добавлять и заменять
+     их удобнее прямо в боте: команда <code>/conspects</code>.</p>
+  <div class="admin-images-grid">
+    {% for img in lesson_images %}
+    <div class="admin-image-item">
+      {% if img.storage == 'telegram' %}
+        <img src="/uploads/tg/{{ img.id }}" alt="стр. {{ img.sort_order }}" loading="lazy">
+        <span class="tag tag-free">в Telegram</span>
+      {% else %}
+        <img src="{{ img.image_path }}" alt="" loading="lazy">
+      {% endif %}
+      <form method="post" action="/admin/learn/images/{{ img.id }}/delete"
+            onsubmit="return confirm('Удалить это фото?');">
+        <button type="submit" class="btn-small btn-danger">✕</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if lesson.is_paid %}
+  <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/access/grant" class="admin-form admin-inline">
+    <input type="text" name="user_tg_id" placeholder="Telegram ID ученика" required>
+    <button type="submit" class="btn-small">Выдать доступ к этому уроку</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>📑 Кто открывал этот конспект</h2>
+  {% if note_views %}
+    <p>Всего открытий: <strong>{{ note_views_total }}</strong>.
+       Последним открыл <strong>{{ note_views[0].full_name }}</strong>
+       ({{ note_views[0].when_shown }}).</p>
+    <div class="table-scroll">
+      <table class="log-table">
+        <thead><tr><th>Когда</th><th>Кто</th><th>Telegram</th><th>Телефон</th><th>Доступ</th></tr></thead>
+        <tbody>
+          {% for r in note_views %}
+          <tr>
+            <td class="nowrap">{{ r.when_shown }}</td>
+            <td>{{ r.full_name }}</td>
+            <td>ID {{ r.tg_id }}{% if r.username_shown %}<br>@{{ r.username_shown }}{% endif %}</td>
+            <td>{{ r.phone_shown or '—' }}</td>
+            <td>{{ r.access_shown }}{% if r.since_shown %}<br><span class="muted">с {{ r.since_shown }}</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <a class="btn-small" href="/admin/learn/notes-log?lesson={{ lesson.id }}">Вся история этого конспекта</a>
+  {% else %}
+    <p class="muted">Этот конспект ещё никто не открывал.</p>
+  {% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>Тест</h2>
+  {% if is_copy %}
+    {% if test %}
+      <p>Тест оригинала: <strong>{{ test.questions_count }}</strong> вопрос(ов)
+         · <a href="/admin/learn/tests/{{ test.id }}/results">📊 Результаты учеников</a></p>
+      <p class="muted">Ученик проходит его прямо отсюда, а результат засчитывается
+         и в оригинале — тест физически один.</p>
+    {% else %}
+      <p class="muted">У оригинала теста нет.</p>
+    {% endif %}
+  {% elif test %}
+    <p>Вопросов: <strong>{{ test.questions_count }}</strong>
+       · <a href="/admin/learn/tests/{{ test.id }}/results">📊 Результаты учеников (баллы, попытки, время)</a></p>
+
+    <form method="post" action="/admin/learn/tests/{{ test.id }}/settings" class="admin-form">
+      <input type="hidden" name="lesson_id" value="{{ lesson.id }}">
+      <label class="admin-checkbox"><input type="checkbox" name="show_correct" {% if test.show_correct %}checked{% endif %}> Показывать правильный/неправильный ответ во время теста</label>
+      <label class="admin-checkbox"><input type="checkbox" name="show_results" {% if test.show_results %}checked{% endif %}> Показывать результат после теста</label>
+      <label>Лимит попыток (0 = без ограничений)</label>
+      <input type="number" name="attempts_limit" value="{{ test.attempts_limit or 0 }}" min="0">
+      <label>Время на вопрос, секунд (0 = без таймера)</label>
+      <input type="number" name="time_per_question" value="{{ test.time_per_question or 0 }}" min="0">
+      <label class="admin-checkbox"><input type="checkbox" name="shuffle_questions" {% if test.shuffle_questions %}checked{% endif %}> Перемешивать порядок вопросов</label>
+      <label class="admin-checkbox"><input type="checkbox" name="allow_retry_wrong" {% if test.allow_retry_wrong %}checked{% endif %}>
+        🔁 Разрешить работу над ошибками — после теста ученик сможет прогнать
+        заново только те вопросы, где ошибся (попытка не тратится)</label>
+      <button type="submit" class="btn-small">Сохранить настройки теста</button>
+    </form>
+
+    <p class="admin-hint">👇 Ошибку в вопросе можно исправить точечно — не удаляя весь тест.</p>
+    <a class="btn-small" href="/admin/learn/tests/{{ test.id }}/questions?lesson_id={{ lesson.id }}">
+      ✏️ Редактировать вопросы ({{ test.questions_count or 0 }})</a>
+
+    <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/delete_test" style="display:inline; margin-top:10px;"
+          onsubmit="return confirm('Удалить тест этого урока полностью (все вопросы)?');">
+      <button type="submit" class="btn-small btn-danger">Удалить тест</button>
+    </form>
+
+    <details class="admin-details">
+      <summary>Заменить тест новым файлом/текстом</summary>
+      <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/test/replace"
+            enctype="multipart/form-data" class="admin-form" data-progress-upload>
+        <label class="admin-radio"><input type="radio" name="test_mode" value="text" checked> Вставить текстом</label>
+        <textarea name="test_text" placeholder="Текст вопроса&#10;A) вариант&#10;B) вариант *&#10;C) вариант&#10;D) вариант"></textarea>
+        <label class="admin-radio"><input type="radio" name="test_mode" value="zip"> Загрузить ZIP</label>
+        <input type="file" name="test_zip" accept=".zip">
+        <label class="admin-radio"><input type="radio" name="test_mode" value="file"> Загрузить файл (.txt / .pdf)</label>
+        <input type="file" name="test_file" accept=".txt,.pdf">
+        <p class="muted" style="margin:0;">Старый тест будет удалён только после подтверждения нового на странице предпросмотра.</p>
+        <button type="submit" class="btn btn-primary">Далее</button>
+      </form>
+    </details>
+  {% else %}
+    <p class="muted">Теста пока нет.</p>
+    <details class="admin-details" open>
+      <summary>Добавить тест</summary>
+      <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/test/replace"
+            enctype="multipart/form-data" class="admin-form" data-progress-upload>
+        <label class="admin-radio"><input type="radio" name="test_mode" value="text" checked> Вставить текстом</label>
+        <textarea name="test_text" placeholder="Текст вопроса&#10;A) вариант&#10;B) вариант *&#10;C) вариант&#10;D) вариант"></textarea>
+        <label class="admin-radio"><input type="radio" name="test_mode" value="zip"> Загрузить ZIP</label>
+        <input type="file" name="test_zip" accept=".zip">
+        <label class="admin-radio"><input type="radio" name="test_mode" value="file"> Загрузить файл (.txt / .pdf)</label>
+        <input type="file" name="test_file" accept=".txt,.pdf">
+        <button type="submit" class="btn btn-primary">Далее</button>
+      </form>
+    </details>
+  {% endif %}
+</section>
+
+<form method="post" action="/admin/learn/lessons/{{ lesson.id }}/delete"
+      onsubmit="return confirm('Удалить урок «{{ lesson.title }}» целиком (конспект + тест)? Это необратимо.');">
+  <input type="hidden" name="next" value="{{ back_url }}">
+  <button type="submit" class="btn-small btn-danger">Удалить урок целиком</button>
+</form>
+
+{% endblock %}

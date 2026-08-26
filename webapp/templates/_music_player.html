@@ -1,0 +1,221 @@
+{# Фоновая музыка на время теста.
+
+   Виджет намеренно вынесен из блоков, которые перерисовываются при смене
+   вопроса: аудио-элемент живёт всё время, пока открыта страница, поэтому
+   трек продолжается с той же секунды, а не начинается заново.
+
+   Подключается и в обычный тест, и в Live-тест. Если админ не включил
+   музыку или не загрузил треки — виджет молча не появляется. #}
+<div id="music-box" class="music-box" hidden>
+  <button type="button" id="music-toggle" class="music-btn music-main"
+          title="Музыка" aria-label="Включить или выключить музыку">🎵</button>
+  <div class="music-panel" id="music-panel" hidden>
+    <div class="music-title" id="music-title">—</div>
+    <div class="music-row">
+      <button type="button" class="music-btn" id="music-play"
+              title="Пауза / продолжить">⏸</button>
+      <button type="button" class="music-btn" id="music-next"
+              title="Следующий трек">⏭</button>
+      <button type="button" class="music-btn" id="music-mute"
+              title="Выключить звук">🔊</button>
+    </div>
+    <div class="music-row">
+      <button type="button" class="music-btn music-small" id="music-down"
+              title="Тише">➖</button>
+      <input type="range" id="music-vol" min="0" max="100" step="5" value="35"
+             aria-label="Громкость">
+      <button type="button" class="music-btn music-small" id="music-up"
+              title="Громче">➕</button>
+    </div>
+    <div class="music-vol-label" id="music-vol-label">35%</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  // Один плеер на страницу. Повторное подключение виджета ничего не ломает.
+  if (window.__smartMusic) return;
+
+  var box = document.getElementById('music-box');
+  if (!box) return;
+  var panel = document.getElementById('music-panel');
+  var elTitle = document.getElementById('music-title');
+  var btnToggle = document.getElementById('music-toggle');
+  var btnPlay = document.getElementById('music-play');
+  var btnNext = document.getElementById('music-next');
+  var btnMute = document.getElementById('music-mute');
+  var btnUp = document.getElementById('music-up');
+  var btnDown = document.getElementById('music-down');
+  var range = document.getElementById('music-vol');
+  var volLabel = document.getElementById('music-vol-label');
+
+  var audio = new Audio();
+  audio.preload = 'auto';
+  var tracks = [], idx = 0, ready = false;
+
+  // Настройки живут в браузере ученика: в следующий раз звук будет таким же,
+  // как он оставил, и выключенную музыку никто не включит за него.
+  function load(key, def){
+    try { var v = localStorage.getItem(key); return v === null ? def : v; }
+    catch(e){ return def; }
+  }
+  function save(key, val){ try { localStorage.setItem(key, String(val)); } catch(e){} }
+
+  var volume = parseInt(load('sm_music_vol', '35'), 10);
+  if (isNaN(volume) || volume < 0 || volume > 100) volume = 35;
+  var muted = load('sm_music_muted', '0') === '1';
+  var wantPlay = load('sm_music_on', '1') === '1';   // включена ли музыка вообще
+  var paused = false;                                 // пауза в рамках сеанса
+
+  function applyVolume(){
+    audio.volume = volume / 100;
+    audio.muted = muted;
+    range.value = volume;
+    volLabel.textContent = muted ? 'без звука' : volume + '%';
+    btnMute.textContent = (muted || volume === 0) ? '🔇' : '🔊';
+    btnMute.title = (muted || volume === 0) ? 'Включить звук' : 'Выключить звук';
+  }
+
+  function showTitle(){
+    elTitle.textContent = tracks.length ? (tracks[idx] && tracks[idx].title) || '—' : '—';
+  }
+
+  function playCurrent(startOver){
+    if (!tracks.length) return;
+    if (startOver !== false) {
+      audio.src = tracks[idx].url;
+      audio.currentTime = 0;
+    }
+    showTitle();
+    var p = audio.play();
+    if (p && p.catch) p.catch(function(){
+      // Браузер не даёт играть без действия пользователя — подождём касания.
+      armFirstGesture();
+    });
+  }
+
+  function nextTrack(){
+    if (!tracks.length) return;
+    idx = (idx + 1) % tracks.length;   // после последнего — снова первый
+    playCurrent(true);
+  }
+
+  audio.addEventListener('ended', nextTrack);
+  audio.addEventListener('error', function(){
+    // Битый или удалённый файл не должен обрывать плейлист.
+    if (tracks.length > 1) nextTrack();
+  });
+
+  function setMode(on){
+    wantPlay = on;
+    paused = false;
+    save('sm_music_on', on ? 1 : 0);
+    btnToggle.classList.toggle('on', on);
+    btnToggle.textContent = on ? '🎵' : '🔈';
+    if (on) {
+      if (!audio.src) playCurrent(true); else { audio.play().catch(armFirstGesture); }
+    } else {
+      audio.pause();
+    }
+    updatePlayBtn();
+  }
+
+  function updatePlayBtn(){
+    var playing = wantPlay && !paused && !audio.paused;
+    btnPlay.textContent = playing ? '⏸' : '▶️';
+    btnPlay.title = playing ? 'Пауза' : 'Продолжить';
+  }
+
+  // Первое касание страницы — момент, когда браузер разрешает звук.
+  var armed = false;
+  function armFirstGesture(){
+    if (armed) return;
+    armed = true;
+    var go = function(){
+      document.removeEventListener('pointerdown', go, true);
+      document.removeEventListener('keydown', go, true);
+      armed = false;
+      if (wantPlay && !paused) audio.play().catch(function(){});
+      updatePlayBtn();
+    };
+    document.addEventListener('pointerdown', go, true);
+    document.addEventListener('keydown', go, true);
+  }
+
+  // Клик мимо панели закрывает её, чтобы она не висела над вариантами ответа.
+  document.addEventListener('click', function(e){
+    if (panel.hidden) return;
+    if (box.contains(e.target)) return;
+    panel.hidden = true;
+  });
+
+  btnToggle.addEventListener('click', function(){
+    // Короткое нажатие открывает панель, если музыка уже играет.
+    if (panel.hidden && wantPlay) { panel.hidden = false; return; }
+    if (panel.hidden && !wantPlay) { panel.hidden = false; setMode(true); return; }
+    panel.hidden = true;
+  });
+
+  btnPlay.addEventListener('click', function(){
+    if (!wantPlay) { setMode(true); return; }
+    paused = !paused;
+    if (paused) audio.pause(); else audio.play().catch(armFirstGesture);
+    updatePlayBtn();
+  });
+
+  btnNext.addEventListener('click', nextTrack);
+
+  btnMute.addEventListener('click', function(){
+    muted = !muted;
+    save('sm_music_muted', muted ? 1 : 0);
+    applyVolume();
+  });
+
+  function setVolume(v){
+    volume = Math.max(0, Math.min(100, v));
+    if (volume > 0 && muted) { muted = false; save('sm_music_muted', 0); }
+    save('sm_music_vol', volume);
+    applyVolume();
+  }
+  btnUp.addEventListener('click', function(){ setVolume(volume + 10); });
+  btnDown.addEventListener('click', function(){ setVolume(volume - 10); });
+  range.addEventListener('input', function(){ setVolume(parseInt(range.value, 10) || 0); });
+
+  audio.addEventListener('play', updatePlayBtn);
+  audio.addEventListener('pause', updatePlayBtn);
+
+  fetch('/api/music/playlist').then(function(r){ return r.json(); }).then(function(d){
+    if (!d || !d.enabled || !d.tracks || !d.tracks.length) return;   // админ выключил
+    tracks = d.tracks;
+    // Начинаем с разного трека, чтобы у всех не играло одно и то же.
+    idx = Math.floor(Math.random() * tracks.length);
+    ready = true;
+    box.hidden = false;
+    // Кнопка плеера висит в углу — освобождаем под ней место, чтобы она не
+    // накрывала последнюю строку карточки вопроса.
+    document.body.classList.add('has-music');
+    applyVolume();
+    showTitle();
+    btnToggle.classList.toggle('on', wantPlay);
+    btnToggle.textContent = wantPlay ? '🎵' : '🔈';
+    if (wantPlay) playCurrent(true);
+    updatePlayBtn();
+  }).catch(function(){});
+
+  // Музыка останавливается вместе со страницей, чтобы не играть в фоне
+  // после ухода с теста.
+  window.addEventListener('pagehide', function(){ try { audio.pause(); } catch(e){} });
+
+  window.__smartMusic = {
+    isReady: function(){ return ready; },
+    stop: function(){ try { audio.pause(); } catch(e){} },
+    // Состояние плеера — им пользуются автотесты, проверяющие, что музыка
+    // не начинается заново при переходе к следующему вопросу.
+    now: function(){
+      return {track: idx, title: (tracks[idx] || {}).title || null,
+              time: audio.currentTime, playing: !audio.paused,
+              volume: volume, muted: muted, on: wantPlay};
+    }
+  };
+})();
+</script>

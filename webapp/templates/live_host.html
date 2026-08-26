@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}Ведущий Live — Smart ENT{% endblock %}
+{% block content %}
+<div class="live-host">
+  <h1>🎮 {{ test_title }}</h1>
+  <div id="host-root"><p class="muted">Загрузка…</p></div>
+</div>
+
+<script>
+const CODE = "{{ code }}";
+const JOIN_URL = location.origin + '/live/' + CODE;
+let lastRender = null, timerRAF=null, deadline=null, lobbyBuilt=false;
+const root = document.getElementById('host-root');
+const COLORS=['a','b','c','d'], SYM=['▲','◆','●','■'];
+function esc(t){const d=document.createElement('div');d.textContent=t==null?'':t;return d.innerHTML;}
+
+async function act(a, body){ try{ await fetch(`/api/live/${CODE}/host/${a}`,{method:'POST',
+  headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})}); poll(); }catch(_){}}
+
+async function poll(){
+  try{ const r=await fetch(`/api/live/${CODE}/host/state`); render(await r.json()); }catch(_){}
+}
+
+function render(d){
+  if(d.error){ root.innerHTML='<p>Нет доступа</p>'; return; }
+  if(d.auto_advance!==undefined) { autoNow = (d.auto_advance !== false); paintAuto(); }
+
+  // === ЛОББИ: строим один раз, дальше обновляем только динамику (иначе
+  // настройки/details «пропадают» при каждом опросе) ===
+  if(d.status==='lobby'){
+    if(!lobbyBuilt){ buildLobby(d); lobbyBuilt=true; }
+    updatePlayers(d);
+    return;
+  }
+  lobbyBuilt=false;
+
+  const key=d.status+':'+d.q_num;
+  if(d.status==='question'){
+    if(lastRender!=='q'+d.q_num){ lastRender='q'+d.q_num; buildQuestion(d); startTimer(d); }
+    else updateQuestion(d);
+    return;
+  }
+  if(key===lastRender){
+    if(d.status!=='finished') updatePlayers(d);
+    // отсчёт до авто-перехода обновляем на месте, не перестраивая экран
+    if(d.status==='stats' && d.auto_advance && d.next_in!=null){
+      const n=document.getElementById('host-auto-note');
+      if(n) n.textContent = `⏱ Следующее задание откроется само через ${Math.ceil(d.next_in)} с. Кнопка выше — если не хотите ждать.`;
+    }
+    return;
+  }
+  lastRender=key;
+  if(d.status==='stats') buildStats(d);
+  else if(d.status==='finished') buildFinished(d);
+}
+
+function buildLobby(d){
+  root.innerHTML = `
+    <section class="host-lobby">
+      <div class="host-code">Код: <b>${CODE}</b></div>
+      <div class="host-join">Ссылка: <a href="${JOIN_URL}">${JOIN_URL}</a></div>
+      <img class="host-qr" alt="QR" src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(JOIN_URL)}">
+      <details class="host-settings">
+        <summary>⚙️ Настройки</summary>
+        <label>Режим:
+          <select id="set-mode">
+            <option value="competitive">Соревновательный (баллы за скорость)</option>
+            <option value="study">Учебный (1 балл за верный)</option>
+          </select></label>
+        <label>Время на вопрос, сек:
+          <input id="set-time" type="number" min="5" max="300" value="${d.time_per_question||20}"></label>
+        <label>Рейтинг:
+          <select id="set-vis">
+            <option value="full">Полный</option><option value="top5">Только топ-5</option>
+            <option value="self">Только своё место</option><option value="hidden">Скрыть до конца</option>
+          </select></label>
+        <label class="host-auto">
+          <input type="checkbox" id="set-auto">
+          Автоматический переход к следующему заданию
+        </label>
+        <p class="muted host-auto-hint">
+          Включено — когда время задания выходит, система сама показывает
+          ответы и через несколько секунд открывает следующий вопрос всем
+          сразу. Нажимать ничего не нужно.<br>
+          Выключено — после конца времени ответы больше не принимаются, и все
+          ждут, пока вы нажмёте «Следующий вопрос».
+        </p>
+        <button class="btn-small" id="set-save">💾 Сохранить настройки</button>
+        <button class="btn-small" id="set-lock">🔒 Заблокировать вход</button>
+        <span id="set-saved" class="muted"></span>
+      </details>
+      <div id="host-players-box"></div>
+      <button class="btn btn-primary host-big" id="host-start">▶️ Начать тест</button>
+    </section>`;
+  document.getElementById('set-mode').value=d.mode||'competitive';
+  document.getElementById('set-vis').value=d.rating_visibility||'full';
+  document.getElementById('set-auto').checked = (d.auto_advance !== false);
+  document.getElementById('set-save').onclick=async function(){
+    await fetch(`/api/live/${CODE}/host/settings`,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mode:document.getElementById('set-mode').value,
+        rating_visibility:document.getElementById('set-vis').value,
+        time_per_question:parseInt(document.getElementById('set-time').value)||20,
+        auto_advance:document.getElementById('set-auto').checked})});
+    const s=document.getElementById('set-saved'); s.textContent='✓ сохранено'; setTimeout(()=>s.textContent='',1500);
+  };
+  document.getElementById('set-lock').onclick=function(){ act('lock'); };
+  document.getElementById('host-start').onclick=function(){ act('start'); };
+}
+let autoNow = true;
+function toggleAuto(){
+  autoNow = !autoNow;
+  paintAuto();
+  fetch(`/api/live/${CODE}/host/settings`,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({auto_advance:autoNow})});
+}
+function paintAuto(){
+  const b=document.getElementById('host-auto-btn'); if(!b) return;
+  b.textContent = autoNow ? '🔁 Авто-переход: вкл' : '✋ Авто-переход: выкл';
+  b.title = autoNow ? 'Следующее задание открывается само после конца времени'
+                    : 'Следующее задание открываете вы кнопкой';
+}
+
+function updatePlayers(d){
+  const box=document.getElementById('host-players-box'); if(!box) return;
+  box.innerHTML = `<div class="host-players"><b>Игроки: ${d.player_count} (онлайн ${d.online})</b>
+    <div class="host-plist">${(d.players||[]).map(p=>`<span class="host-pchip ${p.online?'':'off'}">${esc(p.name)} · ${p.score}б
+    <button class="host-kick" data-kick="${p.tg_id}" title="исключить">✕</button></span>`).join('')}</div></div>`;
+  box.querySelectorAll('[data-kick]').forEach(b=>b.onclick=function(){ act('kick',{tg_id:parseInt(b.getAttribute('data-kick'))}); });
+}
+
+function buildQuestion(d){
+  root.innerHTML = `
+    <div class="host-qhead"><span>Вопрос ${d.q_num}/${d.q_total}</span><span class="host-timer" id="host-tsec"></span></div>
+    <div class="host-qtext">${esc(d.question_text)}</div>
+    <div class="host-answered">Ответили: <b id="host-acount">${d.answered_count}</b> из ${d.player_count}</div>
+    <div class="host-optlist" id="host-optlist"></div>
+    <div class="host-controls">
+      <button class="btn btn-primary" onclick="act('skip')">⏭ Завершить вопрос (Skip)</button>
+      <button class="btn" onclick="act('finish')">⏹ Завершить тест</button>
+      <button class="btn" id="host-auto-btn" onclick="toggleAuto()"></button>
+    </div>`;
+  renderOpts(d);
+}
+function updateQuestion(d){
+  const a=document.getElementById('host-acount'); if(a) a.textContent=d.answered_count;
+  renderOpts(d);
+}
+function renderOpts(d){
+  const box=document.getElementById('host-optlist'); if(!box) return;
+  // Показываем ТЕКСТ вариантов + число выбравших (правильный ведущему не выделяем во время вопроса)
+  box.innerHTML=(d.live_counts||[]).map((o,i)=>`
+    <div class="host-optrow live-${COLORS[i%4]}">
+      <span class="live-sym">${SYM[i%4]}</span>
+      <span class="host-opttext">${esc(o.text)}</span>
+      <span class="host-optcount">${o.count} · ${o.percent}%</span>
+    </div>`).join('');
+}
+function buildStats(d){
+  const s=d.stats||{options:[]};
+  root.innerHTML = `
+    <div class="host-qhead"><span>Итог вопроса ${d.q_num}/${d.q_total}</span></div>
+    <div class="host-qtext">${esc(d.question_text)}</div>
+    <div class="live-statlist">${s.options.map((o,i)=>`
+      <div class="live-statrow live-${COLORS[i%4]} ${o.is_correct?'correct':''}">
+        <span class="live-sym">${SYM[i%4]}</span>
+        <span class="live-stattext">${esc(o.text)} ${o.is_correct?'✔':''}</span>
+        <span class="live-statpct">${o.percent}% · ${o.count}</span>
+        <div class="live-statfill" style="width:${o.percent}%"></div>
+      </div>`).join('')}</div>
+    <p class="muted">Не ответили: ${s.not_answered} · Ответили: ${s.answered}/${s.total_players}</p>
+    <div class="host-controls">
+      <button class="btn btn-primary host-big" onclick="act('next')">${d.q_num>=d.q_total?'🏁 Показать итоги':'➡️ Следующий вопрос'}</button>
+      ${d.auto_advance
+        ? `<p class="muted host-auto-note" id="host-auto-note">⏱ Следующее задание откроется само${d.next_in!=null?` через ${Math.ceil(d.next_in)} с`:''}. Кнопка выше — если не хотите ждать.</p>`
+        : `<p class="muted host-auto-note">⏸ Авто-переход выключен: участники ждут вашей кнопки.</p>`}
+    </div>
+    <div id="host-players-box"></div>`;
+  updatePlayers(d);
+}
+function buildFinished(d){
+  const pod=d.podium||[]; const medal=['🥇','🥈','🥉','🏅','🏅'];
+  root.innerHTML = `<h2>🏆 Итоги</h2>
+    <div class="live-podium">${pod.map((p,i)=>`
+      <div class="live-pod live-pod-${i+1}"><div class="live-pod-medal">${medal[i]}</div>
+      <div class="live-pod-name">${esc(p.name)}</div><div class="live-pod-score">${p.score} б.</div></div>`).join('')}</div>
+    <a class="btn btn-primary" href="/admin/live">Новый Live-тест</a>`;
+}
+function startTimer(d){
+  deadline=Date.now()+(d.remaining||d.time_total||20)*1000;
+  function tick(){ const left=Math.max(0,deadline-Date.now());
+    const s=document.getElementById('host-tsec'); if(s) s.textContent=Math.ceil(left/1000)+'с';
+    if(left>0) timerRAF=requestAnimationFrame(tick);}
+  cancelAnimationFrame(timerRAF); tick();
+}
+poll(); setInterval(poll, 1200);
+</script>
+{% endblock %}
