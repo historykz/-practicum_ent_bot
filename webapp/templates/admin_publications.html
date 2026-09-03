@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Публикации тестов — Smart ENT{% endblock %}
+{% block page_title %}Публикации{% endblock %}
+{% block content %}
+
+<h1>📣 Публикации теста на канал</h1>
+<p class="muted">
+  Здесь живёт ручной выбор вопросов. Случайная публикация никуда не делась —
+  она по-прежнему в боте: «Авто-публикация → 🎲 случайных вопросов на канал».
+</p>
+
+{% if msg %}<div class="alert alert-ok">{{ msg }}</div>{% endif %}
+
+<p><a class="btn btn-primary" href="/admin/publications/new">➕ Новая подборка</a></p>
+
+<section class="progress-card">
+  <h2>📝 Черновики{% if drafts %} — {{ drafts|length }}{% endif %}</h2>
+  {% if not drafts %}
+    <p class="muted">Пока пусто. Соберите подборку и сохраните её черновиком —
+       опубликуете, когда будет удобно.</p>
+  {% else %}
+    {% for p in drafts %}
+    <div class="pub-row">
+      <div>
+        <b>Публикация №{{ p.id }}</b>{% if p.title %} — {{ p.title }}{% endif %}<br>
+        <span class="muted">
+          {% if p.subject_title %}{{ p.subject_title }} → {% endif %}
+          {% if p.section_title %}{{ p.section_title }} → {% endif %}
+          {{ p.lesson_title or p.test_title }} ·
+          вопросов: <b>{{ p.count }}</b> · создан {{ p.created_at[:16] }}
+        </span>
+      </div>
+      <div class="pub-row-actions">
+        <a class="btn" href="/admin/publications/{{ p.id }}">👁 Открыть</a>
+        <a class="btn" href="/admin/publications/pick/{{ p.test_id }}?pub={{ p.id }}{% if p.lesson_id %}&lesson={{ p.lesson_id }}{% endif %}">✏️ Изменить</a>
+        <form method="post" action="/admin/publications/{{ p.id }}/delete"
+              onsubmit="return confirm('Удалить черновик №{{ p.id }}?');" style="display:inline;">
+          <button class="btn btn-danger" type="submit">🗑</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  {% endif %}
+</section>
+
+<section class="progress-card">
+  <h2>✅ Опубликованные{% if published %} — {{ published|length }}{% endif %}</h2>
+  {% if not published %}
+    <p class="muted">Ещё ничего не отправляли в канал.</p>
+  {% else %}
+    {% for p in published %}
+    <div class="pub-row">
+      <div>
+        <b>Публикация №{{ p.id }}</b>{% if p.title %} — {{ p.title }}{% endif %}<br>
+        <span class="muted">
+          {% if p.subject_title %}{{ p.subject_title }} → {% endif %}
+          {{ p.lesson_title or p.test_title }} ·
+          вопросов: <b>{{ p.count }}</b> ·
+          опубликован {{ (p.published_at or '')[:16] }}
+        </span>
+      </div>
+      <div class="pub-row-actions">
+        <a class="btn" href="/admin/publications/{{ p.id }}">👁 Открыть</a>
+        <form method="post" action="/admin/publications/{{ p.id }}/copy" style="display:inline;">
+          <button class="btn" type="submit">📄 Создать копию</button>
+        </form>
+        <form method="post" action="/admin/publications/{{ p.id }}/delete"
+              onsubmit="return confirm('Удалить запись о публикации №{{ p.id }}? Пост в канале останется.');"
+              style="display:inline;">
+          <button class="btn btn-danger" type="submit">🗑</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  {% endif %}
+</section>
+
+<p><a href="/admin/learn">⬅️ Назад в админку</a></p>
+{% endblock %}

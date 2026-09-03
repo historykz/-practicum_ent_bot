@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>{% block title %}Smart ENT — подготовка к ЕНТ{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+<script>
+(function() {
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg) return;
+
+  // Скрипт Telegram определяет window.Telegram.WebApp на ЛЮБОМ сайте, даже
+  // в обычном Safari. Раньше мы по одному его наличию включали режим
+  // мини-приложения — и десктопный сайт получал мобильную панель снизу.
+  // Настоящий признак: пришли подписанные данные или известна платформа.
+  var platform = "";
+  try { platform = tg.platform || ""; } catch (_) {}
+  var insideTelegram = !!(tg.initData || (platform && platform !== "unknown"));
+  if (!insideTelegram) return;          // обычный браузер — ничего не трогаем
+
+  tg.ready();
+  try { tg.expand(); } catch (_) {}
+  // На клиентах с Bot API 8+ разворачиваем на весь экран, иначе остаётся
+  // половинчатое окно, из-за которого приложение выглядит обрезанным.
+  try { if (tg.requestFullscreen) tg.requestFullscreen(); } catch (_) {}
+  try { if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (_) {}
+  document.documentElement.classList.add('in-miniapp');
+
+  // Куда звала ссылка из канала: ?startapp=subj_12 / lesson_34.
+  // ВАЖНО: прыгаем туда ровно один раз — при первом открытии приложения.
+  // Telegram отдаёт start_param на КАЖДОЙ странице, и без этой отметки любой
+  // переход внутрь (например, в раздел предмета) тут же отбрасывало обратно
+  // на стартовый экран. Метку держим в window.name: она переживает
+  // перезагрузку вкладки и не зависит от политики хранилищ.
+  function gotoStartParam() {
+    var p = '';
+    try { p = (tg.initDataUnsafe && tg.initDataUnsafe.start_param) || ''; } catch (_) {}
+    if (!p) return;
+    var mark = 'startapp:' + p;
+    if (window.name && window.name.indexOf(mark) >= 0) return;   // уже прыгали
+    window.name = (window.name || '') + '|' + mark;
+    var target = '';
+    var m = /^subj_(\d+)$/.exec(p);
+    if (m) target = '/learn/' + m[1];
+    if (!target) { m = /^lesson_(\d+)$/.exec(p); if (m) target = '/learn/lesson/' + m[1]; }
+    // Кнопка «ВЫПОЛНИТЬ ДЗ» из бота ведёт сразу в тест урока
+    if (!target) { m = /^test_(\d+)$/.exec(p); if (m) target = '/learn/lesson/' + m[1] + '/test'; }
+    // Подборка вопросов из канала: ?startapp=pub_936
+    if (!target) { m = /^pub_(\d+)$/.exec(p); if (m) target = '/pub/' + m[1]; }
+    if (!target || window.location.pathname === target) return;
+    window.location.replace(target);
+  }
+
+  var loggedIn = {{ 'true' if logged_in else 'false' }};
+  if (loggedIn) { gotoStartParam(); return; }
+  if (!tg.initData) return;             // подписанных данных нет — входить нечем
+
+  // Признак «мы уже перезагружались» держим в window.name: он переживает
+  // перезагрузку вкладки и не зависит от политики хранилищ.
+  if (window.name === 'smartent_authed') {
+    document.documentElement.classList.remove('app-authing');
+    return;                             // второй заход — больше не обновляемся
+  }
+  document.documentElement.classList.add('app-authing');
+  fetch('/auth/webapp', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({init_data: tg.initData}),
+  }).then(function(r) { return r.json(); }).then(function(res) {
+    if (res && res.ok) {
+      window.name = 'smartent_authed';
+      window.location.reload();
+    } else {
+      document.documentElement.classList.remove('app-authing');
+    }
+  }).catch(function() {
+    document.documentElement.classList.remove('app-authing');
+  });
+})();
+</script>
+<header class="site-header">
+  <div class="container header-inner">
+    <a href="/" class="logo">📘 Smart ENT</a>
+    <nav>
+      {% if logged_in %}
+        {# В мини-приложении подписи короче: ленту навигации листают пальцем,
+           и длинные названия заставляли бы листать её ради каждой кнопки. #}
+        <a href="/learn" class="nav-learn">🎓 <span class="nav-full">Начать </span>обучение</a>
+        {# Админские кнопки идут сразу за обучением: в узкой ленте всё, что
+           дальше третьей позиции, приходится долистывать, а админ заходит
+           именно в них. Ученику этих ссылок не видно. #}
+        {% if is_admin %}
+          <a href="/admin/learn">⚙️ Админка</a>
+          <a href="/admin/live">🎮 Live</a>
+          <a href="/admin/live/history">📜 Отчёты</a>
+        {% endif %}
+        <a href="/cabinet">👤 <span class="nav-full">Личный </span>кабинет</a>
+        {% if has_private_tests %}<a href="/private-tests">🔒 <span class="nav-full">Приватные </span>тесты</a>{% endif %}
+        <a href="/logout">🚪 Выйти</a>
+      {% else %}
+        <a href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">Открыть бота</a>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+
+{# Шапка мини-приложения: только название текущего раздела и кнопка «Назад».
+   Крупные кнопки уехали в нижнее меню — сверху они налезали на системные
+   кнопки Telegram «Закрыть» и «⋯» и обрезались в полноэкранном режиме. #}
+<div class="app-topbar">
+  <div class="container app-topbar-inner">
+    <button type="button" class="app-back" id="app-back" aria-label="Назад" hidden>‹</button>
+    <div class="app-title">{% block page_title %}Smart ENT{% endblock %}</div>
+  </div>
+</div>
+
+{% if watermark_svg %}
+<div class="watermark-overlay" id="watermark-overlay" style="background-image:url('{{ watermark_svg }}');"></div>
+<div id="copy-toast" class="copy-toast"></div>
+<script>
+(function() {
+  var el = document.getElementById('watermark-overlay');
+  if (el) {
+    setInterval(function() {
+      var x = Math.floor(Math.random() * 80);
+      var y = Math.floor(Math.random() * 80);
+      el.style.backgroundPosition = x + 'px ' + y + 'px';
+    }, 4000);
+  }
+
+  var toastEl = document.getElementById('copy-toast');
+  var toastTimer = null;
+  function showToast() {
+    toastEl.textContent = 'Копирование учебных материалов запрещено. Все материалы защищены авторским правом и содержат персональную маркировку пользователя.';
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { toastEl.classList.remove('show'); }, 3500);
+  }
+
+  document.addEventListener('copy', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('cut', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('contextmenu', function(e) { e.preventDefault(); showToast(); });
+  document.addEventListener('keydown', function(e) {
+    var k = e.key.toLowerCase();
+    var mod = e.ctrlKey || e.metaKey;
+    if (mod && (k === 'c' || k === 'x' || k === 's' || k === 'p')) {
+      e.preventDefault();
+      showToast();
+    }
+  });
+})();
+</script>
+{% endif %}
+
+<main class="container">
+  {% block content %}{% endblock %}
+</main>
+
+<div id="upload-progress-overlay" class="upload-progress-overlay">
+  <div class="upload-progress-box">
+    <p id="upload-progress-label">Загрузка… 0%</p>
+    <div class="upload-progress-bar"><div id="upload-progress-fill"></div></div>
+    <p class="muted" style="margin-top:8px;font-size:0.82rem;">Не закрывайте страницу, пока идёт загрузка.</p>
+  </div>
+</div>
+<script>
+(function() {
+  var overlay = document.getElementById('upload-progress-overlay');
+  var label = document.getElementById('upload-progress-label');
+  var fill = document.getElementById('upload-progress-fill');
+
+  document.querySelectorAll('form[data-progress-upload]').forEach(function(form) {
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      var formData = new FormData(form);
+      var xhr = new XMLHttpRequest();
+      xhr.open(form.method || 'POST', form.action, true);
+
+      overlay.classList.add('show');
+      label.textContent = 'Загрузка… 0%';
+      fill.style.width = '0%';
+
+      xhr.upload.addEventListener('progress', function(ev) {
+        if (ev.lengthComputable) {
+          var pct = Math.round((ev.loaded / ev.total) * 100);
+          fill.style.width = pct + '%';
+          label.textContent = 'Загрузка… ' + pct + '% (' +
+            (ev.loaded / 1048576).toFixed(1) + ' из ' + (ev.total / 1048576).toFixed(1) + ' МБ)';
+        }
+      });
+
+      xhr.addEventListener('load', function() {
+        label.textContent = 'Готово, открываем…';
+        fill.style.width = '100%';
+        window.location.href = xhr.responseURL || form.action;
+      });
+
+      xhr.addEventListener('error', function() {
+        overlay.classList.remove('show');
+        alert('Не удалось загрузить файл — проверьте интернет-соединение и размер файла (до 20МБ), затем попробуйте снова.');
+      });
+
+      xhr.send(formData);
+    });
+  });
+})();
+</script>
+
+{# Закреплённое нижнее меню. Пять разделов — больше на телефон не помещается
+   так, чтобы подписи оставались читаемыми. Админка живёт в «Профиле». #}
+<nav class="tabbar" id="tabbar">
+  <a href="/learn" data-tab="learn"><span class="tab-ico">🎓</span><span class="tab-lbl">Обучение</span></a>
+  <a href="/tests" data-tab="tests"><span class="tab-ico">📝</span><span class="tab-lbl">Тесты</span></a>
+  <a href="/premium" data-tab="premium"><span class="tab-ico">💎</span><span class="tab-lbl">Premium</span></a>
+  <a href="/cabinet" data-tab="cabinet"><span class="tab-ico">👤</span><span class="tab-lbl">Профиль</span></a>
+</nav>
+
+<div class="app-authing-veil">
+  <div class="app-spinner"></div>
+  <p>Открываем приложение…</p>
+</div>
+
+<script>
+(function () {
+  // --- Подсветка активного раздела в нижнем меню ---
+  var path = window.location.pathname;
+  var map = [
+    ['/learn', 'learn'], ['/tests', 'tests'], ['/private-tests', 'tests'],
+    ['/premium', 'premium'], ['/cabinet', 'cabinet'], ['/admin', 'cabinet'],
+  ];
+  var active = '';
+  for (var i = 0; i < map.length; i++) {
+    if (path === map[i][0] || path.indexOf(map[i][0] + '/') === 0) { active = map[i][1]; break; }
+  }
+  var bar = document.getElementById('tabbar');
+  if (bar && active) {
+    var a = bar.querySelector('[data-tab="' + active + '"]');
+    if (a) a.classList.add('is-active');
+  }
+
+  // --- Кнопка «Назад» сверху: только там, где есть куда вернуться ---
+  var back = document.getElementById('app-back');
+  if (back) {
+    var crumb = document.querySelector('.crumbs a:last-of-type, .btn-back');
+    var upHref = crumb ? crumb.getAttribute('href') : null;
+    var isRoot = ['/learn', '/cards', '/tests', '/live', '/cabinet', '/'].indexOf(path) >= 0;
+    if (!isRoot) {
+      back.hidden = false;
+      back.addEventListener('click', function () {
+        if (upHref) { navigateTo(upHref, 'back'); }
+        else if (history.length > 1) { history.back(); }
+        else { navigateTo('/learn', 'back'); }
+      });
+    }
+  }
+
+  // --- Плавные переходы между страницами ---
+  // Раньше здесь стоял флаг leaving, который выставлялся при первом клике и
+  // больше НИКОГДА не сбрасывался: после одного перехода все ссылки на
+  // странице умирали, и приходилось обновлять сайт. Плюс переход ждал 140 мс,
+  // из-за чего интерфейс казался тормозящим. Теперь уходим сразу, а флаг
+  // держим ровно на время самого перехода и снимаем при возврате.
+  var leaving = false;
+  function releaseNav() { leaving = false; document.body.classList.remove(
+    'page-leave-fwd', 'page-leave-back'); }
+  window.addEventListener('pageshow', releaseNav);        // возврат «назад»
+  window.addEventListener('popstate', releaseNav);
+
+  function navigateTo(href, dir) {
+    if (leaving) return;
+    leaving = true;
+    setTimeout(releaseNav, 2500);        // страница не сменилась — вернём клики
+    sessionStorage.setItem('nav_dir', dir || 'fwd');
+    document.body.classList.add(dir === 'back' ? 'page-leave-back' : 'page-leave-fwd');
+    window.location.href = href;         // без задержки: любая пауза ощущается лагом
+  }
+  window.navigateTo = navigateTo;
+
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented || e.button) return;
+    var a = e.target.closest ? e.target.closest('a') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (!href || href.charAt(0) !== '/' || a.target === '_blank') return;
+    if (a.hasAttribute('download') || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (href === window.location.pathname + window.location.search) return;  // тот же адрес
+    e.preventDefault();
+    var dir = a.classList.contains('btn-back') || a.closest('.crumbs') ? 'back' : 'fwd';
+    if (a.closest('#tabbar')) dir = 'tab';
+    navigateTo(href, dir);
+  });
+
+  // Появление страницы — в ту же сторону, что и уход
+  var dir = sessionStorage.getItem('nav_dir') || '';
+  document.body.classList.add(
+    dir === 'back' ? 'page-enter-back' : (dir === 'tab' ? 'page-enter-tab' : 'page-enter-fwd'));
+  sessionStorage.removeItem('nav_dir');
+
+  // --- Отклик на нажатие: кнопка чуть уменьшается, повторные клики гасятся ---
+  // Отклик на нажатие. Раньше кнопка на 600 мс помечалась «занята» — из-за
+  // этого частые нажатия выглядели как зависание. Теперь это только анимация,
+  // клики она не глотает.
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('.btn, .btn-mini, .btn-small') : null;
+    if (!b) return;
+    b.classList.add('is-pressed');
+    setTimeout(function () { b.classList.remove('is-pressed'); }, 180);
+  }, true);
+
+  // --- Форма отправляется один раз ---
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (f.dataset.sent) { e.preventDefault(); return; }
+    f.dataset.sent = '1';
+    var b = f.querySelector('button[type=submit], button:not([type])');
+    if (b) { b.classList.add('is-loading'); }
+    setTimeout(function () { delete f.dataset.sent; if (b) b.classList.remove('is-loading'); }, 4000);
+  }, true);
+})();
+</script>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>Smart ENT — онлайн-школа подготовки к ЕНТ. Бот: <a href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">@{{ bot_username }}</a></p>
+  </div>
+</footer>
+</body>
+</html>
