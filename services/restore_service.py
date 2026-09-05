@@ -517,7 +517,10 @@ def restore_from_zip(zip_path: str, admin_tg_id: int, session_id=None,
 
     progress(percent, stage) — необязательный колбэк для показа этапов.
     """
+    current = {"stage": ""}
+
     def step(pct, stage):
+        current["stage"] = stage
         if progress:
             try:
                 progress(pct, stage)
@@ -590,14 +593,19 @@ def restore_from_zip(zip_path: str, admin_tg_id: int, session_id=None,
         except Exception as e:
             log.warning("init_db после восстановления: %s", e)
 
+        step(90, "Проверяю целостность восстановленной базы")
+        verdict = db.integrity_check()
+        if verdict != "ok":
+            raise RuntimeError(f"база после восстановления не прошла проверку: {verdict}")
+
         step(95, "Считаю, что получилось")
         report["restored"] = current_counts()
         report["ok"] = True
         log_event(admin_tg_id, session_id, "restore", "ok",
                   f"пропущено файлов: {skipped}")
     except Exception as e:
-        log.exception("restore: %s", e)
-        report["error"] = str(e)
+        log.exception("restore (этап «%s»): %s", current["stage"], e)
+        report["error"] = f"{e} (этап: {current['stage'].lower()})"
         # Откат: возвращаем снимок, сделанный перед восстановлением
         if safety and os.path.exists(safety):
             try:
