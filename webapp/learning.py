@@ -2934,19 +2934,44 @@ def _restore_backup_sync(zip_path: str) -> str:
         if skipped:
             logger.warning("Восстановление: пропущено битых файлов uploads: %s", skipped)
 
-    # Быстрая атомарная замена файла БД (не поблочный backup под локом —
-    # именно из-за него все запросы висли и прокси отдавал 502).
-    db.replace_database(os.path.join(tmp, "bot.db"))
-    # Восстановленная база может быть СТАРОЙ схемы (сделана до появления новых
-    # таблиц/колонок) — прогоняем миграции, иначе сайт отдаёт 500.
+    # Снимок текущего состояния — чтобы было куда откатиться
+    safety = os.path.join(tmp, "before_restore.db")
     try:
-        db.init_db()
+        db.snapshot_to(safety)
     except Exception as e:
-        logger.warning("init_db после восстановления: %s", e)
+        logger.warning("снимок перед восстановлением: %s", e)
+        safety = ""
     try:
-        os.remove(os.path.join(tmp, "bot.db"))
-    except OSError:
-        pass
+        # Атомарная подмена файла БД (replace_database сама проверяет файл до
+        # и после подмены и не даёт живым соединениям испортить новую базу).
+        db.replace_database(os.path.join(tmp, "bot.db"))
+        # Восстановленная база может быть СТАРОЙ схемы (сделана до появления
+        # новых таблиц/колонок) — прогоняем миграции, иначе сайт отдаёт 500.
+        try:
+            db.init_db()
+        except Exception as e:
+            logger.warning("init_db после восстановления: %s", e)
+        verdict = db.integrity_check()
+        if verdict != "ok":
+            raise RuntimeError(f"база после восстановления не прошла проверку: {verdict}")
+    except Exception as e:
+        logger.exception("восстановление с сайта: %s", e)
+        if safety and os.path.exists(safety):
+            try:
+                db.replace_database(safety)
+                db.init_db()
+            except Exception as e2:
+                logger.exception("откат: %s", e2)
+                return (f"Восстановление не удалось: {e}. Откат тоже не сработал: {e2}. "
+                        f"Снимок прежнего состояния: {safety}")
+            return f"Восстановление не удалось: {e}. База возвращена в прежнее состояние."
+        return f"Восстановление не удалось: {e}"
+    for leftover in (os.path.join(tmp, "bot.db"), safety):
+        try:
+            if leftover:
+                os.remove(leftover)
+        except OSError:
+            pass
     try:
         os.remove(zip_path)
     except OSError:
