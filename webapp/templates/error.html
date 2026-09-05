@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — Smart ENT{% endblock %}
+{% block page_title %}Ошибка{% endblock %}
+{% block content %}
+{# Страница, которую видит человек вместо сырого «500 Internal Server Error».
+   Код запроса внизу — по нему в логах находится именно эта ошибка. #}
+<section class="err-card">
+  <div class="err-emoji">{% if status == 503 %}⏳{% else %}😕{% endif %}</div>
+  <h1>{{ title }}</h1>
+  <p class="muted">{{ hint }}</p>
+  <div class="err-actions">
+    <a class="btn btn-primary" href="javascript:location.reload()">🔄 Обновить страницу</a>
+    <a class="btn" href="/learn">🎓 К обучению</a>
+  </div>
+  <p class="err-code">Код ошибки: <code>{{ request_id }}</code>
+     <span class="muted">· если повторится, пришлите этот код в поддержку</span></p>
+</section>
+{% endblock %}
