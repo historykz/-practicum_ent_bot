@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}{{ subject.title }} — Smart ENT{% endblock %}
+{% block page_title %}{{ subject.title }}{% endblock %}
+{% block content %}
+
+<p class="crumbs"><a href="/learn">← Все предметы</a></p>
+<h1>{{ subject.title }}</h1>
+{% if subject.description %}<p class="muted">{{ subject.description }}</p>{% endif %}
+
+{# Игровая часть предмета: баллы, место, прогресс, серия, мотивация.
+   Показывается только тому, кому предмет реально открыт (Премиум или
+   выданный доступ). Остальные её не видят вовсе — пустых карточек нет. #}
+{% if game %}
+<section class="progress-card">
+  <div class="rank-row">
+    <span class="rank-icon">{{ rank.icon }}</span>
+    <div class="rank-text">
+      <b>{{ rank.title }}</b>
+      <span class="muted">пройдено {{ game.lessons_done }} из {{ game.lessons_total }} уроков · {{ game.percent }}%</span>
+    </div>
+  </div>
+  <div class="pbar"><div class="pbar-fill" style="width:{{ game.percent }}%"></div></div>
+
+  <div class="game-grid">
+    <div class="game-box">
+      <div class="game-value">⭐ {{ game.points }}</div>
+      <div class="game-label">Баллы по предмету</div>
+    </div>
+    <div class="game-box">
+      <div class="game-value">{% if game.place %}🏆 {{ game.place }}{% else %}🏆 —{% endif %}</div>
+      <div class="game-label">{% if game.place %}место из {{ game.total_students }}{% else %}рейтинг предмета{% endif %}</div>
+    </div>
+    <div class="game-box">
+      <div class="game-value">⏳ {{ game.lessons_left }}</div>
+      <div class="game-label">уроков осталось</div>
+    </div>
+    <div class="game-box">
+      <div class="game-value">🔥 {{ game.streak }}</div>
+      <div class="game-label">дней занятий подряд</div>
+    </div>
+  </div>
+
+  {% if rank.next_title and rank.need %}
+    <p class="muted rank-next">До ранга «{{ rank.next_icon }} {{ rank.next_title }}»
+       осталось пройти <b>{{ rank.need }}</b> урок(а/ов).</p>
+  {% elif game.percent == 100 %}
+    <p class="muted rank-next">🎉 Предмет пройден полностью. Отличная работа!</p>
+  {% endif %}
+
+  {% if game.motivation %}
+  <p class="game-motivation">{{ game.motivation }}</p>
+  {% endif %}
+
+  <p class="muted game-ach">🏅 Достижения: <b>{{ game.achievements_earned }}</b> из {{ game.achievements_total }}
+     · 🆓 бесплатных уроков: <b>{{ subject_free }}</b> · 💎 по подписке: <b>{{ subject_paid }}</b></p>
+</section>
+{% endif %}
+
+{% if subject.quizlet_url %}
+<div class="quizlet-row">
+  <a class="btn btn-primary quizlet-btn" target="_blank" rel="noopener"
+     href="{{ subject.quizlet_url }}">🃏 Карточки Quizlet по предмету</a>
+</div>
+{% endif %}
+
+<div class="how-to">
+  <b>Что делать дальше</b>
+  <p>Ниже — разделы предмета. <b>Нажмите на любой раздел</b> — внутри откроются его уроки.
+     Начинайте сверху: разделы идут по порядку от простого к сложному.</p>
+</div>
+
+{% if sections %}
+<div class="section-grid">
+  {% for item in sections %}
+  {% set sec = item.section %}
+  <a class="section-tile{% if game and sec.percent == 100 and sec.lessons_total %} is-done{% endif %}"
+     href="/learn/{{ subject.id }}/section/{{ sec.id }}">
+    <div class="section-tile-head">
+      <span class="section-num">{{ loop.index }}</span>
+      <span class="section-title">{{ sec.title }}</span>
+      {% if game and sec.percent == 100 and sec.lessons_total %}<span class="section-check">✅</span>{% endif %}
+    </div>
+
+    {% if sec.lessons_total %}
+      {% if game %}<div class="pbar pbar-sm"><div class="pbar-fill" style="width:{{ sec.percent }}%"></div></div>{% endif %}
+      <div class="section-stats">
+        <span class="stat-chip">📚 Уроков: <b>{{ sec.lessons_total }}</b></span>
+        {% if game %}<span class="stat-chip">✅ Пройдено: <b>{{ sec.done_count }}</b> из {{ sec.lessons_total }}</span>{% endif %}
+        {% if sec.free_count %}<span class="stat-chip chip-free">🆓 Бесплатных: <b>{{ sec.free_count }}</b></span>{% endif %}
+        {% if sec.paid_count %}<span class="stat-chip chip-paid">💎 Платных: <b>{{ sec.paid_count }}</b></span>{% endif %}
+      </div>
+      <span class="section-go">
+        {% if not game %}Открыть →
+        {% elif sec.done_count == 0 %}Начать раздел →
+        {% elif sec.percent == 100 %}Повторить →
+        {% else %}Продолжить →{% endif %}
+      </span>
+    {% else %}
+      <p class="muted">Уроков пока нет.</p>
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<p class="muted">Разделов пока нет.</p>
+{% endif %}
+
+{% endblock %}

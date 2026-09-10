@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Доступ ограничен — Smart ENT{% endblock %}
+{% block content %}
+
+{% if access_state == "need_login" %}
+<section class="login-card">
+  <h2>🔒 Войдите, чтобы открыть режим</h2>
+  <a class="btn btn-primary" href="/cabinet">Войти</a>
+  <a class="btn" href="/register">Создать аккаунт</a>
+</section>
+{% elif access_state == "need_subject_access" %}
+<section class="lesson-test-card">
+  <h2>🔒 Нужен доступ к предмету</h2>
+  <a class="btn btn-primary" href="/learn/lesson/{{ lesson_id }}">Вернуться к уроку</a>
+</section>
+{% elif access_state == "need_premium" %}
+<section class="lesson-test-card" style="text-align:center;">
+  <h2>💎 Карточки и Заучивание — только с Премиумом</h2>
+  <p class="muted">Оформи Премиум в боте — и оба режима откроются без ограничений на всех уроках.</p>
+  <div class="hero-actions" style="margin-top:16px;">
+    <a class="btn btn-primary" href="https://t.me/{{ bot_username }}?start=premium" target="_blank" rel="noopener">💎 Приобрести Премиум</a>
+    <a class="btn btn-primary" href="/learn/lesson/{{ lesson_id }}">Вернуться к уроку</a>
+  </div>
+</section>
+{% else %}
+<section class="lesson-test-card">
+  <h2>💎 Этот урок платный</h2>
+  <a class="btn btn-primary" href="/learn/lesson/{{ lesson_id }}">Вернуться к уроку</a>
+</section>
+{% endif %}
+
+{% endblock %}
