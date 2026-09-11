@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Тесты — Smart ENT{% endblock %}
+{% block page_title %}Тесты{% endblock %}
+{% block content %}
+
+{% if not logged_in %}
+<div class="how-to">
+  <b>Войдите, чтобы проходить тесты</b>
+  <p>Список тестов виден всем, но результаты и разбор ошибок сохраняются
+     только в аккаунте. <a href="/cabinet">Войти или создать аккаунт →</a></p>
+</div>
+{% endif %}
+
+<div class="how-to">
+  <b>Что делать</b>
+  <p>Здесь собраны все тесты, которые вам доступны. <b>Нажмите «Пройти»</b> у нужного урока.
+     Ошибки после теста можно разобрать в разделе «Профиль → Мои ошибки».</p>
+</div>
+
+<div class="hero-actions" style="justify-content:flex-start;margin-bottom:18px;">
+  <a class="btn btn-primary" href="/cabinet/errors/retest">📝 Тест по моим ошибкам</a>
+  <a class="btn" href="/cabinet/errors">❌ Разбор ошибок</a>
+</div>
+
+{% for g in groups %}
+<section class="section-card">
+  <h2>{{ g.subject.title }}</h2>
+  <ul class="lesson-list">
+    {% for l in g.lessons %}
+    <li class="lesson-row {% if l.locked %}is-paid{% else %}is-free{% endif %}">
+      <div class="lesson-row-body">
+        <span class="lesson-row-title">{{ l.title }}</span>
+        <span class="lesson-row-meta">
+          <span class="tag {% if l.locked %}tag-paid{% else %}tag-free{% endif %}">
+            {% if l.locked %}💎 Платный{% else %}{{ l.qcount }} вопрос(ов){% endif %}
+          </span>
+          {% if l.locked %}
+            <a class="btn-mini" href="/learn/lesson/{{ l.id }}">Как открыть →</a>
+          {% else %}
+            <a class="btn-mini btn-mini-primary" href="/learn/lesson/{{ l.id }}/test">Пройти →</a>
+          {% endif %}
+        </span>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<p class="muted">Пока нет доступных тестов. Загляните в «Обучение».</p>
+{% endfor %}
+
+{% endblock %}
