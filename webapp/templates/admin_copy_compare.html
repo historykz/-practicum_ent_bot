@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Сравнение с оригиналом — Smart ENT{% endblock %}
+{% block content %}
+{% set c = cmp %}
+{% set me = c.subject %}
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a>
+  <span>›</span><a href="/admin/learn?subject={{ me.id }}">📘 {{ me.title }}</a>
+  <span>›</span><span class="crumb-current">🔍 Сравнение с оригиналом</span>
+</nav>
+<h1>🔍 Сравнение с оригиналом</h1>
+
+{% if not c.src %}
+<p class="muted">Оригинал этой копии удалён — сравнивать не с чем.</p>
+{% else %}
+<div class="copy-note">
+  📄 «{{ me.title }}» — копия предмета «<a href="/admin/learn?subject={{ c.src.id }}">{{ c.src.title }}</a>»
+  {% if c.info %}· создана {{ c.info.copied_at }}{% if c.info.modified %} · ✏️ изменена {{ c.info.modified_at }}{% endif %}{% endif %}
+  <br><span class="muted">Сравнение только для информации и ничего не меняет. Показаны отличия
+  нынешней копии от нынешнего оригинала — поэтому здесь видны и правки, сделанные в оригинале после копирования.</span>
+</div>
+
+{% if not c.total %}
+<p>✅ Отличий нет: копия совпадает с оригиналом.</p>
+{% else %}
+<p>Отличий: <b>{{ c.total }}</b>{% if c.same_lessons %} · уроков без изменений: {{ c.same_lessons }}{% endif %}</p>
+{% endif %}
+
+{% if c.settings %}
+<section class="admin-card">
+  <h2>⚙️ Цена и настройки</h2>
+  <p class="muted">было в оригинале → стало в копии</p>
+  <ul>
+    {% for r in c.settings %}
+    <li><b>{{ r.label }}:</b> {{ r.orig }} → <b>{{ r.mine }}</b></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% set secs = c.sections %}
+{% if secs.added or secs.removed or secs.changed or secs.reordered %}
+<section class="admin-card">
+  <h2>📂 Разделы</h2>
+  <ul>
+    {% for t in secs.added %}<li>➕ Добавлен раздел «{{ t }}»</li>{% endfor %}
+    {% for t in secs.removed %}<li>➖ Удалён раздел «{{ t }}»</li>{% endfor %}
+    {% for r in secs.changed %}<li>✏️ «{{ r.title }}»: {{ r.changes|join('; ') }}</li>{% endfor %}
+    {% if secs.reordered %}<li>↕️ Изменён порядок разделов</li>{% endif %}
+  </ul>
+</section>
+{% endif %}
+
+{% set les = c.lessons %}
+{% if les.added or les.removed or les.changed or les.reordered %}
+<section class="admin-card">
+  <h2>📚 Уроки</h2>
+  {% if les.changed %}
+  <h3>✏️ Изменены ({{ les.changed|length }})</h3>
+  <ul>
+    {% for r in les.changed %}
+    <li><a href="/admin/learn/lessons/{{ r.id }}/edit">{{ r.title }}</a>{% if r.orig_title != r.title %} <span class="muted">(в оригинале «{{ r.orig_title }}»)</span>{% endif %}:
+      {{ r.changes|join(', ') }}{% if r.test %} <span class="muted">— вопросов добавлено {{ r.test.added }}, удалено {{ r.test.removed }}, изменено {{ r.test.changed }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if les.added %}
+  <h3>➕ Добавлены ({{ les.added|length }})</h3>
+  <ul>
+    {% for r in les.added %}<li><a href="/admin/learn/lessons/{{ r.id }}/edit">{{ r.title }}</a> <span class="muted">— раздел «{{ r.section }}»</span></li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if les.removed %}
+  <h3>➖ Удалены ({{ les.removed|length }})</h3>
+  <ul>
+    {% for r in les.removed %}<li>{{ r.title }} <span class="muted">— раздел «{{ r.section }}»</span></li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if les.reordered %}<p>↕️ Изменён порядок уроков</p>{% endif %}
+</section>
+{% endif %}
+{% endif %}
+
+<p><a class="btn-small" href="/admin/learn?subject={{ me.id }}">← Назад к предмету</a></p>
+{% endblock %}

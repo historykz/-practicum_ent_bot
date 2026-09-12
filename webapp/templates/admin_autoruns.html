@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Журнал автозапусков — Smart ENT{% endblock %}
+{% block page_title %}⏰ Автозапуски{% endblock %}
+{% block content %}
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a><span>›</span><span class="crumb-current">⏰ Журнал автозапусков</span>
+</nav>
+<h1>⏰ Журнал автозапусков тестов</h1>
+<p class="muted">Каждый запланированный тест — одной строкой: когда должен был запуститься, когда запустился на самом деле,
+   чем закончился и почему, если не запустился. Настраиваются расписания в боте: Админ-меню → Авто-публикация → «⏰ Автозапуск по расписанию».</p>
+
+<section class="admin-card">
+  <h2>Расписания</h2>
+  {% if schedules %}
+  <ul>
+    {% for s in schedules %}
+    <li>{{ display_status(s) }} <b>{{ s.title or ('Расписание #' ~ s.id) }}</b> · чат <code>{{ s.chat_id }}</code>
+        · время {{ s.times|join(', ') }} · следующий запуск: {{ s.next_run_at or '—' }}
+        · <a href="/admin/autoruns?schedule={{ s.id }}">только его запуски</a></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">Расписаний пока нет.</p>{% endif %}
+  {% if selected %}<p><a class="btn-small" href="/admin/autoruns">Показать все расписания</a></p>{% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>Запуски ({{ rows|length }})</h2>
+  <p class="muted">✅ завершён: {{ counts.finished }} · ▶️ идёт: {{ counts.launched }} · ⏳ в очереди/анонс: {{ counts.queued + counts.announced }}
+     · 😴 не набралось игроков: {{ counts.cancelled }} · ⚠️ ошибок: {{ counts.error }} · ⏭ пропущено: {{ counts.skipped }}</p>
+  {% if rows %}
+  <div class="table-scroll">
+    <table class="log-table">
+      <thead><tr><th>Тест</th><th>Предмет / раздел</th><th>Группа</th><th>Запланировано</th><th>Фактически</th>
+                 <th>Участники</th><th>Статус</th><th>Причина</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.title }}{% if r.sched_title %}<br><span class="muted">{{ r.sched_title }}</span>{% endif %}</td>
+        <td>{{ r.subject }}</td>
+        <td>{{ r.group }}</td>
+        <td class="nowrap">{{ r.planned }}</td>
+        <td class="nowrap">{{ r.actual }}</td>
+        <td class="nowrap">{% if r.test_id %}получили {{ r.reached or 0 }} · начали {{ r.started_count or 0 }} · завершили {{ r.finished_count or 0 }}{% else %}—{% endif %}</td>
+        <td class="nowrap">{{ r.status_label }}</td>
+        <td>{{ r.error or '' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}<p class="muted">Запусков ещё не было.</p>{% endif %}
+</section>
+{% endblock %}
