@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}{{ subject.title }} — Smart ENT{% endblock %}
+{% block content %}
+
+<p><a href="/learn">&larr; Все предметы</a></p>
+<h1>{{ subject.title }}</h1>
+{% if subject.description %}<p class="muted">{{ subject.description }}</p>{% endif %}
+
+{% if subject.mode == 'premium' %}
+<p class="muted">💎 Часть уроков платная — они откроются после покупки Премиума
+   или выдачи доступа преподавателем.</p>
+{% endif %}
+
+{% if subject.quizlet_url %}
+<div class="quizlet-row">
+  <a class="btn btn-primary quizlet-btn" target="_blank" rel="noopener"
+     href="{{ subject.quizlet_url }}">🃏 Карточки Quizlet по предмету</a>
+</div>
+{% endif %}
+
+{% if subject.live_code_enabled %}
+<section class="live-inline">
+  <div class="live-inline-title">🎮 Онлайн-тест сейчас идёт?</div>
+  <p class="muted">Преподаватель включил живое тестирование. Введите код комнаты, чтобы присоединиться.</p>
+  <div class="live-inline-row">
+    <input type="tel" id="live-inline-code" class="st-input" placeholder="Код комнаты" maxlength="8" inputmode="numeric" autocomplete="off">
+    <button id="live-inline-go" class="btn btn-primary">Войти в игру</button>
+  </div>
+  <p id="live-inline-err" class="muted"></p>
+</section>
+<script>
+(function(){
+  var inp=document.getElementById('live-inline-code'), btn=document.getElementById('live-inline-go');
+  btn.onclick=function(){ var c=(inp.value||'').replace(/\D/g,''); if(c.length<4){document.getElementById('live-inline-err').textContent='Введите код от преподавателя';return;} window.location.href='/live/'+c; };
+  inp.addEventListener('keydown',function(e){ if(e.key==='Enter') btn.click(); });
+})();
+</script>
+{% endif %}
+
+{% for item in sections %}
+<section class="section-card">
+  <h2>{{ item.section.title }}</h2>
+  {% if item.lessons %}
+  <ul class="lesson-list">
+    {% for lesson in item.lessons %}
+      {# Бесплатные уроки специально выделены рамкой: иначе в длинном списке
+         они теряются среди платных, и никто не понимает, с чего начать. #}
+      <li class="lesson-row {% if lesson.locked %}is-locked{% elif lesson.status != 'open' %}is-closed{% elif lesson.needs_purchase %}is-paid{% else %}is-free{% endif %}">
+        {% if lesson.locked %}
+          <div class="lesson-row-body">
+            <span class="lesson-row-title">🔒 {{ lesson.title }}</span>
+            <span class="lesson-note">доступен после сдачи предыдущего</span>
+          </div>
+        {% elif lesson.status == 'open' %}
+          <a href="/learn/lesson/{{ lesson.url_id or lesson.id }}" class="lesson-row-body">
+            <span class="lesson-row-title">{{ lesson.title }}</span>
+            <span class="lesson-row-meta">
+              {% if lesson.needs_purchase %}
+                <span class="tag tag-paid">💎 Платный</span>
+              {% elif lesson.viewed %}
+                <span class="tag tag-done">✅ Пройден</span>
+              {% else %}
+                <span class="tag tag-free">🆓 Бесплатно</span>
+              {% endif %}
+              <span class="lesson-go">Открыть →</span>
+            </span>
+          </a>
+        {% else %}
+          <div class="lesson-row-body">
+            <span class="lesson-row-title">🔒 {{ lesson.title }}</span>
+          </div>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    <p class="muted">Уроков пока нет.</p>
+  {% endif %}
+</section>
+{% else %}
+<p class="muted">Разделов пока нет.</p>
+{% endfor %}
+
+{% endblock %}

@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Журнал конспектов — Smart ENT{% endblock %}
+{% block content %}
+
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
+<section class="admin-card">
+  <h2>⏱ Срок хранения конспектов</h2>
+  <p class="muted">Через сколько часов выданный конспект сам исчезнет из личных
+     сообщений ученика. Отсчёт — с момента выдачи. <b>0 — не удалять.</b><br>
+     Если забрать доступ к предмету или доступ закончится, конспекты стираются
+     сразу, не дожидаясь этого срока.</p>
+  <form method="post" action="/admin/learn/notes-ttl" class="admin-form admin-inline">
+    <input type="number" name="notes_ttl_hours" min="0" max="8760"
+           value="{{ notes_ttl_hours }}" style="max-width:120px;">
+    <button type="submit" class="btn-small">Сохранить</button>
+  </form>
+</section>
+
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a>
+  <span>›</span><span class="crumb-current">📑 Журнал конспектов</span>
+</nav>
+
+<h1>📑 Кто открывал конспекты</h1>
+<p class="muted">Всего открытий: <strong>{{ total_views }}</strong>.
+   Каждая выдача конспекта фиксируется навсегда и попадает в резервную копию.</p>
+
+<section class="admin-card">
+  <h2>Фильтр</h2>
+  <form method="get" action="/admin/learn/notes-log" class="admin-form admin-inline">
+    <input type="number" name="tg" value="{{ f_tg or '' }}" placeholder="Telegram ID ученика">
+    <input type="number" name="lesson" value="{{ f_lesson or '' }}" placeholder="ID урока">
+    <input type="number" name="subject" value="{{ f_subject or '' }}" placeholder="ID предмета">
+    <button type="submit" class="btn-small">Показать</button>
+    <a class="btn-small" href="/admin/learn/notes-log">Сбросить</a>
+    <a class="btn-small" href="/admin/learn/notes-log.csv?tg={{ f_tg or '' }}&lesson={{ f_lesson or '' }}&subject={{ f_subject or '' }}">⬇️ Скачать CSV</a>
+  </form>
+</section>
+
+{% if not filtered and summary %}
+<section class="admin-card">
+  <h2>Кто открыл последним — по каждому конспекту</h2>
+  <div class="table-scroll">
+    <table class="log-table">
+      <thead>
+        <tr>
+          <th>Предмет / урок</th><th>Последним открыл</th><th>Telegram</th>
+          <th>Телефон</th><th>Когда</th><th>Доступ</th><th>Всего</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in summary %}
+        <tr>
+          <td>
+            {% if r.subject_shown %}<span class="muted">{{ r.subject_shown }}</span><br>{% endif %}
+            <strong>{{ r.lesson_shown }}</strong>
+          </td>
+          <td>{{ r.full_name }}</td>
+          <td>
+            <a href="/admin/learn/notes-log?tg={{ r.tg_id }}">ID {{ r.tg_id }}</a>
+            {% if r.username_shown %}<br>@{{ r.username_shown }}{% endif %}
+          </td>
+          <td>{{ r.phone_shown or '—' }}</td>
+          <td class="nowrap">{{ r.when_shown }}</td>
+          <td>{{ r.access_shown }}</td>
+          <td><a href="/admin/learn/notes-log?lesson={{ r.lesson_id }}">{{ r.views_total }} ⟶</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="admin-card">
+  <h2>{% if filtered %}Отфильтрованная история{% else %}Полная история открытий{% endif %}
+      ({{ rows|length }})</h2>
+  {% if rows %}
+  <div class="table-scroll">
+    <table class="log-table">
+      <thead>
+        <tr>
+          <th>Дата и время</th><th>Имя и фамилия</th><th>Telegram ID</th>
+          <th>Username</th><th>Телефон</th><th>Предмет</th><th>Раздел</th>
+          <th>Урок</th><th>Тип доступа</th><th>Доступ с</th><th>Фото</th><th>Откуда</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td class="nowrap">{{ r.when_shown }}</td>
+          <td>{{ r.full_name }}</td>
+          <td><a href="/admin/learn/notes-log?tg={{ r.tg_id }}">{{ r.tg_id }}</a></td>
+          <td>{% if r.username_shown %}@{{ r.username_shown }}{% else %}—{% endif %}</td>
+          <td>{{ r.phone_shown or '—' }}</td>
+          <td>{{ r.subject_shown or '—' }}</td>
+          <td>{{ r.section_title or '—' }}</td>
+          <td><a href="/admin/learn/notes-log?lesson={{ r.lesson_id }}">{{ r.lesson_shown }}</a></td>
+          <td>{{ r.access_shown }}</td>
+          <td class="nowrap">{{ r.since_shown or '—' }}</td>
+          <td>{{ r.images_sent or 0 }}</td>
+          <td>{{ r.source or 'bot' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Пока никто не открывал конспекты{% if filtered %} по этому фильтру{% endif %}.</p>
+  {% endif %}
+</section>
+
+{% endblock %}

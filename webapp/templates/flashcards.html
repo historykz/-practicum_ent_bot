@@ -1,0 +1,320 @@
+{% extends "base.html" %}
+{% block title %}Карточки: {{ lesson.title }} — Smart ENT{% endblock %}
+{% block page_title %}Карточки{% endblock %}
+{% block content %}
+
+<p><a href="/learn/lesson/{{ lesson.id }}">&larr; {{ lesson.title }}</a></p>
+<h1>🃏 Карточки</h1>
+
+<div id="fc-progress" class="quiz-progress">
+  <span id="fc-progress-text"></span>
+  <div class="quiz-progress-bar"><div id="fc-progress-fill"></div></div>
+</div>
+
+<div id="fc-root"></div>
+
+<script id="fc-data" type="application/json">{{ questions_json | safe }}</script>
+<script>
+const ALL_CARDS = JSON.parse(document.getElementById('fc-data').textContent);
+const lessonId = {{ lesson.id }};
+let cards = ALL_CARDS.slice();
+let index = 0;
+let flipped = false;
+let known = [];
+let unknown = [];
+let history = [];
+let startTime = Date.now();
+let animating = false;   // блокировка на время анимации улёта (анти-дабл)
+
+const root = document.getElementById('fc-root');
+const progressText = document.getElementById('fc-progress-text');
+const progressFill = document.getElementById('fc-progress-fill');
+
+// === Telegram Mini App: не даём жестам карточек сворачивать приложение ===
+(function() {
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg) return;
+  try { tg.ready(); } catch (_) {}
+  try { if (typeof tg.expand === 'function') tg.expand(); } catch (_) {}
+  try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (_) {}
+})();
+
+function haptic(kind) {
+  try {
+    var h = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.HapticFeedback;
+    if (!h) return;
+    if (kind === 'select') { if (h.selectionChanged) h.selectionChanged(); }
+    else if (h.impactOccurred) h.impactOccurred(kind);
+  } catch (_) {}
+}
+
+function escapeHtml(t) {
+  const d = document.createElement('div');
+  d.textContent = t;
+  return d.innerHTML;
+}
+
+function renderStart() {
+  document.getElementById('fc-progress').style.display = 'none';
+  root.innerHTML = `
+    <section class="quiz-card" style="text-align:center;">
+      <p>${cards.length} карточек в этом уроке.</p>
+      <button id="fc-shuffle" class="btn-small">🔀 Перемешать</button>
+      <div class="hero-actions" style="margin-top:16px;">
+        <button id="fc-begin" class="btn btn-primary">Начать</button>
+      </div>
+    </section>`;
+  document.getElementById('fc-shuffle').onclick = function() {
+    cards.sort(function() { return Math.random() - 0.5; });
+  };
+  document.getElementById('fc-begin').onclick = function() {
+    document.getElementById('fc-progress').style.display = 'block';
+    startTime = Date.now();
+    renderCard();
+  };
+}
+
+function cardMarkup(c, id, behind) {
+  return `
+    <div class="flashcard ${behind ? 'fc-behind' : 'fc-enter'}" id="${id}">
+      <div class="fc-overlay fc-overlay-yes">ЗНАЮ</div>
+      <div class="fc-overlay fc-overlay-no">НЕ ЗНАЮ</div>
+      <div class="flashcard-inner">
+        <div class="flashcard-face flashcard-front">
+          ${c.web_image_path ? `<img src="${c.web_image_path}" class="fc-image" alt="" draggable="false">` : ''}
+          <div class="fc-text">${escapeHtml(c.text)}</div>
+        </div>
+        <div class="flashcard-face flashcard-back">
+          <div class="fc-text">${escapeHtml(c.answer)}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderCard() {
+  flipped = false;
+  const c = cards[index];
+  const next = cards[index + 1];
+  progressText.textContent = `Карточка ${index + 1} из ${cards.length}`;
+  progressFill.style.width = (index / cards.length * 100) + '%';
+
+  root.innerHTML = `
+    <div class="fc-stack" id="fc-stack">
+      ${next ? cardMarkup(next, 'fc-next', true) : ''}
+      ${cardMarkup(c, 'fc-card', false)}
+    </div>
+    <p class="muted fc-hint">Нажмите — ответ · Свайп вправо — знаю · влево — не знаю</p>
+    <div class="flashcard-actions">
+      <button id="fc-dontknow" class="btn-fc btn-fc-no">❌ Не знаю</button>
+      <button id="fc-flip" class="btn-fc btn-fc-flip" title="Перевернуть">🔄</button>
+      <button id="fc-know" class="btn-fc btn-fc-yes">✅ Знаю</button>
+    </div>
+    <div class="hero-actions">
+      <button id="fc-back" class="btn-small" ${history.length ? '' : 'disabled'}>⬅️ Назад</button>
+    </div>`;
+
+  const cardEl = document.getElementById('fc-card');
+  // Появление новой карточки: с позиции "за стопкой" — плавно на передний план
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() { cardEl.classList.remove('fc-enter'); });
+  });
+
+  const ctl = attachGestures(cardEl);
+  document.getElementById('fc-know').onclick = function() { ctl.flyOut(true); };
+  document.getElementById('fc-dontknow').onclick = function() { ctl.flyOut(false); };
+  document.getElementById('fc-flip').onclick = function() { ctl.doFlip(); };
+  document.getElementById('fc-back').onclick = goBack;
+}
+
+// === Свайп в стиле Quizlet: Pointer Events + скорость + наклон + оверлеи ===
+const SWIPE_DIST = 55;        // минимальная дистанция обычного свайпа, px
+const FAST_VELOCITY = 0.5;    // px/ms — быстрый свайп срабатывает раньше
+const FAST_MIN_DIST = 25;     // но не короче этого
+const TAP_MAX_MOVE = 10;      // до этого движения жест считается нажатием
+const FLY_MS = 220;           // длительность анимации улёта
+
+function attachGestures(el) {
+  let dragging = false, horizontal = null, pid = null;
+  let startX = 0, startY = 0, dx = 0, dy = 0;
+  let lastX = 0, lastT = 0, velocity = 0, maxMove = 0, startT = 0;
+  let hapticFired = false, raf = null;
+
+  const yes = el.querySelector('.fc-overlay-yes');
+  const no = el.querySelector('.fc-overlay-no');
+
+  function setTransform() {
+    raf = null;
+    el.style.transform = `translate3d(${dx}px, ${dy * 0.06}px, 0) rotate(${dx / 18}deg)`;
+    const p = Math.min(1, Math.abs(dx) / 80);
+    yes.style.opacity = dx > 6 ? p : 0;
+    no.style.opacity = dx < -6 ? p : 0;
+    if (Math.abs(dx) >= SWIPE_DIST) {
+      if (!hapticFired) { haptic('light'); hapticFired = true; }
+    } else {
+      hapticFired = false;
+    }
+  }
+
+  function resetPosition() {
+    el.style.transform = '';
+    yes.style.opacity = 0;
+    no.style.opacity = 0;
+    dx = dy = 0;
+  }
+
+  function endDrag(evaluate) {
+    dragging = false;
+    el.classList.remove('dragging');
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    if (!evaluate) { resetPosition(); return; }
+    const absDx = Math.abs(dx);
+    const sameDir = (velocity > 0) === (dx > 0);
+    const fast = Math.abs(velocity) > FAST_VELOCITY && absDx > FAST_MIN_DIST && sameDir;
+    if (absDx >= SWIPE_DIST || fast) flyOut(dx > 0);
+    else resetPosition();
+  }
+
+  function flyOut(know) {
+    if (animating) return;
+    animating = true;
+    el.classList.remove('dragging');
+    (know ? yes : no).style.opacity = 1;
+    (know ? no : yes).style.opacity = 0;
+    const w = Math.max(window.innerWidth, 480);
+    el.style.transform =
+      `translate3d(${know ? w * 1.2 : -w * 1.2}px, ${dy * 0.06}px, 0) rotate(${know ? 28 : -28}deg)`;
+    el.style.opacity = '0';
+    setTimeout(function() {
+      animating = false;
+      answer(know);
+    }, FLY_MS);
+  }
+
+  function doFlip() {
+    if (animating) return;
+    flipped = !flipped;
+    el.classList.toggle('flipped', flipped);
+    haptic('select');
+  }
+
+  el.addEventListener('pointerdown', function(e) {
+    if (animating || dragging) return;
+    if (e.button !== undefined && e.button !== 0) return;
+    pid = e.pointerId;
+    dragging = true; horizontal = null;
+    startX = lastX = e.clientX; startY = e.clientY;
+    startT = lastT = performance.now();
+    dx = dy = 0; maxMove = 0; velocity = 0; hapticFired = false;
+    el.classList.add('dragging');
+  });
+
+  el.addEventListener('pointermove', function(e) {
+    if (!dragging || e.pointerId !== pid) return;
+    dx = e.clientX - startX;
+    dy = e.clientY - startY;
+    maxMove = Math.max(maxMove, Math.abs(dx), Math.abs(dy));
+    const now = performance.now();
+    if (now - lastT > 0) velocity = (e.clientX - lastX) / (now - lastT);
+    lastX = e.clientX; lastT = now;
+    if (horizontal === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+      horizontal = Math.abs(dx) > Math.abs(dy);
+      if (horizontal && typeof el.setPointerCapture === 'function') {
+        try { el.setPointerCapture(pid); } catch (_) {}
+      }
+    }
+    if (horizontal === false) { endDrag(false); return; }  // вертикаль — отдаём странице
+    if (horizontal && !raf) raf = requestAnimationFrame(setTransform);
+  });
+
+  // Пока идёт горизонтальный драг — не даём браузеру/Telegram обрабатывать жест
+  el.addEventListener('touchmove', function(e) {
+    if (dragging && horizontal) e.preventDefault();
+  }, { passive: false });
+
+  el.addEventListener('pointerup', function(e) {
+    if (!dragging || e.pointerId !== pid) return;
+    const dt = performance.now() - startT;
+    if (maxMove < TAP_MAX_MOVE && dt < 600) {
+      dragging = false;
+      el.classList.remove('dragging');
+      resetPosition();
+      doFlip();          // короткое нажатие без движения — переворот
+      return;
+    }
+    endDrag(true);
+  });
+
+  el.addEventListener('pointercancel', function() {
+    if (dragging) endDrag(false);
+  });
+
+  // После свайпа click не должен срабатывать (переворот уже обрабатываем сами)
+  el.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); });
+
+  return { flyOut: flyOut, doFlip: doFlip };
+}
+
+function answer(know) {
+  const c = cards[index];
+  history.push({card: c, know: know});
+  if (know) known.push(c); else unknown.push(c);
+  index += 1;
+  if (index < cards.length) {
+    renderCard();
+  } else {
+    finishRound();
+  }
+}
+
+function goBack() {
+  if (!history.length || animating) return;
+  const last = history.pop();
+  if (last.know) known = known.filter(function(c) { return c !== last.card; });
+  else unknown = unknown.filter(function(c) { return c !== last.card; });
+  index -= 1;
+  renderCard();
+}
+
+function finishRound() {
+  progressFill.style.width = '100%';
+  const total = known.length + unknown.length;
+  const pct = total ? Math.round(known.length / total * 100) : 0;
+  let grade = '📚 Надо повторить';
+  if (pct >= 85) grade = '🔥 Отлично!';
+  else if (pct >= 60) grade = '💪 Неплохо';
+
+  fetch('/learn/api/flashcards/' + lessonId + '/finish', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({total: total, know: known.length, dontknow: unknown.length,
+                           duration_sec: Math.round((Date.now() - startTime) / 1000)}),
+  }).catch(function() {});
+
+  root.innerHTML = `
+    <section class="profile-card" style="text-align:center;">
+      <h2>${grade}</h2>
+      <div class="stat-row">
+        <div class="stat-box"><div class="stat-value">${known.length}</div><div class="stat-label">Знаю</div></div>
+        <div class="stat-box"><div class="stat-value">${unknown.length}</div><div class="stat-label">Не знаю</div></div>
+        <div class="stat-box"><div class="stat-value">${pct}%</div><div class="stat-label">Результат</div></div>
+      </div>
+      <div class="hero-actions" style="margin-top:20px;">
+        ${unknown.length ? '<button id="fc-retry" class="btn btn-primary">🔁 Повторить не знал</button>' : ''}
+        <a class="btn btn-primary" href="/learn/lesson/${lessonId}">🏠 К уроку</a>
+      </div>
+    </section>`;
+  if (unknown.length) {
+    document.getElementById('fc-retry').onclick = function() {
+      cards = unknown.slice();
+      unknown = []; known = []; index = 0; history = [];
+      document.getElementById('fc-progress').style.display = 'block';
+      renderCard();
+    };
+  }
+}
+
+renderStart();
+</script>
+
+{% include "_screen_protect.html" %}
+
+{% endblock %}

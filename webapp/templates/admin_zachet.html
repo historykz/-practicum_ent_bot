@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Зачёт: {{ lesson.title }} — Smart ENT{% endblock %}
+{% block content %}
+
+<p><a href="/admin/learn">&larr; К админке обучения</a></p>
+<h1>📝 Зачёт: {{ lesson.title }}</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
+<section class="admin-card">
+  <h2>⚙️ Настройки зачёта</h2>
+  <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/zachet/settings" class="admin-form">
+    <label>Вопросов на одну попытку (делится поровну между темами)</label>
+    <input type="number" name="per_attempt" value="{{ lesson.zachet_per_attempt or 20 }}" min="1" max="500">
+    <label>Порог «нужно повторить» по теме, % (по умолчанию 65)</label>
+    <input type="number" name="topic_threshold" value="{{ lesson.zachet_topic_threshold or 65 }}" min="1" max="100">
+    <label>Общий проходной балл для открытия следующего урока, % (по умолчанию 70)</label>
+    <input type="number" name="pass_percent" value="{{ lesson.zachet_pass_percent or 70 }}" min="1" max="100">
+    <button type="submit" class="btn-small">Сохранить настройки</button>
+  </form>
+</section>
+
+<section class="admin-card">
+  <h2>📥 Импорт вопросов (.txt по темам)</h2>
+  <p class="muted">Формат: «Тема N:», «Вопрос N:», «Ответ N:». Нумерация вопросов внутри каждой темы — заново с 1.</p>
+  <div class="hero-actions" style="margin-bottom:12px;">
+    <a class="btn-small" href="/admin/learn/zachet-template.txt">📄 Скачать шаблон .txt</a>
+    <button type="button" class="btn-small" onclick="copyPrompt()">🤖 Скопировать промпт для ИИ</button>
+  </div>
+  <textarea id="ai-prompt" style="position:absolute;left:-9999px;">{{ ai_prompt }}</textarea>
+
+  <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/zachet/import"
+        enctype="multipart/form-data" class="admin-form">
+    <label>Вставьте текст банка вопросов:</label>
+    <textarea name="bank_text" rows="8" placeholder="Тема 1: ...&#10;Вопрос 1: ...&#10;Ответ 1: ..."></textarea>
+    <label>Или загрузите .txt файл:</label>
+    <input type="file" name="bank_file" accept=".txt">
+    <label class="admin-checkbox"><input type="checkbox" name="replace"> Заменить весь банк (иначе добавить к существующим)</label>
+    <button type="submit" class="btn btn-primary">Импортировать</button>
+  </form>
+</section>
+
+<section class="admin-card">
+  <h2>📚 Банк вопросов ({{ bank_total }} шт., тем: {{ bank|length }})</h2>
+  {% if bank %}
+  {% for topic, items in bank.items() %}
+  <details class="admin-details">
+    <summary><strong>{{ topic }}</strong> — {{ items|length }} вопр.
+      {% if items|length < (lesson.zachet_per_attempt // (bank|length) if bank|length else 1) %}
+      <span style="color:#ef4444;">⚠️ мало для попытки</span>{% endif %}
+    </summary>
+    {% if other_zachets %}
+    <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/zachet/move-topic" class="admin-form admin-inline">
+      <input type="hidden" name="topic" value="{{ topic }}">
+      <select name="target_lesson_id">
+        {% for z in other_zachets %}<option value="{{ z.id }}">{{ z.title }}</option>{% endfor %}
+      </select>
+      <button type="submit" class="btn-small">↗️ Переместить тему в другой зачёт</button>
+    </form>
+    {% endif %}
+    <ul class="lesson-list">
+      {% for it in items %}
+      <li><strong>{{ it.question }}</strong> → <span class="muted">{{ it.answer }}</span></li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endfor %}
+  <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/zachet/clear" style="margin-top:12px;"
+        onsubmit="return confirm('Очистить весь банк вопросов зачёта?');">
+    <button type="submit" class="btn-small btn-danger">🗑 Очистить банк</button>
+  </form>
+  {% else %}
+  <p class="muted">Банк пуст. Импортируйте вопросы выше.</p>
+  {% endif %}
+</section>
+
+<script>
+function copyPrompt() {
+  var t = document.getElementById('ai-prompt');
+  t.select(); t.setSelectionRange(0, 99999);
+  try { navigator.clipboard.writeText(t.value); } catch (_) { document.execCommand('copy'); }
+  alert('Промпт скопирован — вставьте в ChatGPT/Claude/Gemini');
+}
+</script>
+
+{% endblock %}
