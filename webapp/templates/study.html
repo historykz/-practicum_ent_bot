@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}Заучивание: {{ lesson.title }} — Smart ENT{% endblock %}
+{% block page_title %}Заучивание{% endblock %}
+{% block content %}
+
+<p><a href="/learn/lesson/{{ lesson.id }}">&larr; {{ lesson.title }}</a></p>
+<h1>🧠 Заучивание</h1>
+
+<div class="quiz-progress">
+  <span id="st-progress-text"></span>
+  <div class="quiz-progress-bar"><div id="st-progress-fill"></div></div>
+</div>
+
+<div id="st-root" class="quiz-card"></div>
+
+<script id="st-data" type="application/json">{{ questions_json | safe }}</script>
+<script>
+const questions = JSON.parse(document.getElementById('st-data').textContent);
+const lessonId = {{ lesson.id }};
+let index = 0;
+let attemptCount = 0;
+let statuses = []; // 'correct_first' | 'correct_retry' | 'wrong' | 'peeked' | 'skipped'
+let startTime = Date.now();
+
+const root = document.getElementById('st-root');
+const progressText = document.getElementById('st-progress-text');
+const progressFill = document.getElementById('st-progress-fill');
+
+function escapeHtml(t) {
+  const d = document.createElement('div');
+  d.textContent = t;
+  return d.innerHTML;
+}
+
+function renderQuestion() {
+  attemptCount = 0;
+  const q = questions[index];
+  progressText.textContent = 'Вопрос ' + (index + 1) + ' из ' + questions.length;
+  progressFill.style.width = (index / questions.length * 100) + '%';
+
+  root.innerHTML = ''
+    + (q.web_image_path ? '<img src="' + q.web_image_path + '" class="quiz-image" alt="">' : '')
+    + '<h2 class="quiz-question">' + escapeHtml(q.text) + '</h2>'
+    + '<input type="text" id="st-input" class="st-input" placeholder="Введите ответ" autocomplete="off">'
+    + '<div class="hero-actions" style="margin-top:14px;">'
+    + '<button id="st-submit" class="btn btn-primary">Проверить</button>'
+    + '</div>'
+    + '<div class="hero-actions">'
+    + '<button id="st-peek" class="btn-small">Показать ответ</button>'
+    + '<button id="st-skip" class="btn-small">Пропустить</button>'
+    + '</div>'
+    + '<div id="st-feedback"></div>';
+
+  const input = document.getElementById('st-input');
+  input.focus();
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitAnswer(); });
+  document.getElementById('st-submit').onclick = submitAnswer;
+  document.getElementById('st-peek').onclick = peek;
+  document.getElementById('st-skip').onclick = skip;
+}
+
+async function submitAnswer() {
+  const q = questions[index];
+  const input = document.getElementById('st-input');
+  const text = input.value.trim();
+  if (!text) return;
+  attemptCount += 1;
+
+  const resp = await fetch('/learn/api/study/check', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_id: q.id, answer: text}),
+  });
+  const result = await resp.json();
+  input.disabled = true;
+  document.getElementById('st-submit').disabled = true;
+
+  const fb = document.getElementById('st-feedback');
+  if (result.correct) {
+    statuses[index] = attemptCount > 1 ? 'correct_retry' : 'correct_first';
+    fb.innerHTML = '<div class="alert alert-ok">Правильно!</div>'
+      + '<button id="st-next" class="btn btn-primary">Дальше</button>';
+    document.getElementById('st-next').onclick = nextQuestion;
+  } else if (result.close) {
+    fb.innerHTML = '<div class="alert">Ты имел в виду: "' + escapeHtml(result.correct_text) + '"?</div>'
+      + '<div class="hero-actions">'
+      + '<button id="st-yes" class="btn btn-primary">Да, я это имел в виду</button>'
+      + '<button id="st-no" class="btn-small">Нет</button>'
+      + '</div>';
+    document.getElementById('st-yes').onclick = function() {
+      statuses[index] = attemptCount > 1 ? 'correct_retry' : 'correct_first';
+      fb.innerHTML = '<div class="alert alert-ok">Засчитано!</div>'
+        + '<button id="st-next" class="btn btn-primary">Дальше</button>';
+      document.getElementById('st-next').onclick = nextQuestion;
+    };
+    document.getElementById('st-no').onclick = function() { showWrong(result.correct_text); };
+  } else {
+    showWrong(result.correct_text);
+  }
+}
+
+function showWrong(correctText) {
+  statuses[index] = 'wrong';
+  const fb = document.getElementById('st-feedback');
+  fb.innerHTML = '<div class="alert">Неправильно. Правильный ответ: "' + escapeHtml(correctText) + '"</div>'
+    + '<div class="hero-actions">'
+    + '<button id="st-retry" class="btn-small">Попробовать ещё раз</button>'
+    + '<button id="st-next" class="btn btn-primary">Дальше</button>'
+    + '</div>';
+  document.getElementById('st-next').onclick = nextQuestion;
+  document.getElementById('st-retry').onclick = renderQuestion;
+}
+
+async function peek() {
+  statuses[index] = 'peeked';
+  const q = questions[index];
+  document.getElementById('st-input').disabled = true;
+  document.getElementById('st-submit').disabled = true;
+  const resp = await fetch('/learn/api/study/check', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_id: q.id, answer: '__peek__'}),
+  });
+  const result = await resp.json();
+  const fb = document.getElementById('st-feedback');
+  fb.innerHTML = '<p class="muted">Правильный ответ: "' + escapeHtml(result.correct_text) + '"</p>'
+    + '<button id="st-next" class="btn btn-primary">Дальше</button>';
+  document.getElementById('st-next').onclick = nextQuestion;
+}
+
+function skip() {
+  statuses[index] = 'skipped';
+  nextQuestion();
+}
+
+function nextQuestion() {
+  index += 1;
+  if (index < questions.length) {
+    renderQuestion();
+  } else {
+    finishRound();
+  }
+}
+
+function finishRound() {
+  progressFill.style.width = '100%';
+  const counts = {correct_first: 0, correct_retry: 0, wrong: 0, peeked: 0, skipped: 0};
+  statuses.forEach(function(s) { if (s) counts[s] = (counts[s] || 0) + 1; });
+  const total = questions.length;
+  const learned = counts.correct_first + counts.correct_retry;
+  const pct = total ? Math.round(learned / total * 100) : 0;
+  let grade = 'Надо повторить';
+  if (pct >= 85) grade = 'Отлично!';
+  else if (pct >= 60) grade = 'Неплохо';
+
+  fetch('/learn/api/study/' + lessonId + '/finish', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      total: total, correct_first: counts.correct_first, correct_retry: counts.correct_retry,
+      wrong: counts.wrong, skipped: counts.skipped + counts.peeked,
+      duration_sec: Math.round((Date.now() - startTime) / 1000),
+    }),
+  });
+
+  root.className = 'profile-card';
+  root.style.textAlign = 'center';
+  root.innerHTML = '<h2>' + grade + '</h2>'
+    + '<div class="stat-row">'
+    + '<div class="stat-box"><div class="stat-value">' + counts.correct_first + '</div><div class="stat-label">С 1-го раза</div></div>'
+    + '<div class="stat-box"><div class="stat-value">' + counts.correct_retry + '</div><div class="stat-label">Со 2-й попытки</div></div>'
+    + '<div class="stat-box"><div class="stat-value">' + counts.wrong + '</div><div class="stat-label">Неверно</div></div>'
+    + '<div class="stat-box"><div class="stat-value">' + counts.peeked + '</div><div class="stat-label">Подсмотрел</div></div>'
+    + '<div class="stat-box"><div class="stat-value">' + counts.skipped + '</div><div class="stat-label">Пропустил</div></div>'
+    + '<div class="stat-box"><div class="stat-value">' + pct + '%</div><div class="stat-label">Усвоено</div></div>'
+    + '</div>'
+    + '<div class="hero-actions" style="margin-top:20px;">'
+    + '<a class="btn btn-primary" href="/learn/lesson/' + lessonId + '">К уроку</a>'
+    + '</div>';
+}
+
+renderQuestion();
+</script>
+
+{% include "_screen_protect.html" %}
+
+{% endblock %}
