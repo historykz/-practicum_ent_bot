@@ -1,0 +1,264 @@
+{% extends "base.html" %}
+{% block title %}Выбор вопросов — Smart ENT{% endblock %}
+{% block page_title %}Выбор вопросов{% endblock %}
+{% block content %}
+
+<h1>✋ Выбор вопросов</h1>
+<p class="muted">
+  {% if subject_title %}{{ subject_title }}{% endif %}
+  {% if section_title %} → {{ section_title }}{% endif %}
+  {% if lesson %} → {{ lesson.title }}{% endif %}
+  → тест «{{ test.title }}», всего {{ questions|length }} вопросов.
+</p>
+
+{% if msg %}<div class="alert alert-ok">{{ msg }}</div>{% endif %}
+
+<section class="progress-card">
+  <h2>Введите номера вопросов</h2>
+  <p class="muted">
+    Через запятую, например <b>5, 7, 10, 14</b>. Можно диапазоном: <b>5-9</b>.
+    Порядок сохранится ровно такой, как вы написали: наберёте <b>10, 5, 7</b> —
+    в тесте так и пойдёт: сначала 10-й, потом 5-й, потом 7-й.
+  </p>
+  <div class="pub-numbers">
+    <input type="text" id="nums" placeholder="5, 7, 10, 14, 23"
+           inputmode="numeric" autocomplete="off">
+    <button type="button" class="btn btn-primary" id="nums-apply">Отметить</button>
+  </div>
+  <p class="muted" id="nums-note"></p>
+</section>
+
+<section class="progress-card pub-tools">
+  <div class="pub-search">
+    <input type="search" id="q-search" placeholder="🔎 Поиск по тексту вопроса"
+           autocomplete="off">
+    <input type="number" id="q-goto" min="1" max="{{ questions|length }}"
+           placeholder="№ вопроса">
+    <button type="button" class="btn" id="goto-btn">Перейти</button>
+  </div>
+  <div class="pub-filters">
+    <button type="button" class="btn pub-filter is-on" data-filter="all">Все</button>
+    <button type="button" class="btn pub-filter" data-filter="chosen">Выбранные</button>
+    <button type="button" class="btn pub-filter" data-filter="free">Невыбранные</button>
+    <button type="button" class="btn" id="sel-all">Выбрать всё</button>
+    <button type="button" class="btn" id="sel-none">Снять всё</button>
+  </div>
+</section>
+
+<div class="pub-counter" id="counter">Выбрано вопросов: 0</div>
+
+<section class="progress-card" id="order-box" hidden>
+  <h2>Порядок публикации</h2>
+  <p class="muted">Стрелками поменяйте местами, крестиком уберите вопрос.</p>
+  <div id="order-list" class="pub-order"></div>
+</section>
+
+<div id="q-list" class="pub-list"></div>
+
+<form method="post" action="/admin/publications/save" class="admin-form pub-save"
+      id="save-form">
+  <input type="hidden" name="test_id" value="{{ test.id }}">
+  <input type="hidden" name="lesson_id" value="{{ lesson_id or '' }}">
+  <input type="hidden" name="pub_id" value="{{ pub.id if pub else '' }}">
+  <input type="hidden" name="ordered_ids" id="ordered-ids" value="">
+  <input type="hidden" name="action" id="save-action" value="preview">
+
+  <label>Название подборки (для себя, в канал не уходит)</label>
+  <input type="text" name="title" maxlength="200"
+         value="{{ pub.title if pub else '' }}"
+         placeholder="Например: Алаш — разбор перед пробником">
+
+  <label>Текст к посту (необязательно)</label>
+  <textarea name="intro" rows="2" maxlength="800"
+            placeholder="Пара слов ученикам">{{ pub.intro_text if pub else '' }}</textarea>
+
+  <div class="pub-actions">
+    <button type="submit" class="btn btn-primary" id="btn-preview">👁 Предпросмотр теста</button>
+    <button type="submit" class="btn" id="btn-draft">💾 Сохранить как черновик</button>
+  </div>
+</form>
+
+<script id="pub-questions" type="application/json">{{ questions_json | safe }}</script>
+<script id="pub-chosen" type="application/json">{{ chosen_json | safe }}</script>
+
+<script>
+(function(){
+  var QS = JSON.parse(document.getElementById('pub-questions').textContent || '[]');
+  var chosen = JSON.parse(document.getElementById('pub-chosen').textContent || '[]');
+  var byId = {}; QS.forEach(function(q){ byId[q.id] = q; });
+  // Порядок — список id как его собрал админ. Вопросы, удалённые из теста
+  // после сохранения черновика, выкидываем: иначе счётчик показывал бы
+  // больше, чем ученик реально получит.
+  var order = chosen.filter(function(id){ return !!byId[id]; });
+  var byNum = {}; QS.forEach(function(q){ byNum[q.num] = q; });
+
+  var listEl = document.getElementById('q-list');
+  var counterEl = document.getElementById('counter');
+  var orderBox = document.getElementById('order-box');
+  var orderList = document.getElementById('order-list');
+  var filter = 'all';
+  var search = '';
+
+  function esc(t){ var d = document.createElement('div'); d.textContent = t == null ? '' : t; return d.innerHTML; }
+  var LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+
+  function isChosen(id){ return order.indexOf(id) >= 0; }
+
+  function render(){
+    var html = '';
+    QS.forEach(function(q){
+      if (filter === 'chosen' && !isChosen(q.id)) return;
+      if (filter === 'free' && isChosen(q.id)) return;
+      if (search) {
+        var hay = (q.text + ' ' + q.options.map(function(o){ return o.text; }).join(' ')).toLowerCase();
+        if (hay.indexOf(search) < 0) return;
+      }
+      var pos = order.indexOf(q.id);
+      html += '<div class="pub-card' + (pos >= 0 ? ' chosen' : '') + '" id="q' + q.num + '">' +
+        '<label class="pub-card-head">' +
+          '<input type="checkbox" data-id="' + q.id + '"' + (pos >= 0 ? ' checked' : '') + '>' +
+          '<b>№ ' + q.num + '</b>' +
+          (pos >= 0 ? '<span class="pub-pos">' + (pos + 1) + '-й в тесте</span>' : '') +
+        '</label>' +
+        '<div class="pub-qtext">' + esc(q.text) + '</div>' +
+        '<div class="pub-opts">' +
+          q.options.map(function(o, i){
+            return '<div class="pub-opt' + (o.is_correct ? ' right' : '') + '">' +
+              '<span class="pub-letter">' + (LETTERS[i] || (i + 1)) + ')</span> ' +
+              esc(o.text) + (o.is_correct ? ' <b>✔ верный</b>' : '') + '</div>';
+          }).join('') +
+        '</div>' +
+      '</div>';
+    });
+    listEl.innerHTML = html || '<p class="muted">Ничего не найдено.</p>';
+    listEl.querySelectorAll('input[type=checkbox]').forEach(function(cb){
+      cb.addEventListener('change', function(){
+        toggle(parseInt(cb.getAttribute('data-id'), 10), cb.checked);
+      });
+    });
+    paintCounter();
+  }
+
+  function toggle(id, on){
+    var i = order.indexOf(id);
+    if (on && i < 0) order.push(id);          // добавляем в конец — как нажимали
+    if (!on && i >= 0) order.splice(i, 1);
+    render(); renderOrder();
+  }
+
+  function paintCounter(){
+    counterEl.textContent = 'Выбрано вопросов: ' + order.length;
+    document.getElementById('ordered-ids').value = order.join(',');
+  }
+
+  function renderOrder(){
+    if (!order.length) { orderBox.hidden = true; orderList.innerHTML = ''; return; }
+    orderBox.hidden = false;
+    orderList.innerHTML = order.map(function(id, i){
+      var q = byId[id];
+      if (!q) return '';
+      return '<div class="pub-order-row">' +
+        '<span class="pub-order-n">' + (i + 1) + '.</span>' +
+        '<span class="pub-order-t">№ ' + q.num + ' — ' + esc(q.text.slice(0, 70)) + '</span>' +
+        '<button type="button" class="btn" data-up="' + id + '"' + (i === 0 ? ' disabled' : '') + '>⬆️</button>' +
+        '<button type="button" class="btn" data-down="' + id + '"' + (i === order.length - 1 ? ' disabled' : '') + '>⬇️</button>' +
+        '<button type="button" class="btn" data-del="' + id + '">✕</button>' +
+      '</div>';
+    }).join('');
+    orderList.querySelectorAll('[data-up]').forEach(function(b){
+      b.onclick = function(){ move(parseInt(b.getAttribute('data-up'), 10), -1); };
+    });
+    orderList.querySelectorAll('[data-down]').forEach(function(b){
+      b.onclick = function(){ move(parseInt(b.getAttribute('data-down'), 10), 1); };
+    });
+    orderList.querySelectorAll('[data-del]').forEach(function(b){
+      b.onclick = function(){ toggle(parseInt(b.getAttribute('data-del'), 10), false); };
+    });
+    paintCounter();
+  }
+
+  function move(id, delta){
+    var i = order.indexOf(id), j = i + delta;
+    if (i < 0 || j < 0 || j >= order.length) return;
+    var t = order[i]; order[i] = order[j]; order[j] = t;
+    render(); renderOrder();
+  }
+
+  // Номера через запятую: 5, 7, 10 или диапазон 5-9
+  document.getElementById('nums-apply').onclick = function(){
+    var raw = document.getElementById('nums').value || '';
+    var note = document.getElementById('nums-note');
+    var picked = [], bad = [], seen = {};
+    raw.replace(/\n/g, ',').replace(/;/g, ',').split(',').forEach(function(ch){
+      ch = ch.trim();
+      if (!ch) return;
+      var range = /^(\d+)\s*-\s*(\d+)$/.exec(ch);
+      if (range) {
+        var a = parseInt(range[1], 10), b = parseInt(range[2], 10);
+        if (a > b) { var t = a; a = b; b = t; }
+        for (var n = a; n <= b; n++) {
+          if (byNum[n] && !seen[n]) { seen[n] = 1; picked.push(byNum[n].id); }
+        }
+        return;
+      }
+      if (/^\d+$/.test(ch)) {
+        var num = parseInt(ch, 10);
+        if (byNum[num]) { if (!seen[num]) { seen[num] = 1; picked.push(byNum[num].id); } }
+        else bad.push(ch);
+      } else bad.push(ch);
+    });
+    if (!picked.length) {
+      // Ни один номер не распознан — прежний выбор не трогаем, иначе одна
+      // опечатка стирала бы всё, что админ уже отметил галочками.
+      note.textContent = bad.length
+        ? ('Не понял эти номера: ' + bad.join(', ') + '. Выбор оставил как был.')
+        : 'Впишите номера, например 5, 7, 10.';
+      return;
+    }
+    order = picked;                       // порядок ровно как ввели
+    note.textContent = bad.length
+      ? ('Отмечено: ' + picked.length + '. Пропущено (нет таких номеров): ' + bad.join(', '))
+      : ('Отмечено вопросов: ' + picked.length + ' — в том порядке, как вы ввели.');
+    render(); renderOrder();
+  };
+
+  document.getElementById('q-search').addEventListener('input', function(e){
+    search = (e.target.value || '').toLowerCase().trim();
+    render();
+  });
+  document.getElementById('goto-btn').onclick = function(){
+    var n = parseInt(document.getElementById('q-goto').value, 10);
+    var el = document.getElementById('q' + n);
+    if (el) { el.scrollIntoView({behavior: 'smooth', block: 'center'}); el.classList.add('flash');
+              setTimeout(function(){ el.classList.remove('flash'); }, 1200); }
+  };
+  document.querySelectorAll('.pub-filter').forEach(function(b){
+    b.onclick = function(){
+      document.querySelectorAll('.pub-filter').forEach(function(x){ x.classList.remove('is-on'); });
+      b.classList.add('is-on');
+      filter = b.getAttribute('data-filter');
+      render();
+    };
+  });
+  document.getElementById('sel-all').onclick = function(){
+    order = QS.map(function(q){ return q.id; }); render(); renderOrder();
+  };
+  document.getElementById('sel-none').onclick = function(){
+    order = []; render(); renderOrder();
+  };
+
+  document.getElementById('btn-draft').onclick = function(){
+    document.getElementById('save-action').value = 'draft';
+  };
+  document.getElementById('btn-preview').onclick = function(){
+    document.getElementById('save-action').value = 'preview';
+  };
+  document.getElementById('save-form').addEventListener('submit', function(e){
+    paintCounter();
+    if (!order.length) { e.preventDefault(); alert('Отметьте хотя бы один вопрос.'); }
+  });
+
+  render(); renderOrder();
+})();
+</script>
+{% endblock %}
