@@ -1,0 +1,72 @@
+{# ⭐️ Избранное: кнопка-звезда у вопроса. Подключается в тест, карточки и
+   заучивание. Состояние хранится на сервере (user_id + question_id), поэтому
+   сохраняется после выхода, закрытия приложения и нового входа. #}
+<style>
+  .fav-row { display: flex; justify-content: flex-end; margin: -4px 0 8px; }
+  .fav-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 6px 12px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--border); background: transparent; color: var(--muted);
+    font-size: .86rem; font-weight: 600; line-height: 1.2; white-space: nowrap;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  }
+  .fav-btn.is-on { border-color: #f5a623; color: #b97700; background: rgba(245,166,35,.12); }
+  .fav-btn:active { transform: scale(.95); }
+  .fav-btn[disabled] { opacity: .6; }
+</style>
+<script>
+(function() {
+  var S = window.SmartENT = window.SmartENT || {};
+  var favs = {};      // id вопроса → в избранном или нет
+  var busy = {};
+  function label(on) { return on ? '⭐️ В избранном' : '☆ В избранное'; }
+  function paint(root) {
+    (root || document).querySelectorAll('[data-fav]').forEach(function(b) {
+      var on = !!favs[b.getAttribute('data-fav')];
+      b.textContent = label(on);
+      b.classList.toggle('is-on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  S.favButton = function(qid) {
+    return '<button type="button" class="fav-btn" data-fav="' + Number(qid) + '">' + label(!!favs[qid]) + '</button>';
+  };
+  S.favPaint = paint;
+  S.favInit = function(ids) {
+    ids = (ids || []).map(Number).filter(Boolean);
+    if (!ids.length) return;
+    fetch('/learn/api/favorites/state', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                         body: JSON.stringify({ids: ids})})
+      .then(function(r) { return r.json(); })
+      .then(function(res) { (res.ids || []).forEach(function(i) { favs[i] = true; }); paint(); })
+      .catch(function() {});
+  };
+  // Нажатие на звезду: сразу меняем вид, потом сохраняем; не сохранилось — возвращаем.
+  // Снятие звезды посреди занятия текущую сессию не обрывает.
+  document.addEventListener('click', function(e) {
+    var b = e.target && e.target.closest ? e.target.closest('[data-fav]') : null;
+    if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var id = b.getAttribute('data-fav');
+    if (busy[id]) return;
+    busy[id] = true;
+    var want = !favs[id];
+    favs[id] = want;
+    paint();
+    fetch('/learn/api/favorites/toggle', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                          body: JSON.stringify({question_id: Number(id), on: want})})
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (res && res.ok) { favs[id] = !!res.favorite; }
+        else { favs[id] = !want; if (S.note) S.note((res && res.error) || 'Не получилось сохранить в избранное.'); }
+        paint();
+      })
+      .catch(function() {
+        favs[id] = !want; paint();
+        if (S.note) S.note('Нет связи — избранное не сохранилось. Попробуйте ещё раз.');
+      })
+      .then(function() { busy[id] = false; });
+  }, true);
+})();
+</script>
