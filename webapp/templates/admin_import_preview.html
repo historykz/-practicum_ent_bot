@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Предпросмотр импорта — Smart ENT{% endblock %}
+{% block content %}
+
+<h1>👀 Предпросмотр перед сохранением</h1>
+<p>Урок: <strong>{{ draft.lesson_title }}</strong></p>
+<p>Распознано вопросов: <strong>{{ questions_count }}</strong>{% if draft.errors %}, ошибок формата: <strong>{{ draft.errors|length }}</strong>{% endif %}</p>
+
+{% if draft.errors %}
+<div class="alert">
+  <strong>Не удалось распознать некоторые блоки:</strong>
+  <ul>
+    {% for e in draft.errors %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if questions_count == 0 %}
+<div class="alert">Не найдено ни одного вопроса — подтвердить нельзя. Отмените и проверьте формат файла.</div>
+{% else %}
+
+<section class="admin-card">
+  <h2>Первые вопросы (показаны {{ preview_questions|length }} из {{ questions_count }})</h2>
+  {% for q in preview_questions %}
+  <div class="admin-section-block">
+    {% if q.web_image_path %}<img src="{{ q.web_image_path }}" style="max-width:200px;border-radius:8px;display:block;margin-bottom:8px;">{% endif %}
+    <strong>{{ loop.index }}. {{ q.text }}</strong>
+    <ul class="lesson-list">
+      {% for opt in q.options %}
+        <li{% if loop.index0 == q.correct_index %} style="color:var(--accent-2);font-weight:600;"{% endif %}>
+          {{ opt }}{% if loop.index0 == q.correct_index %} ✓{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="admin-card">
+  <h2>Настройки теста</h2>
+  <form method="post" action="/admin/learn/drafts/{{ draft.id }}/confirm" class="admin-form">
+    <label class="admin-checkbox"><input type="checkbox" name="show_correct" checked> Показывать правильный/неправильный ответ во время теста</label>
+    <label class="admin-checkbox"><input type="checkbox" name="show_results" checked> Показывать результат (баллы/процент) после теста</label>
+    <label>Лимит попыток (0 = без ограничений)</label>
+    <input type="number" name="attempts_limit" value="0" min="0">
+    <label>Время на вопрос, секунд (0 = без таймера)</label>
+    <input type="number" name="time_per_question" value="0" min="0">
+    <label class="admin-checkbox"><input type="checkbox" name="shuffle_questions"> Перемешивать порядок вопросов</label>
+
+    <button type="submit" class="btn btn-primary">✅ Подтвердить и сохранить</button>
+  </form>
+</section>
+{% endif %}
+
+<form method="post" action="/admin/learn/drafts/{{ draft.id }}/cancel" style="display:inline">
+  <button type="submit" class="btn-small">Отменить импорт</button>
+</form>
+
+{% endblock %}

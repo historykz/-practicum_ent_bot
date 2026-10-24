@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Диагностика ученика — Smart ENT{% endblock %}
+{% block content %}
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a><span>›</span><span class="crumb-current">🔍 Почему ученик не видит блоки</span>
+</nav>
+<h1>🔍 Почему ученик видит (или не видит) рейтинг, кнопку и деньги</h1>
+<section class="admin-card">
+  <form method="get" action="/admin/learn/diagnose" class="admin-form">
+    <label>Ученик</label>
+    <input type="text" name="u" value="{{ ident }}" placeholder="@username или Telegram ID" required>
+    <label>Предмет</label>
+    <select name="subject" required>
+      <option value="">— выберите —</option>
+      {% for s in subjects %}<option value="{{ s.id }}" {% if s.id == sid %}selected{% endif %}>{{ s.title }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="btn-small">Проверить</button>
+  </form>
+</section>
+{% if res.checks %}
+<section class="admin-card">
+  <h2>Проверка по шагам</h2>
+  <ul class="lesson-list">
+    {% for c in res.checks %}
+    <li>{% if c.ok is none %}ℹ️{% elif c.ok %}✅{% else %}❌{% endif %} <b>{{ c.title }}</b>{% if c.detail %}<br><span class="muted">{{ c.detail }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  <p class="muted">Первый красный крестик сверху — и есть причина. Страница ничего не меняет, только показывает.</p>
+</section>
+{% endif %}
+{% endblock %}
