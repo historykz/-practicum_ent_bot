@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ task.title }} — Smart ENT{% endblock %}
+{% block page_title %}Задание{% endblock %}
+{% block content %}
+<p><a href="/interactive">&larr; Все задания</a></p>
+<h1>🎮 {{ task.title }}</h1>
+{% if draft_view %}<div class="alert">👁 Черновик: ученики это задание пока не видят.</div>{% endif %}
+{% if task.description %}<p class="muted" style="white-space:pre-wrap">{{ task.description }}</p>{% endif %}
+<p class="ia-kind">{% if task.grading == 'server' %}🏆 Задание с оценкой: баллы проверяет сервер.{% else %}🧪 Тренировочное задание: результат не идёт в оценку.{% endif %}</p>
+
+<div class="ia-embed" data-task="{{ task.id }}" data-lesson="{{ lesson_id }}" data-height="{{ task.frame_height or 520 }}"
+     data-title="{{ task.title }}" data-graded="{{ '1' if task.grading == 'server' else '0' }}">
+  <div class="ia-embed-head"><span></span>
+    <span class="ia-embed-tools"><button type="button" data-act="restart">↻ Заново</button><button type="button" data-act="full">⛶ На весь экран</button></span>
+  </div>
+</div>
+
+{% if history %}
+<section class="section-card" style="margin-top:16px;">
+  <h2>Ваши результаты</h2>
+  <ul class="ia-hist">
+    {% for r in history %}
+    <li>{% if r.kind == 'graded' %}🏆 проверено сервером{% else %}🧪 тренировочный{% endif %}:
+        <b>{{ r.score }} из {{ r.max_score }}</b> ({{ r.percent }}%) <span class="muted">{{ (r.created_at or '')[:16] }}</span></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+<style>
+  .ia-hist { list-style: none; padding: 0; margin: 0; }
+  .ia-hist li { padding: 6px 0; border-bottom: 1px solid var(--border); }
+</style>
+{% include "_interactive_embed.html" %}
+{% endblock %}

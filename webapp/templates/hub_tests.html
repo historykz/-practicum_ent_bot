@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Тесты — Smart ENT{% endblock %}
+{% block page_title %}Тесты{% endblock %}
+{% block content %}
+
+{% if not logged_in %}
+<div class="how-to">
+  <b>Войдите, чтобы проходить тесты</b>
+  <p>Список тестов виден всем, но результаты и разбор ошибок сохраняются
+     только в аккаунте. <a href="/cabinet">Войти или создать аккаунт →</a></p>
+</div>
+{% endif %}
+
+<div class="how-to">
+  <b>Что делать</b>
+  <p>Здесь собраны все тесты, которые вам доступны. <b>Нажмите «Пройти»</b> у нужного урока.
+     Ошибки после теста можно разобрать в разделе «Профиль → Мои ошибки».</p>
+</div>
+
+{% if logged_in %}
+<a class="section-card fav-hub" href="/tests/favorites">
+  <span class="fav-hub-title">⭐️ Избранные вопросы{% if fav_count %} — {{ fav_count }}{% endif %}</span>
+  <span class="muted">{% if fav_count %}Повторяйте отмеченные вопросы: тест, карточки или заучивание{% else %}Отмечайте сложные вопросы звёздочкой прямо в тесте{% endif %} →</span>
+</a>
+<style>
+  .fav-hub { display: flex; flex-direction: column; gap: 4px; text-decoration: none; color: inherit;
+             border-color: #f5a623; margin-bottom: 14px; }
+  .fav-hub:hover { text-decoration: none; }
+  .fav-hub-title { font-weight: 700; font-size: 1.05rem; }
+</style>
+{% endif %}
+
+{% if interactive_count %}
+<a class="section-card fav-hub" href="/interactive" style="border-color:#6366f1;">
+  <span class="fav-hub-title">🎮 Интерактивные задания — {{ interactive_count }}</span>
+  <span class="muted">Перетаскивание, сопоставление, схемы и мини-игры →</span>
+</a>
+{% endif %}
+
+{% if web_tests %}
+<section class="section-card">
+  <h2>🌐 Тесты на сайте</h2>
+  <ul class="lesson-list">
+    {% for t in web_tests %}
+    <li class="lesson-row is-free">
+      <div class="lesson-row-body">
+        <span class="lesson-row-title">{{ t.title }}</span>
+        <span class="lesson-row-meta">
+          {% if t.subject %}<span class="muted">{{ t.subject }}{% if t.topic %} · {{ t.topic }}{% endif %}</span>{% endif %}
+          <span class="tag tag-free">{{ t.q_count }} вопрос(ов)</span>
+          {% if t.attempts_left == 0 and not t.in_progress %}
+            <span class="muted">попытки закончились</span>
+          {% else %}
+            <a class="btn-mini btn-mini-primary" href="/tests/web/{{ t.id }}">{% if t.in_progress %}Продолжить →{% else %}Пройти →{% endif %}</a>
+          {% endif %}
+        </span>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<div class="hero-actions" style="justify-content:flex-start;margin-bottom:18px;">
+  <a class="btn btn-primary" href="/cabinet/errors/retest">📝 Тест по моим ошибкам</a>
+  <a class="btn" href="/cabinet/errors">❌ Разбор ошибок</a>
+</div>
+
+{% for g in groups %}
+<section class="section-card">
+  <h2>{{ g.subject.title }}</h2>
+  <ul class="lesson-list">
+    {% for l in g.lessons %}
+    <li class="lesson-row {% if l.locked %}is-paid{% else %}is-free{% endif %}">
+      <div class="lesson-row-body">
+        <span class="lesson-row-title">{{ l.title }}</span>
+        <span class="lesson-row-meta">
+          <span class="tag {% if l.locked %}tag-paid{% else %}tag-free{% endif %}">
+            {% if l.locked %}💎 Платный{% else %}{{ l.qcount }} вопрос(ов){% endif %}
+          </span>
+          {% if l.locked %}
+            <a class="btn-mini" href="/learn/lesson/{{ l.id }}">Как открыть →</a>
+          {% else %}
+            <a class="btn-mini btn-mini-primary" href="/learn/lesson/{{ l.id }}/test">Пройти →</a>
+          {% endif %}
+        </span>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<p class="muted">Пока нет доступных тестов. Загляните в «Обучение».</p>
+{% endfor %}
+
+{% endblock %}

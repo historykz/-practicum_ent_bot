@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Предпросмотр публикации — Smart ENT{% endblock %}
+{% block page_title %}Предпросмотр{% endblock %}
+{% block content %}
+
+<h1>👁 Предпросмотр теста</h1>
+
+{% if msg %}<div class="alert alert-ok">{{ msg }}</div>{% endif %}
+
+<section class="progress-card">
+  <h2>Публикация №{{ pub.id }}{% if pub.title %} — {{ pub.title }}{% endif %}</h2>
+  <table class="pub-meta">
+    <tr><td>Предмет</td><td><b>{{ subject_title or '—' }}</b></td></tr>
+    <tr><td>Тема / раздел</td><td><b>{{ section_title or '—' }}</b></td></tr>
+    <tr><td>Урок</td><td><b>{{ lesson_title or '—' }}</b></td></tr>
+    <tr><td>Тест</td><td><b>{{ test_title or '—' }}</b> (ID {{ pub.test_id }})</td></tr>
+    <tr><td>Вопросов выбрано</td><td><b>{{ count }}</b></td></tr>
+    <tr><td>Статус</td>
+        <td>{% if pub.status == 'published' %}✅ опубликован
+            {{ (pub.published_at or '')[:16] }}{% else %}📝 черновик{% endif %}</td></tr>
+  </table>
+</section>
+
+<section class="progress-card">
+  <h2>Так увидят пост в канале</h2>
+  <div class="pub-tg-preview">
+    <div class="pub-tg-text">{{ channel_text_plain }}</div>
+    <div class="pub-tg-btn">🚀 НАЧАТЬ ТЕСТ</div>
+  </div>
+  <label>Ссылка на эту подборку (можно отправить куда угодно)</label>
+  <input type="text" class="pub-link" readonly value="{{ link }}"
+         onclick="this.select();">
+</section>
+
+<section class="progress-card">
+  <h2>Вопросы по порядку — {{ count }} шт.</h2>
+  <p class="muted">Ученик получит ровно эти вопросы и ровно в этом порядке.</p>
+  {% for q in questions %}
+  <div class="pub-card chosen">
+    <div class="pub-card-head"><b>{{ loop.index }}.</b>
+      <span class="muted">исходный № {{ q.num if q.num is defined else '—' }}</span></div>
+    <div class="pub-qtext">{{ q.text }}</div>
+    <div class="pub-opts">
+      {% for o in q.options %}
+      <div class="pub-opt{% if o.is_correct %} right{% endif %}">
+        <span class="pub-letter">{{ 'ABCDEFGH'[loop.index0] }})</span>
+        {{ o.text }}{% if o.is_correct %} <b>✔ верный</b>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="progress-card">
+  <h2>Что делаем дальше</h2>
+  <div class="pub-actions">
+    {% if pub.status != 'published' %}
+    <a class="btn" href="/admin/publications/pick/{{ pub.test_id }}?pub={{ pub.id }}{% if pub.lesson_id %}&lesson={{ pub.lesson_id }}{% endif %}">✏️ Изменить вопросы</a>
+    {% endif %}
+
+    {% if pub.status != 'published' %}
+    <form method="post" action="/admin/publications/{{ pub.id }}/publish"
+          onsubmit="return confirm('Отправить публикацию №{{ pub.id }} в канал?');"
+          class="admin-form" style="display:inline-block;">
+      {% if channels|length > 1 %}
+      <label>Канал</label>
+      <select name="channel_id">
+        {% for c in channels %}
+        <option value="{{ c.id }}">{{ c.title or c.id }}</option>
+        {% endfor %}
+      </select>
+      {% elif channels %}
+      <input type="hidden" name="channel_id" value="{{ channels[0].id }}">
+      {% endif %}
+      <button class="btn btn-primary" type="submit">📣 Опубликовать в канал</button>
+    </form>
+    {% else %}
+    <form method="post" action="/admin/publications/{{ pub.id }}/copy" style="display:inline;">
+      <button class="btn btn-primary" type="submit">📄 Создать копию</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if pub.status == 'published' %}
+  <p class="muted">Подборка уже в канале. Её состав закреплён: правки исходного
+     теста на этот пост не повлияют. Нужен новый вариант — сделайте копию.</p>
+  {% endif %}
+</section>
+
+<p><a href="/admin/publications">⬅️ К списку публикаций</a></p>
+{% endblock %}

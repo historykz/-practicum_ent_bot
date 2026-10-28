@@ -1,0 +1,50 @@
+{# Живой отсчёт до ЕНТ. Ожидает ent_exam_date (ISO, время Астаны UTC+5). #}
+{% if ent_exam_date %}
+<section class="ent-countdown" id="ent-countdown" style="display:none;">
+  <div class="ent-countdown-title">⏳ До ЕНТ осталось</div>
+  <div class="ent-countdown-grid">
+    <div class="ent-cd-box"><div class="ent-cd-value" id="ent-cd-days">—</div><div class="ent-cd-label">дней</div></div>
+    <div class="ent-cd-box"><div class="ent-cd-value" id="ent-cd-hours">—</div><div class="ent-cd-label">часов</div></div>
+    <div class="ent-cd-box"><div class="ent-cd-value" id="ent-cd-mins">—</div><div class="ent-cd-label">минут</div></div>
+    <div class="ent-cd-box"><div class="ent-cd-value" id="ent-cd-secs">—</div><div class="ent-cd-label">секунд</div></div>
+  </div>
+  <div class="ent-countdown-date" id="ent-cd-date"></div>
+</section>
+<script>
+(function() {
+  // Дата задана админом по времени Астаны (UTC+5)
+  var target = new Date("{{ ent_exam_date }}+05:00").getTime();
+  if (isNaN(target)) return;
+  var root = document.getElementById('ent-countdown');
+  var elD = document.getElementById('ent-cd-days');
+  var elH = document.getElementById('ent-cd-hours');
+  var elM = document.getElementById('ent-cd-mins');
+  var elS = document.getElementById('ent-cd-secs');
+  var elDate = document.getElementById('ent-cd-date');
+
+  var d = new Date("{{ ent_exam_date }}+05:00");
+  var months = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+  elDate.textContent = 'Экзамен: ' + d.getUTCDate() + ' ' + months[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function tick() {
+    var left = target - Date.now();
+    if (left <= 0) {
+      root.style.display = 'block';
+      root.querySelector('.ent-countdown-title').textContent = '🎉 ЕНТ уже сегодня — удачи!';
+      root.querySelector('.ent-countdown-grid').style.display = 'none';
+      return;
+    }
+    var secs = Math.floor(left / 1000);
+    elD.textContent = Math.floor(secs / 86400);
+    elH.textContent = pad(Math.floor(secs % 86400 / 3600));
+    elM.textContent = pad(Math.floor(secs % 3600 / 60));
+    elS.textContent = pad(secs % 60);
+    root.style.display = 'block';
+    setTimeout(tick, 1000);
+  }
+  tick();
+})();
+</script>
+{% endif %}

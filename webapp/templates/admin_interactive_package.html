@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Загрузка архива — Smart ENT{% endblock %}
+{% block content %}
+{% set r = p.report %}
+<nav class="admin-crumbs">
+  <a href="/admin/interactive">🎮 Интерактивные задания</a><span>›</span>
+  <span class="crumb-current">📦 {{ p.title or p.file_name or ('Загрузка №' ~ p.id) }}</span>
+</nav>
+<h1>📦 {{ p.title or p.file_name or 'Архив' }}</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">⚠️ {{ error }}</div>{% endif %}
+
+<section class="admin-card">
+  <p>Файл: <b>{{ p.file_name }}</b> · заданий в архиве: <b>{{ p.tasks_total }}</b> · принято: <b>{{ p.tasks_ok }}</b>
+     {% if r.has_manifest %}· описание: manifest.json, формат версии {{ p.format_version }}{% else %}· без manifest.json{% endif %}</p>
+  {% if r.warnings %}<div class="alert"><b>Замечания по архиву:</b><ul>{% for w in r.warnings %}<li>{{ w }}</li>{% endfor %}</ul></div>{% endif %}
+  {% set bad = r.tasks|selectattr('problems')|list %}
+  {% if bad %}
+  <div class="alert"><b>Не приняты ({{ bad|length }}):</b>
+    <ul>{% for t in bad %}<li>№{{ t.n }} «{{ t.title }}» ({{ t.id }}): {{ t.problems|join('; ') }}</li>{% endfor %}</ul>
+    <p class="muted">Попросите нейросеть исправить только эти задания по шаблону и загрузите их отдельным архивом:
+       принятые задания уже в библиотеке, повторная загрузка всего архива создаст их копии.</p>
+  </div>
+  {% endif %}
+</section>
+
+{% if p.tasks %}
+<form method="post" action="/admin/interactive/bulk" id="bulk">
+  <input type="hidden" name="next" value="/admin/interactive/package/{{ p.id }}?x=1">
+  <section class="admin-card">
+    <div class="ia-bulk">
+      <label class="admin-checkbox"><input type="checkbox" id="all"> Выбрать все ({{ p.tasks|length }})</label>
+      <select name="action" id="bulk-action" required>
+        <option value="">— действие с отмеченными —</option>
+        <option value="publish">Опубликовать</option>
+        <option value="lesson">Вставить в урок (по порядку, в конец урока)</option>
+        <option value="unpublish">Снять с публикации</option>
+        <option value="vis_lessons">Показывать только в уроках</option>
+        <option value="vis_all">Показывать в общем списке</option>
+        <option value="delete">Удалить</option>
+      </select>
+      <select name="lesson_id" id="bulk-lesson" hidden>
+        <option value="">— урок —</option>
+        {% for l in lessons %}<option value="{{ l.id }}">{{ l.subject_title }} › {{ l.section_title }} › {{ l.title }}</option>{% endfor %}
+      </select>
+      <button type="submit" class="btn-small">Выполнить</button>
+    </div>
+  </section>
+
+  {% for t in p.tasks %}
+  <section class="admin-card ia-pkg-task" id="t{{ t.id }}">
+    <div class="ia-pkg-head">
+      <label class="admin-checkbox"><input type="checkbox" name="task_id" value="{{ t.id }}" class="pick"></label>
+      <div class="ia-pkg-title">
+        <b>{{ loop.index }}. {{ t.title }}</b>
+        <span class="muted">{{ t.manifest_id }}{% if t.subject %} · {{ t.subject }}{% endif %}{% if t.topic %} · {{ t.topic }}{% endif %}
+          · {% if t.grading == 'server' %}🏆 проверка сервером, {{ t.max_score }} б.{% else %}🧪 тренировка{% endif %}
+          · {% if t.status == 'published' %}✅ опубликовано{% else %}📝 черновик{% endif %}
+          {% if t.lessons_count %}· в уроках: {{ t.lessons_count }}{% endif %}</span>
+      </div>
+      <a class="btn-small" href="/admin/interactive/{{ t.id }}">Открыть</a>
+      <button type="button" class="btn-small" data-preview="{{ t.id }}" data-height="{{ t.frame_height or 520 }}">👁 Предпросмотр</button>
+    </div>
+    {% if t.description %}<p class="muted">{{ t.description }}</p>{% endif %}
+    <div class="ia-pkg-preview" id="pv{{ t.id }}"></div>
+  </section>
+  {% endfor %}
+</form>
+{% else %}
+<p class="muted">Заданий из этой загрузки в библиотеке нет.</p>
+{% endif %}
+
+<style>
+  .ia-bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .ia-bulk select { max-width: 100%; }
+  .ia-pkg-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ia-pkg-title { flex: 1; min-width: 200px; display: flex; flex-direction: column; }
+  .ia-pkg-preview:empty { display: none; }
+</style>
+{% include "_interactive_embed.html" %}
+<script>
+(function () {
+  var all = document.getElementById('all');
+  if (all) all.addEventListener('change', function () { document.querySelectorAll('.pick').forEach(function (c) { c.checked = all.checked; }); });
+  var act = document.getElementById('bulk-action'), les = document.getElementById('bulk-lesson');
+  if (act) act.addEventListener('change', function () { les.hidden = act.value !== 'lesson'; les.required = act.value === 'lesson'; });
+  var bulk = document.getElementById('bulk');
+  if (bulk) bulk.addEventListener('submit', function (e) {
+    if (!document.querySelector('.pick:checked')) { e.preventDefault(); alert('Отметьте задания галочками.'); return; }
+    if (act.value === 'delete' && !confirm('Удалить отмеченные задания?')) e.preventDefault();
+  });
+  // Предпросмотр: то же изолированное окно, что у ученика (результаты админа видны только ему)
+  document.querySelectorAll('[data-preview]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var id = b.getAttribute('data-preview'), box = document.getElementById('pv' + id);
+      if (box.firstChild) { box.innerHTML = ''; b.textContent = '👁 Предпросмотр'; return; }
+      var d = document.createElement('div');
+      d.className = 'ia-embed'; d.setAttribute('data-task', id); d.setAttribute('data-preview', '1');
+      d.setAttribute('data-height', b.getAttribute('data-height'));
+      d.setAttribute('data-src', '/admin/interactive/' + id + '/doc');
+      box.appendChild(d); b.textContent = '✕ Скрыть';
+      window.__iaEmbed.scan();
+    });
+  });
+})();
+</script>
+{% endblock %}

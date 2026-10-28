@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% block title %}{{ task.title }} — интерактивное задание — Smart ENT{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="/static/vendor/codemirror/codemirror.min.css">
+<script src="/static/vendor/codemirror/codemirror.min.js"></script>
+<script src="/static/vendor/codemirror/mode/xml/xml.min.js"></script>
+<script src="/static/vendor/codemirror/mode/javascript/javascript.min.js"></script>
+<script src="/static/vendor/codemirror/mode/css/css.min.js"></script>
+<script src="/static/vendor/codemirror/mode/htmlmixed/htmlmixed.min.js"></script>
+
+<nav class="admin-crumbs">
+  <a href="/admin/interactive">🎮 Интерактивные задания</a><span>›</span>
+  {% if package %}<a href="/admin/interactive/package/{{ package.id }}">📦 {{ package.file_name or 'архив' }}</a><span>›</span>{% endif %}
+  <span class="crumb-current">{{ task.title }}</span>
+</nav>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
+<h1>📦 {{ task.title }}</h1>
+<p class="muted">Из архива{% if task.manifest_id %} · id в архиве: {{ task.manifest_id }}{% endif %} · версия {{ task.version }} · файлы: {{ size_mb }} МБ ·
+  {% if task.status == 'published' %}✅ опубликовано{% else %}📝 черновик{% endif %}
+  · {% if task.visibility == 'lessons' %}только в уроках{% else %}в общем списке и в уроках{% endif %}</p>
+
+<div class="ia-actions">
+  {% if task.status == 'published' %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/unpublish"><button class="btn">⏸ Снять с публикации</button></form>
+  <a class="btn" href="/interactive/{{ task.id }}" target="_blank">👁 Как видит ученик</a>
+  {% else %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/publish"><button class="btn btn-primary">🚀 Опубликовать</button></form>
+  {% endif %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/duplicate"><button class="btn">📄 Копия</button></form>
+  <a class="btn" href="/admin/interactive/{{ task.id }}/results">📊 Результаты</a>
+  <form method="post" action="/admin/interactive/{{ task.id }}/delete"
+        onsubmit="return confirm('Удалить задание? Оно пропадёт и из всех уроков ({{ lessons_used|length }}), вместе с результатами учеников.');">
+    <button class="btn btn-danger">🗑 Удалить</button></form>
+</div>
+{% if problems %}<div class="alert">Перед публикацией исправьте: {{ problems|join(' ') }}</div>{% endif %}
+
+<section class="admin-card" id="preview">
+  <h2>👁 Предпросмотр</h2>
+  <div class="ia-ver-tabs">
+    <button type="button" class="btn-small active" data-v="current">Текущая версия</button>
+    {% if task.pending_files_key %}<button type="button" class="btn-small" data-v="pending">🆕 Новая (ждёт проверки)</button>{% endif %}
+    {% if has_prev %}<button type="button" class="btn-small" data-v="prev">Прошлая</button>{% endif %}
+    <button type="button" class="btn-small" id="pv-restart">↻ Перезапустить</button>
+  </div>
+  <div class="ia-embed" id="pv" data-task="{{ task.id }}" data-preview="1" data-height="{{ task.frame_height or 560 }}"
+       data-src="/admin/interactive/{{ task.id }}/doc"></div>
+  <h3>Ошибки задания <span class="muted">(видны только вам)</span></h3>
+  <ul class="ia-errors" id="errors"><li class="muted">Ошибок нет.</li></ul>
+  <button type="button" class="btn-small" id="copy-errors">📋 Скопировать ошибки для нейросети</button>
+</section>
+
+<section class="admin-card" id="versions">
+  <h2>🔁 Версии</h2>
+  {% if task.pending_files_key %}
+  <div class="alert">🆕 Загружена новая версия. Ученики пока видят прежнюю. Проверьте её во вкладке «Новая» в предпросмотре.
+    <div class="ia-actions" style="margin-top:8px">
+      <form method="post" action="/admin/interactive/{{ task.id }}/pending/publish"><button class="btn btn-primary">✅ Опубликовать новую версию</button></form>
+      <form method="post" action="/admin/interactive/{{ task.id }}/pending/discard" onsubmit="return confirm('Удалить новую версию?');"><button class="btn">✕ Удалить новую версию</button></form>
+    </div>
+  </div>
+  {% endif %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/replace" enctype="multipart/form-data" class="admin-form admin-inline">
+    <input type="file" name="file" accept=".zip" required>
+    <button class="btn-small">📦 Заменить архивом</button>
+  </form>
+  <p class="muted">Подойдёт архив с одним заданием или набор, в котором есть задание с тем же id
+     «{{ task.manifest_id or '—' }}». {% if task.status == 'published' %}Опубликованное задание обновится только после проверки.{% endif %}
+     Результаты учеников сохраняются.</p>
+  {% if has_prev %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/rollback" onsubmit="return confirm('Вернуть прошлую версию? Текущая станет прошлой, это можно отменить.');">
+    <button class="btn-small">↩️ Откатить к прошлой версии</button></form>
+  {% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>📝 Описание и оценка</h2>
+  <form class="admin-form" id="meta">
+    <label>Название</label><input autocomplete="off" type="text" name="title" value="{{ task.title }}" maxlength="200" required>
+    <label>Описание для ученика</label><textarea autocomplete="off" name="description" rows="2" maxlength="2000">{{ task.description or '' }}</textarea>
+    <div class="ia-two"><div><label>Предмет</label><input autocomplete="off" type="text" name="subject" value="{{ task.subject or '' }}" maxlength="120"></div>
+      <div><label>Тема</label><input autocomplete="off" type="text" name="topic" value="{{ task.topic or '' }}" maxlength="200"></div></div>
+    <label>Где показывать ученикам</label>
+    <select name="visibility" autocomplete="off">
+      <option value="all" {% if task.visibility != 'lessons' %}selected{% endif %}>В общем списке «Интерактивные задания» и в уроках</option>
+      <option value="lessons" {% if task.visibility == 'lessons' %}selected{% endif %}>Только внутри уроков (с правами урока: оплата, доступ)</option>
+    </select>
+    <label>Оценка</label>
+    <select name="grading" autocomplete="off">
+      <option value="practice" {% if task.grading != 'server' %}selected{% endif %}>Тренировка: результат считает само задание</option>
+      <option value="server" {% if task.grading == 'server' %}selected{% endif %}>Влияет на оценку: проверяет сервер по ключу</option>
+    </select>
+    <div class="ia-two">
+      <div><label>Максимум баллов</label><input autocomplete="off" type="number" name="max_score" min="1" max="1000" value="{{ task.max_score or 10 }}"></div>
+      <div><label>Попыток проверки (0 — без ограничения)</label><input autocomplete="off" type="number" name="max_attempts" min="0" max="100" value="{{ task.max_attempts or 0 }}"></div>
+    </div>
+    <div class="ia-two">
+      <div><label>Начальная высота окна, px (0 — авто)</label><input autocomplete="off" type="number" name="frame_height" min="0" max="4000" value="{{ task.frame_height or 0 }}"></div>
+      <div><label class="admin-checkbox" style="margin-top:28px"><input autocomplete="off" type="checkbox" name="allow_retry" {% if task.allow_retry %}checked{% endif %}> Разрешить пересдачу</label></div>
+    </div>
+    <label>Ключ ответа (JSON) для проверки сервером</label>
+    <textarea autocomplete="off" name="answer_key" rows="6" class="ia-mono" spellcheck="false">{{ task.answer_key or '' }}</textarea>
+    <button type="submit" class="btn btn-primary">💾 Сохранить</button> <span id="meta-out" class="muted"></span>
+  </form>
+</section>
+
+<section class="admin-card" id="files">
+  <h2>🗂 Файлы и код</h2>
+  <p class="muted">{% if files_where == 'pending' %}Правки идут в новую версию: ученики увидят их после публикации.
+     {% elif task.status == 'published' %}При первой правке создастся новая версия: ученики увидят её после публикации.
+     {% else %}Задание черновик: правки сразу видны в предпросмотре.{% endif %}</p>
+  <ul class="ia-files">
+    {% for f in files %}
+    <li><code>{{ f.path }}</code> <span class="muted">{{ (f.size / 1024)|round(1) }} КБ</span>
+        {% if f.editable %}<button type="button" class="btn-small" data-edit="{{ f.path }}">✏️ Код</button>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  <div id="editor-box" hidden>
+    <p><b id="editor-path"></b></p>
+    <textarea id="editor" autocomplete="off"></textarea>
+    <div class="ia-actions" style="margin-top:8px">
+      <button type="button" class="btn btn-primary" id="file-save">💾 Сохранить файл</button>
+      <button type="button" class="btn" id="file-close">Закрыть</button>
+      <span id="file-out" class="muted"></span>
+    </div>
+  </div>
+</section>
+
+<section class="admin-card" id="lessons">
+  <h2>📚 В уроках ({{ lessons_used|length }})</h2>
+  {% if lessons_used %}
+  <ul class="lesson-list">
+    {% for l in lessons_used %}
+    <li>{{ l.subject_title }} › {{ l.section_title }} › <a href="/admin/learn/lessons/{{ l.lesson_id }}/edit#block{{ l.block_id }}">{{ l.lesson_title }}</a></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">Пока ни в одном уроке.</p>{% endif %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/to-lesson" class="admin-form admin-inline">
+    <select name="lesson_id" required>
+      <option value="">— вставить в урок —</option>
+      {% for l in lessons %}<option value="{{ l.id }}">{{ l.subject_title }} › {{ l.section_title }} › {{ l.title }}</option>{% endfor %}
+    </select>
+    <button class="btn-small">➕ Вставить</button>
+  </form>
+  <p class="muted">Задание добавится в конец урока. Перенести его выше или ниже, убрать или переместить в другой урок
+     можно на странице урока, блок «Содержимое урока на сайте».</p>
+</section>
+
+<script id="task-data" type="application/json">{{ task_json|safe }}</script>
+<style>
+  .ia-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 14px; }
+  .ia-actions form { margin: 0; }
+  .ia-ver-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .ia-ver-tabs .active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .ia-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 600px) { .ia-two { grid-template-columns: 1fr; } }
+  .ia-mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .ia-errors { list-style: none; padding: 0; margin: 6px 0; max-height: 200px; overflow: auto; font: 12px ui-monospace, Menlo, monospace; }
+  .ia-errors li { padding: 6px 8px; border-bottom: 1px solid var(--border); color: #d33; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ia-errors li.muted { color: var(--muted); }
+  .ia-files { list-style: none; padding: 0; max-height: 320px; overflow: auto; }
+  .ia-files li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .ia-files code { overflow-wrap: anywhere; }
+  #editor-box .CodeMirror, #editor { height: 420px; width: 100%; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; }
+</style>
+{% include "_interactive_embed.html" %}
+<script>
+(function () {
+  var T = JSON.parse(document.getElementById('task-data').textContent);
+  function $(id) { return document.getElementById(id); }
+  // предпросмотр версий
+  var pv = $('pv');
+  function showVersion(v) {
+    pv.innerHTML = ''; delete pv.__ia;
+    pv.setAttribute('data-src', '/admin/interactive/' + T.id + '/doc' + (v === 'current' ? '' : '?v=' + v));
+    $('errors').innerHTML = '<li class="muted">Ошибок нет.</li>';
+    window.__iaEmbed.scan();
+  }
+  document.querySelectorAll('.ia-ver-tabs [data-v]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      document.querySelectorAll('.ia-ver-tabs [data-v]').forEach(function (x) { x.classList.toggle('active', x === b); });
+      showVersion(b.getAttribute('data-v'));
+    });
+  });
+  $('pv-restart').addEventListener('click', function () {
+    var a = document.querySelector('.ia-ver-tabs .active'); showVersion(a ? a.getAttribute('data-v') : 'current');
+  });
+  // ошибки задания из предпросмотра
+  window.addEventListener('message', function (e) {
+    var f = pv.querySelector('iframe');
+    if (!f || e.source !== f.contentWindow) return;
+    var m = e.data || {};
+    if (!m.__smartent || m.type !== 'error') return;
+    var list = $('errors'), empty = list.querySelector('.muted'); if (empty) empty.remove();
+    var li = document.createElement('li');
+    li.textContent = (m.data.line ? 'Строка ' + m.data.line + ': ' : '') + m.data.message;
+    list.appendChild(li);
+  });
+  $('copy-errors').addEventListener('click', function () {
+    var lines = Array.prototype.map.call($('errors').querySelectorAll('li:not(.muted)'), function (li) { return '- ' + li.textContent; });
+    var text = 'Задание «' + T.title + '» на SMART ЕНТ выдаёт ошибки. Исправь и пришли архив заново по тому же шаблону:\n' +
+               (lines.length ? lines.join('\n') : '- (ошибок не было)');
+    try { navigator.clipboard.writeText(text); this.textContent = '✅ Скопировано'; } catch (x) { prompt('Скопируйте:', text); }
+  });
+  // описание и оценка
+  $('meta').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var fd = new FormData(this), body = {};
+    fd.forEach(function (v, k) { body[k] = v; });
+    body.allow_retry = !!this.querySelector('[name=allow_retry]').checked;
+    var r = await fetch('/admin/interactive/' + T.id + '/save', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    var d = {}; try { d = await r.json(); } catch (x) {}
+    $('meta-out').textContent = d.ok ? '✅ Сохранено' : '⚠️ ' + (d.error || 'Ошибка ' + r.status);
+  });
+  // правка файлов
+  var cm = null, path = '';
+  function modeOf(p) { p = p.toLowerCase(); if (/\.(html?|svg|xml)$/.test(p)) return 'htmlmixed'; if (/\.css$/.test(p)) return 'css';
+    if (/\.(m?js|json)$/.test(p)) return {name: 'javascript', json: /\.json$/.test(p)}; return null; }
+  document.querySelectorAll('[data-edit]').forEach(function (b) {
+    b.addEventListener('click', async function () {
+      path = b.getAttribute('data-edit');
+      var r = await fetch('/admin/interactive/' + T.id + '/file?path=' + encodeURIComponent(path));
+      var d = await r.json();
+      if (d.error) { alert(d.error); return; }
+      $('editor-box').hidden = false; $('editor-path').textContent = path; $('file-out').textContent = '';
+      if (window.CodeMirror) {
+        if (!cm) cm = CodeMirror.fromTextArea($('editor'), {lineNumbers: true, lineWrapping: true, tabSize: 2});
+        cm.setOption('mode', modeOf(path)); cm.setValue(d.content); setTimeout(function () { cm.refresh(); }, 0);
+      } else { $('editor').value = d.content; }
+      $('editor-box').scrollIntoView({block: 'start'});
+    });
+  });
+  $('file-close').addEventListener('click', function () { $('editor-box').hidden = true; });
+  $('file-save').addEventListener('click', async function () {
+    var content = cm ? cm.getValue() : $('editor').value;
+    var r = await fetch('/admin/interactive/' + T.id + '/file', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({path: path, content: content})});
+    var d = {}; try { d = await r.json(); } catch (x) {}
+    if (!d.ok) { $('file-out').textContent = '⚠️ ' + (d.error || 'Ошибка'); return; }
+    $('file-out').textContent = d.where === 'pending' ? '✅ Сохранено в новую версию. Опубликуйте её в блоке «Версии».' : '✅ Сохранено';
+    if (d.where === 'pending' && !T.pending_files_key) setTimeout(function () { location.href = location.pathname + '?message=' + encodeURIComponent('Правка сохранена в новую версию') + '#versions'; }, 900);
+    else showVersion(T.pending_files_key ? 'pending' : 'current');
+  });
+})();
+</script>
+{% endblock %}

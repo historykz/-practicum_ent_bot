@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}История Live — Smart ENT{% endblock %}
+{% block content %}
+<h1>📜 История Live-тестов</h1>
+<p class="muted"><a href="/admin/live">🎮 Запустить новый Live-тест</a></p>
+{% if rooms %}
+<div class="table-scroll">
+  <table class="results-table">
+    <thead><tr><th>Код</th><th>Тест</th><th>Игроков</th><th>Статус</th><th>Когда</th><th></th></tr></thead>
+    <tbody>
+      {% for r in rooms %}
+      <tr>
+        <td><b>{{ r.code }}</b></td><td>{{ r.title }}</td><td>{{ r.players }}</td>
+        <td>{% if r.status == 'finished' %}✅ завершён{% elif r.status == 'lobby' %}⏳ лобби{% else %}▶️ идёт{% endif %}</td>
+        <td>{{ r.when }}</td>
+        <td><a class="btn-small" href="/admin/live/report/{{ r.code }}">📊 Отчёт</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}<p class="muted">Пока не было ни одного Live-теста.</p>{% endif %}
+{% endblock %}

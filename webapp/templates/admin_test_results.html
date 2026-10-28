@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Результаты теста — Smart ENT{% endblock %}
+{% block content %}
+<nav class="admin-crumbs">
+  <a href="/admin/tests">🧪 Конструктор</a><span>›</span>
+  <a href="/admin/tests/{{ test.id }}">{{ test.title }}</a><span>›</span><span class="crumb-current">📊 Результаты</span>
+</nav>
+<h1>📊 Результаты теста «{{ test.title }}»</h1>
+<p class="muted">Здесь все попытки учеников, и начатые на платформе, и на сайте. Те же результаты видны
+   в статистике теста в боте. Пробные прохождения автора не учитываются.</p>
+<section class="admin-card">
+  {% if rows %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Ученик</th><th>Где</th><th>Статус</th><th>Баллы</th><th>%</th><th>Верно / нет / пропуск</th><th>Начало (UTC)</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{% if r.username %}@{{ r.username }}{% else %}{{ r.first_name or r.tg_id }}{% endif %}</td>
+        <td>{% if r.via == 'link' %}🌐 сайт{% else %}🤖 платформа{% endif %}</td>
+        <td>{% if r.status == 'finished' %}✅ завершён{% elif r.status == 'aborted' %}⛔ прерван{% else %}⏳ идёт{% endif %}</td>
+        <td>{% if r.max_score %}{{ r.score or 0 }} из {{ r.max_score }}{% else %}{{ r.score or 0 }}{% endif %}</td>
+        <td>{% if r.percent is not none %}{{ r.percent }}%{% else %}—{% endif %}</td>
+        <td>{{ r.correct_answers }} / {{ r.wrong_answers }} / {{ r.skipped_answers or 0 }}</td>
+        <td>{{ (r.start_time or '')[:16] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">Пока никто не проходил этот тест.</p>
+  {% endif %}
+</section>
+{% endblock %}

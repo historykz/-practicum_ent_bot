@@ -1,0 +1,143 @@
+{# Содержимое урока на сайте: блоки по порядку (текст, интерактив, картинка, видео).
+   Подключается в admin_lesson_edit.html. #}
+<section class="admin-card" id="blocks">
+  <h2>🧩 Содержимое урока на сайте ({{ blocks|length }})</h2>
+  <p class="muted">Блоки показываются ученику по порядку на странице урока: после видео и кнопки конспекта, перед тестом.
+     Видит их только тот, кому урок открыт (оплата и доступ — как у урока). Интерактивов может быть сколько угодно.</p>
+
+  {% if blocks %}
+  <ol class="lb-list" id="lb-list" data-lesson="{{ blocks_lesson_id }}">
+    {% for b in blocks %}
+    <li class="lb-item" id="block{{ b.id }}" data-id="{{ b.id }}">
+      <div class="lb-head">
+        <span class="lb-drag" title="Перетащите, чтобы изменить порядок">⋮⋮</span>
+        <b>{{ loop.index }}.</b>
+        {% if b.kind == 'text' %}📝 Текст{% elif b.kind == 'interactive' %}🎮 Интерактив{% elif b.kind == 'image' %}🖼 Картинка{% else %}🎬 Видео{% endif %}
+        {% if b.title %}· {{ b.title }}{% endif %}
+        {% if b.kind == 'interactive' %}
+          · <a href="/admin/interactive/{{ b.task_id }}">{{ b.task_title or 'задание удалено' }}</a>
+          {% if b.task_status != 'published' %}<span class="lb-warn">черновик: ученики не видят</span>{% endif %}
+        {% endif %}
+        <span class="lb-tools">
+          <form method="post" action="/admin/learn/blocks/{{ b.id }}/move"><input type="hidden" name="lesson_id" value="{{ lesson.id }}"><input type="hidden" name="dir" value="up"><button class="btn-small" title="Выше">▲</button></form>
+          <form method="post" action="/admin/learn/blocks/{{ b.id }}/move"><input type="hidden" name="lesson_id" value="{{ lesson.id }}"><input type="hidden" name="dir" value="down"><button class="btn-small" title="Ниже">▼</button></form>
+          <form method="post" action="/admin/learn/blocks/{{ b.id }}/delete" onsubmit="return confirm('Убрать блок из урока?');"><input type="hidden" name="lesson_id" value="{{ lesson.id }}"><button class="btn-small btn-danger">✕</button></form>
+        </span>
+      </div>
+      <details class="admin-details">
+        <summary>Изменить · перенести</summary>
+        {% if b.kind in ('text', 'image', 'video', 'interactive') %}
+        <form method="post" action="/admin/learn/blocks/{{ b.id }}/save" class="admin-form">
+          <input type="hidden" name="lesson_id" value="{{ lesson.id }}">
+          <input type="text" name="title" value="{{ b.title or '' }}" placeholder="Заголовок блока (необязательно)" maxlength="200">
+          {% if b.kind == 'text' %}<textarea name="body" rows="5" required>{{ b.body or '' }}</textarea>
+          {% elif b.kind == 'image' %}<textarea name="body" rows="2" placeholder="Подпись к картинке">{{ b.body or '' }}</textarea>
+          {% else %}<textarea name="body" rows="2" placeholder="Пояснение над блоком (необязательно)">{{ b.body or '' }}</textarea>{% endif %}
+          <button class="btn-small">💾 Сохранить</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/admin/learn/blocks/{{ b.id }}/transfer" class="admin-form admin-inline">
+          <input type="hidden" name="lesson_id" value="{{ lesson.id }}">
+          <select name="target_lesson_id" required>
+            <option value="">— в какой урок —</option>
+            {% for l in lesson_choices %}{% if l.id != blocks_lesson_id %}<option value="{{ l.id }}">{{ l.subject_title }} › {{ l.section_title }} › {{ l.title }}</option>{% endif %}{% endfor %}
+          </select>
+          <select name="mode"><option value="move">Перенести</option><option value="copy">Скопировать</option></select>
+          <button class="btn-small">OK</button>
+        </form>
+      </details>
+      {% if b.kind == 'text' %}<p class="lb-preview">{{ b.body[:220] }}{% if b.body|length > 220 %}…{% endif %}</p>
+      {% elif b.kind == 'image' %}<img src="{{ b.image_url }}" alt="" class="lb-img">
+      {% elif b.kind == 'video' %}<p class="lb-preview">YouTube: {{ b.youtube_id }}</p>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="muted">Пока блоков нет: на странице урока показываются только видео, конспект и тест, как раньше.</p>
+  {% endif %}
+
+  <details class="admin-details" {% if not blocks %}open{% endif %}>
+    <summary>➕ Добавить блок в конец урока</summary>
+    <form method="post" action="/admin/learn/lessons/{{ lesson.id }}/blocks/add" enctype="multipart/form-data" class="admin-form" id="lb-add">
+      <label>Тип блока</label>
+      <select name="kind" id="lb-kind" autocomplete="off">
+        <option value="text">📝 Текстовое объяснение</option>
+        {% if can_ia %}<option value="interactive">🎮 Интерактивное задание из библиотеки</option>{% endif %}
+        <option value="image">🖼 Картинка или схема</option>
+        <option value="video">🎬 Видео с YouTube</option>
+      </select>
+      <input type="text" name="title" placeholder="Заголовок блока (необязательно)" maxlength="200">
+      <div data-for="text image"><textarea name="body" rows="5" placeholder="Текст объяснения (для картинки — подпись)"></textarea></div>
+      {% if can_ia %}
+      <div data-for="interactive">
+        <input type="search" id="lb-search" placeholder="Поиск задания по названию или теме" autocomplete="off">
+        <select name="task_id" id="lb-task" size="6">
+          {% for t in ia_tasks %}<option value="{{ t.id }}" data-s="{{ (t.title ~ ' ' ~ t.subject ~ ' ' ~ t.topic)|lower }}">{% if t.status != 'published' %}📝 {% endif %}{{ t.title }}{% if t.subject %} · {{ t.subject }}{% endif %}{% if t.topic %} · {{ t.topic }}{% endif %}</option>{% endfor %}
+        </select>
+        <p class="muted">Нужного нет? <a href="/admin/interactive" target="_blank">Загрузите ZIP в библиотеку</a> — и обновите эту страницу.
+           Сразу много заданий в урок удобнее вставлять со страницы загруженного архива.</p>
+      </div>
+      {% endif %}
+      <div data-for="image"><input type="file" name="image" accept="image/*"></div>
+      <div data-for="video"><input type="text" name="video_url" placeholder="https://youtube.com/watch?v=..."></div>
+      <button type="submit" class="btn btn-primary">Добавить блок</button>
+    </form>
+  </details>
+</section>
+<style>
+  .lb-list { list-style: none; padding: 0; margin: 10px 0; display: flex; flex-direction: column; gap: 8px; }
+  .lb-item { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: var(--bg-card); }
+  .lb-item.lb-drag-on { opacity: .5; }
+  .lb-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .lb-drag { cursor: grab; color: var(--muted); padding: 0 4px; }
+  .lb-tools { margin-left: auto; display: flex; gap: 4px; }
+  .lb-tools form { margin: 0; }
+  .lb-warn { font-size: .8rem; color: #b45309; background: rgba(245,158,11,.15); border-radius: 999px; padding: 1px 8px; }
+  .lb-preview { margin: 6px 0 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .lb-img { max-width: 220px; max-height: 140px; margin-top: 6px; border-radius: 8px; }
+  #lb-task { width: 100%; }
+</style>
+<script>
+(function () {
+  var kind = document.getElementById('lb-kind');
+  function apply() { document.querySelectorAll('#lb-add [data-for]').forEach(function (d) {
+    d.hidden = d.getAttribute('data-for').split(' ').indexOf(kind.value) < 0; }); }
+  if (kind) { kind.addEventListener('change', apply); apply(); }
+  var srch = document.getElementById('lb-search'), sel = document.getElementById('lb-task');
+  if (srch) srch.addEventListener('input', function () {
+    var q = srch.value.trim().toLowerCase();
+    Array.prototype.forEach.call(sel.options, function (o) { o.hidden = q && o.getAttribute('data-s').indexOf(q) < 0; });
+  });
+  var add = document.getElementById('lb-add');
+  if (add) add.addEventListener('submit', function (e) {
+    if (kind.value === 'interactive' && !sel.value) { e.preventDefault(); alert('Выберите задание в списке.'); }
+  });
+  // перетаскивание блоков
+  var list = document.getElementById('lb-list');
+  if (!list) return;
+  var drag = null;
+  list.querySelectorAll('.lb-item').forEach(function (li) {
+    // тянуть можно только за ⋮⋮, иначе ломается выделение текста в полях
+    var h = li.querySelector('.lb-drag');
+    h.addEventListener('mousedown', function () { li.setAttribute('draggable', 'true'); });
+    h.addEventListener('mouseup', function () { li.removeAttribute('draggable'); });
+    li.addEventListener('dragstart', function () { drag = li; li.classList.add('lb-drag-on'); });
+    li.addEventListener('dragend', function () {
+      li.removeAttribute('draggable');
+      li.classList.remove('lb-drag-on'); drag = null;
+      var order = Array.prototype.map.call(list.children, function (x) { return parseInt(x.getAttribute('data-id')); });
+      fetch('/admin/learn/lessons/' + list.getAttribute('data-lesson') + '/blocks/reorder', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({order: order})})
+        .then(function () { list.querySelectorAll('.lb-item > .lb-head > b').forEach(function (b, i) { b.textContent = (i + 1) + '.'; }); });
+    });
+  });
+  list.addEventListener('dragover', function (e) {
+    e.preventDefault(); if (!drag) return;
+    var after = null;
+    for (var it of list.querySelectorAll('.lb-item:not(.lb-drag-on)')) {
+      var r = it.getBoundingClientRect(); if (e.clientY < r.top + r.height / 2) { after = it; break; }
+    }
+    if (after) list.insertBefore(drag, after); else list.appendChild(drag);
+  });
+})();
+</script>

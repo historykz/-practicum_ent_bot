@@ -1,0 +1,452 @@
+{% extends "base.html" %}
+{% block title %}{{ task.title }} — интерактивное задание — Smart ENT{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="/static/vendor/codemirror/codemirror.min.css">
+<script src="/static/vendor/codemirror/codemirror.min.js"></script>
+<script src="/static/vendor/codemirror/mode/xml/xml.min.js"></script>
+<script src="/static/vendor/codemirror/mode/javascript/javascript.min.js"></script>
+<script src="/static/vendor/codemirror/mode/css/css.min.js"></script>
+<script src="/static/vendor/codemirror/mode/htmlmixed/htmlmixed.min.js"></script>
+<script src="/static/vendor/codemirror/addon/edit/closebrackets.min.js"></script>
+<script src="/static/vendor/codemirror/addon/edit/closetag.min.js"></script>
+<script src="/static/vendor/codemirror/addon/edit/matchbrackets.min.js"></script>
+
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a><span>›</span>
+  <a href="/admin/interactive">🎮 Интерактивные задания</a><span>›</span><span class="crumb-current">{{ task.title }}</span>
+</nav>
+
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
+<div class="ia-head">
+  <h1>🎮 <span id="ia-title-view">{{ task.title }}</span></h1>
+  <span class="ia-status" id="ia-status">{% if task.status == 'published' %}✅ опубликовано{% else %}📝 черновик{% endif %}</span>
+</div>
+
+<div class="ia-toolbar">
+  <button type="button" class="btn btn-primary" id="btn-run">▶ Запустить</button>
+  <button type="button" class="btn" id="btn-restart">↻ Перезапустить</button>
+  <button type="button" class="btn" id="btn-save">💾 Сохранить черновик</button>
+  <button type="button" class="btn btn-primary" id="btn-publish">🚀 Опубликовать</button>
+  {% if task.status == 'published' %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/unpublish" style="display:inline"><button class="btn">⏸ Снять с публикации</button></form>
+  <a class="btn" href="/interactive/{{ task.id }}" target="_blank">👁 Как видит ученик</a>
+  {% endif %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/duplicate" style="display:inline"><button class="btn">📄 Дублировать</button></form>
+  <a class="btn" href="/admin/interactive/{{ task.id }}/results">📊 Результаты</a>
+  <form method="post" action="/admin/interactive/{{ task.id }}/delete" style="display:inline"
+        onsubmit="return confirm('Удалить задание вместе с картинками, прогрессом и результатами учеников?');"><button class="btn btn-danger">🗑 Удалить</button></form>
+  <span class="ia-save-state muted" id="save-state"></span>
+</div>
+{% if problems %}<div class="alert" id="ia-problems">Перед публикацией: {{ problems|join(' ') }}</div>{% endif %}
+
+<section class="admin-card">
+  <div class="admin-form ia-meta">
+    <label>Название</label><input autocomplete="off" type="text" id="f-title" maxlength="200">
+    <label>Описание для ученика</label><textarea autocomplete="off" id="f-description" rows="2" maxlength="2000"></textarea>
+    <div class="ia-two"><div><label>Предмет</label><input autocomplete="off" type="text" id="f-subject" maxlength="120"></div>
+      <div><label>Тема</label><input autocomplete="off" type="text" id="f-topic" maxlength="200"></div></div>
+  </div>
+</section>
+
+<section class="admin-card ia-ai">
+  <h2>🤖 Задание от ИИ</h2>
+  <p class="muted">Вставьте целиком HTML, который написал ИИ, и нажмите кнопку: он попадёт в режим «Целый HTML-документ»
+     и сразу запустится в предпросмотре. Ключ ответа от ИИ вставьте ниже, в блок «Оценка».</p>
+  <textarea id="ai-paste" rows="4" spellcheck="false" class="ia-mono" placeholder="&lt;!DOCTYPE html&gt; … код от ИИ целиком"></textarea>
+  <div class="ia-ai-actions">
+    <button type="button" class="btn btn-primary" id="btn-ai-paste">📋 Вставить и запустить</button>
+    <button type="button" class="btn" id="btn-ai-prompt">📎 Скопировать инструкцию для ИИ</button>
+    <span class="muted" id="ai-out"></span>
+  </div>
+  <details class="admin-details"><summary>Что написано в инструкции для ИИ</summary>
+<textarea id="ai-prompt" rows="16" readonly class="ia-mono">Сделай интерактивное учебное задание для платформы Smart ENT.
+
+Тема и что нужно сделать: [опишите задание]
+
+Требования:
+1. Один HTML-документ целиком (от &lt;!DOCTYPE html&gt; до &lt;/html&gt;), весь CSS и JavaScript внутри.
+2. Удобно на телефоне и компьютере: крупные кнопки, без горизонтальной прокрутки. Перетаскивание дублируй нажатиями (нажал элемент, затем место).
+3. Сети нет: не используй fetch, XMLHttpRequest, WebSocket. Библиотеки можно подключать только с cdn.jsdelivr.net, cdnjs.cloudflare.com, unpkg.com, cdn.tailwindcss.com, code.jquery.com. Картинки только по https или data:.
+4. Платформа даёт объект window.SmartENT:
+   SmartENT.ready(function (progress) { ... }) — запуск; progress — сохранённое состояние ученика или null, восстанови по нему задание.
+   SmartENT.saveProgress(объект) — сохраняй состояние после каждого действия ученика (не больше 50 КБ).
+   SmartENT.submit(ответ) — по кнопке «Проверить» отправь ответ ученика. Сам ответ не проверяй и баллы не считай: проверяет сервер.
+   SmartENT.onResult(function (r) { ... }) — покажи результат: r.score, r.max, r.percent, r.correct; если есть r.error, покажи его.
+5. Ответ ученика — JSON: для сопоставления и пропусков объект {"ключ": "значение"}, для порядка массив.
+6. Правильные ответы в коде задания не храни и не показывай.
+7. После кода отдельным блоком дай ключ ответа в JSON, один из видов:
+   {"type":"pairs","answer":{"a":"1","b":"2"}} — сопоставление;
+   {"type":"fields","answer":{"p1":["Абай","Абай Кунанбаев"],"p2":"1845"}} — пропуски, можно несколько допустимых ответов;
+   {"type":"sequence","answer":["a","b","c"]} — порядок;
+   {"type":"set","answer":["a","c"]} — выбрать несколько верных;
+   {"type":"number","answer":3.14,"tolerance":0.01} — число;
+   {"type":"exact","answer":...} — весь ответ целиком.
+   Ключи и значения в ответе задания должны точно совпадать с ключом.
+Если задание тренировочное (игра со счётом без оценки), вместо submit в конце вызови SmartENT.reportScore(баллы, максимум).</textarea>
+  </details>
+</section>
+
+<div class="ia-grid">
+  <section class="admin-card ia-code">
+    <div class="ia-mode">
+      <label class="admin-radio"><input autocomplete="off" type="radio" name="mode" value="split" id="mode-split"> HTML, CSS и JavaScript отдельно</label>
+      <label class="admin-radio"><input autocomplete="off" type="radio" name="mode" value="full" id="mode-full"> Целый HTML-документ</label>
+    </div>
+    <div class="ia-tabs" id="tabs-split">
+      <button type="button" class="ia-tab active" data-tab="html">HTML</button>
+      <button type="button" class="ia-tab" data-tab="css">CSS</button>
+      <button type="button" class="ia-tab" data-tab="js">JavaScript</button>
+    </div>
+    <div class="ia-pane" data-pane="html"><textarea autocomplete="off" id="code-html"></textarea></div>
+    <div class="ia-pane" data-pane="css" hidden><textarea autocomplete="off" id="code-css"></textarea></div>
+    <div class="ia-pane" data-pane="js" hidden><textarea autocomplete="off" id="code-js"></textarea></div>
+    <div class="ia-pane" data-pane="full" hidden><textarea autocomplete="off" id="code-full"></textarea></div>
+    <p class="muted ia-tip">Ctrl+S (⌘S) — сохранить черновик. Ctrl+Enter — запустить.</p>
+  </section>
+
+  <section class="admin-card ia-preview">
+    <h2>Предпросмотр</h2>
+    <div class="ia-frame-box"><iframe id="preview" sandbox="{{ sandbox }}" referrerpolicy="no-referrer" title="Предпросмотр задания"></iframe></div>
+    <div class="ia-verdict" id="preview-verdict" hidden></div>
+    <h3>Ошибки задания <span class="muted">(видны только автору)</span>
+      <button type="button" class="btn-small" id="btn-copy-errors">скопировать для ИИ</button>
+      <button type="button" class="btn-small" id="btn-clear-errors">очистить</button></h3>
+    <ul class="ia-errors" id="errors"><li class="muted">Ошибок нет.</li></ul>
+  </section>
+</div>
+
+<section class="admin-card">
+  <h2>🏆 Оценка</h2>
+  <div class="admin-form">
+    <label class="admin-radio"><input autocomplete="off" type="radio" name="grading" value="server" id="g-server"> Влияет на оценку: проверяет сервер по ключу ответа</label>
+    <label class="admin-radio"><input autocomplete="off" type="radio" name="grading" value="practice" id="g-practice"> Тренировочное: результат считает само задание (подписывается как тренировочный)</label>
+    <div class="ia-two"><div><label>Максимум баллов</label><input autocomplete="off" type="number" id="f-max" min="1" max="1000"></div>
+      <div><label class="admin-checkbox" style="margin-top:28px"><input autocomplete="off" type="checkbox" id="f-retry"> Разрешить пересдачу (засчитывается последняя проверка)</label></div></div>
+    <div class="ia-two"><div><label>Попыток проверки (0 — без ограничения)</label><input autocomplete="off" type="number" id="f-attempts" min="0" max="100"></div>
+      <div><label>Начальная высота окна, px (0 — авто)</label><input autocomplete="off" type="number" id="f-height" min="0" max="4000"></div></div>
+    <label>Где показывать ученикам</label>
+    <select autocomplete="off" id="f-vis">
+      <option value="all">В общем списке «Интерактивные задания» и в уроках</option>
+      <option value="lessons">Только внутри уроков (с правами урока: оплата, доступ)</option>
+    </select>
+    <label>Ключ ответа (JSON). Задание отправляет только ответ: <code>SmartENT.submit(ответ)</code>, а баллы считает сервер.</label>
+    <textarea autocomplete="off" id="f-key" rows="6" spellcheck="false" class="ia-mono"></textarea>
+    <details class="admin-details"><summary>Какие бывают ключи</summary>
+      <ul class="ia-doc">
+        <li><code>{"type":"pairs","answer":{"a":"1","b":"2"}}</code> — сопоставление: объект ключ→значение, баллы за каждую верную пару.</li>
+        <li><code>{"type":"fields","answer":{"p1":["Абай","Абай Кунанбаев"],"p2":"1845"}}</code> — заполнение пропусков: по каждому полю один или несколько допустимых ответов, баллы за каждое поле.</li>
+        <li><code>{"type":"sequence","answer":["a","b","c"]}</code> — последовательность: важен порядок.</li>
+        <li><code>{"type":"set","answer":["a","c"]}</code> — набор без порядка (например, выбрать все верные).</li>
+        <li><code>{"type":"number","answer":3.14,"tolerance":0.01}</code> — число с допуском.</li>
+        <li><code>{"type":"exact","answer":…}</code> — любое JSON-значение целиком.</li>
+        <li>Регистр букв и лишние пробелы не важны; чтобы учитывать регистр, добавьте <code>"case_sensitive": true</code>.</li>
+      </ul>
+    </details>
+    <label>Проверить ключ: пример ответа (JSON)</label>
+    <textarea autocomplete="off" id="f-sample" rows="2" spellcheck="false" class="ia-mono" placeholder='{"khanate":"1465","independence":"1991","junior":"1731"}'></textarea>
+    <button type="button" class="btn-small" id="btn-check">Проверить ключ</button>
+    <span id="check-out" class="muted"></span>
+  </div>
+</section>
+
+<section class="admin-card" id="lessons">
+  <h2>📚 В уроках ({{ lessons_used|length }})</h2>
+  {% if lessons_used %}<ul class="lesson-list">{% for l in lessons_used %}
+    <li>{{ l.subject_title }} › {{ l.section_title }} › <a href="/admin/learn/lessons/{{ l.lesson_id }}/edit#block{{ l.block_id }}">{{ l.lesson_title }}</a></li>
+  {% endfor %}</ul>{% else %}<p class="muted">Пока ни в одном уроке.</p>{% endif %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/to-lesson" class="admin-form admin-inline">
+    <select name="lesson_id" required><option value="">— вставить в урок —</option>
+      {% for l in lessons %}<option value="{{ l.id }}">{{ l.subject_title }} › {{ l.section_title }} › {{ l.title }}</option>{% endfor %}</select>
+    <button class="btn-small">➕ Вставить</button>
+  </form>
+</section>
+
+<section class="admin-card">
+  <h2>🖼 Картинки задания</h2>
+  <p class="muted">Загруженные картинки доступны заданию по адресу из списка. До 5 МБ: png, jpg, gif, webp, svg.</p>
+  <input type="file" id="asset-file" accept="image/*"> <button type="button" class="btn-small" id="btn-upload">Загрузить</button>
+  <span id="upload-out" class="muted"></span>
+  <ul class="ia-assets" id="assets"></ul>
+</section>
+
+<section class="admin-card">
+  <details class="admin-details" open><summary>📘 Как задание общается с платформой (SmartENT)</summary>
+  <ul class="ia-doc">
+    <li><code>SmartENT.ready(function (progress, ctx) { … })</code> — запуск: сохранённый прогресс ученика (или null).</li>
+    <li><code>SmartENT.saveProgress(объект)</code> — сохранить прогресс на сервере (до 50 КБ); при возврате ученик продолжит с места.</li>
+    <li><code>SmartENT.submit(ответ)</code> — отправить ответ на проверку сервером (задание «Влияет на оценку»).</li>
+    <li><code>SmartENT.onResult(function (r) { r.score, r.max, r.percent, r.correct })</code> — результат проверки.</li>
+    <li><code>SmartENT.reportScore(баллы, максимум)</code> — результат, посчитанный самим заданием: сохраняется как тренировочный.</li>
+    <li>Задание работает в изолированном фрейме: нет доступа ко входу, cookie, данным других учеников и админке, нет сетевых запросов. Скрипты и стили можно подключать с cdn.jsdelivr.net, cdnjs.cloudflare.com, unpkg.com, cdn.tailwindcss.com, code.jquery.com; картинки — с сайта, по https или data:.</li>
+    <li>Если задание хранит данные в <code>localStorage</code> (так часто делает ИИ), это работает: платформа сохраняет их на сервере как прогресс ученика.</li>
+    <li>Водяной знак ученика рисует платформа поверх задания, в код его добавлять не нужно.</li>
+  </ul>
+  </details>
+</section>
+
+<script id="task-data" type="application/json">{{ task_json|safe }}</script>
+<script id="assets-data" type="application/json">{{ assets|tojson }}</script>
+<style>
+  .ia-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .ia-status { padding: 4px 10px; border-radius: 999px; background: rgba(127,127,127,.12); font-size: .85rem; }
+  .ia-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 14px; padding: 8px 0; background: var(--bg); }
+  @media (min-width: 901px) { .ia-toolbar { position: sticky; top: 0; z-index: 5; } }
+  @media (max-width: 600px) { .ia-toolbar .btn { padding: 8px 12px; font-size: .9rem; } }
+  .ia-tabs[hidden], .ia-pane[hidden] { display: none !important; }
+  .ia-toolbar form { margin: 0; }
+  .ia-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+  @media (max-width: 900px) { .ia-grid { grid-template-columns: minmax(0, 1fr); } }
+  .ia-grid > section { min-width: 0; }
+  .ia-code .CodeMirror { max-width: 100%; }
+  .ia-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 600px) { .ia-two { grid-template-columns: 1fr; } }
+  .ia-tabs { display: flex; gap: 4px; margin: 8px 0; }
+  .ia-tab { padding: 8px 14px; border-radius: 10px 10px 0 0; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; }
+  .ia-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .ia-code .CodeMirror, .ia-code textarea { height: 460px; width: 100%; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; }
+  .ia-code textarea { font-family: ui-monospace, Menlo, monospace; padding: 8px; }
+  .ia-frame-box { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: #fff; }
+  #preview { width: 100%; height: 460px; border: 0; display: block; background: #fff; }
+  .ia-errors { list-style: none; padding: 0; margin: 6px 0 0; max-height: 200px; overflow: auto; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .ia-errors li { padding: 6px 8px; border-bottom: 1px solid var(--border); color: #d33; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ia-errors li.muted { color: var(--muted); }
+  .ia-verdict { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: rgba(52,199,89,.12); }
+  .ia-mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .ia-assets { list-style: none; padding: 0; }
+  .ia-assets li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .ia-assets img { width: 48px; height: 48px; object-fit: contain; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+  .ia-assets code { overflow-wrap: anywhere; }
+  .ia-doc li { margin: 6px 0; overflow-wrap: anywhere; }
+  .ia-tip { margin: 6px 0 0; font-size: .82rem; }
+  .ia-ai textarea { width: 100%; }
+  .ia-ai-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+</style>
+<script>
+(function () {
+  var T = JSON.parse(document.getElementById('task-data').textContent);
+  var assets = JSON.parse(document.getElementById('assets-data').textContent);
+  var hasCM = !!window.CodeMirror;
+  var dirty = false;
+  function $(id) { return document.getElementById(id); }
+
+  function editor(id, mode, value) {
+    var ta = $(id);
+    ta.value = value || '';
+    if (!hasCM) {
+      ta.addEventListener('input', function () { dirty = true; });
+      return {getValue: function () { return ta.value; }, refresh: function () {},
+              replaceSelection: function (t) { ta.setRangeText(t, ta.selectionStart, ta.selectionEnd, 'end'); dirty = true; }};
+    }
+    var cm = CodeMirror.fromTextArea(ta, {mode: mode, lineNumbers: true, lineWrapping: true, tabSize: 2, indentUnit: 2,
+      autoCloseBrackets: true, autoCloseTags: true, matchBrackets: true,
+      extraKeys: {'Ctrl-S': function () { save(false); }, 'Cmd-S': function () { save(false); },
+                  'Ctrl-Enter': function () { run(); }, 'Cmd-Enter': function () { run(); }}});
+    cm.on('change', function () { dirty = true; });
+    return cm;
+  }
+  var ed = {
+    html: editor('code-html', 'htmlmixed', T.html),
+    css: editor('code-css', 'css', T.css),
+    js: editor('code-js', 'javascript', T.js),
+    full: editor('code-full', 'htmlmixed', T.full_doc || '<!DOCTYPE html>\n<html>\n<head>\n  <title>Задание</title>\n</head>\n<body>\n\n</body>\n</html>')
+  };
+  $('f-title').value = T.title || '';
+  $('f-description').value = T.description || '';
+  $('f-subject').value = T.subject || '';
+  $('f-topic').value = T.topic || '';
+  $('f-max').value = T.max_score || 10;
+  $('f-retry').checked = !!T.allow_retry;
+  $('f-attempts').value = T.max_attempts || 0;
+  $('f-height').value = T.frame_height || 0;
+  $('f-vis').value = T.visibility === 'lessons' ? 'lessons' : 'all';
+  $('f-key').value = T.answer_key || '';
+  (T.grading === 'server' ? $('g-server') : $('g-practice')).checked = true;
+  ['f-title', 'f-description', 'f-subject', 'f-topic', 'f-max', 'f-retry', 'f-key', 'g-server', 'g-practice', 'f-attempts', 'f-height', 'f-vis'].forEach(function (id) {
+    $(id).addEventListener('input', function () { dirty = true; });
+    $(id).addEventListener('change', function () { dirty = true; });
+  });
+
+  // режим: отдельные вкладки или целый документ
+  var current = 'html';
+  function show(tab) {
+    current = tab;
+    document.querySelectorAll('.ia-pane').forEach(function (p) { p.hidden = p.getAttribute('data-pane') !== tab; });
+    document.querySelectorAll('.ia-tab').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-tab') === tab); });
+    if (ed[tab]) ed[tab].refresh();
+  }
+  function setMode(full) {
+    $('mode-full').checked = full; $('mode-split').checked = !full;
+    $('tabs-split').hidden = full;
+    show(full ? 'full' : 'html');
+  }
+  setMode(!!T.use_full_doc);
+  $('mode-full').addEventListener('change', function () { setMode(true); dirty = true; });
+  $('mode-split').addEventListener('change', function () { setMode(false); dirty = true; });
+  document.querySelectorAll('.ia-tab').forEach(function (b) { b.addEventListener('click', function () { show(b.getAttribute('data-tab')); }); });
+
+  function collect() {
+    return {
+      title: $('f-title').value, description: $('f-description').value, subject: $('f-subject').value, topic: $('f-topic').value,
+      html: ed.html.getValue(), css: ed.css.getValue(), js: ed.js.getValue(), full_doc: ed.full.getValue(),
+      use_full_doc: $('mode-full').checked, grading: $('g-server').checked ? 'server' : 'practice',
+      answer_key: $('f-key').value, max_score: parseInt($('f-max').value || '10'), allow_retry: $('f-retry').checked,
+      max_attempts: parseInt($('f-attempts').value || '0'), frame_height: parseInt($('f-height').value || '0'), visibility: $('f-vis').value
+    };
+  }
+  async function post(url, body) {
+    var r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    var data = {};
+    try { data = await r.json(); } catch (e) {}
+    if (!r.ok && !data.error) data.error = 'Ошибка ' + r.status;
+    return data;
+  }
+
+  // предпросмотр: изолированный фрейм, прогресс живёт только в этой вкладке
+  var frame = $('preview');
+  var previewProgress = null;
+  function addError(text) {
+    var list = $('errors');
+    var empty = list.querySelector('.muted');
+    if (empty) empty.remove();
+    var li = document.createElement('li');
+    li.textContent = text;
+    list.appendChild(li);
+  }
+  function clearErrors() { $('errors').innerHTML = '<li class="muted">Ошибок нет.</li>'; $('preview-verdict').hidden = true; }
+  async function run() {
+    clearErrors();
+    var body = collect();
+    body.progress = previewProgress;
+    var res = await post('/admin/interactive/' + T.id + '/render', body);
+    if (res.error) { addError(res.error); return; }
+    frame.srcdoc = res.html;
+  }
+  function verdict(text) { var v = $('preview-verdict'); v.hidden = false; v.textContent = text; }
+  window.addEventListener('message', async function (e) {
+    if (e.source !== frame.contentWindow) return;
+    var m = e.data || {};
+    if (!m.__smartent) return;
+    var send = function (type, data) { frame.contentWindow.postMessage({__smartent: 1, type: type, data: data}, '*'); };
+    if (m.type === 'hello') send('init', {progress: previewProgress, mode: 'preview', graded: $('g-server').checked});
+    else if (m.type === 'progress') previewProgress = m.data;
+    else if (m.type === 'error') addError((m.data.line ? 'Строка ' + m.data.line + ': ' : '') + m.data.message);
+    else if (m.type === 'resize') { var h = Math.max(300, Math.min(2000, (m.data && m.data.h) || 460)); frame.style.height = h + 'px'; }
+    else if (m.type === 'submit') {
+      if (!$('g-server').checked) { send('result', {error: 'Тренировочное задание: используйте SmartENT.reportScore.'}); return; }
+      var r = await post('/admin/interactive/check', {answer_key: $('f-key').value, max_score: $('f-max').value, answer: m.data.answer});
+      if (r.error) { addError(r.error); send('result', {error: r.error}); return; }
+      verdict('Проверка сервером (предпросмотр): ' + r.score + ' из ' + r.max + (r.correct ? ', всё верно' : ''));
+      send('result', r);
+    } else if (m.type === 'practice') {
+      verdict('Тренировочный результат (посчитан заданием): ' + m.data.score + ' из ' + m.data.max);
+    }
+  });
+  // Код от ИИ: целый документ сразу в нужный режим и в предпросмотр
+  function isFullDoc(text) { return /^\s*(<!doctype\s+html|<html[\s>])/i.test(text || ''); }
+  $('btn-ai-paste').addEventListener('click', function () {
+    var code = $('ai-paste').value;
+    if (!code.trim()) { $('ai-out').textContent = 'Вставьте код в поле выше.'; return; }
+    if (isFullDoc(code)) { ed.full.setValue(code); setMode(true); }
+    else { ed.html.setValue(code); setMode(false); }
+    dirty = true;
+    previewProgress = null;
+    $('ai-out').textContent = isFullDoc(code) ? '✅ Вставлено как целый документ. Не забудьте сохранить.'
+                                              : '✅ Вставлено во вкладку HTML. Не забудьте сохранить.';
+    run();
+  });
+  $('btn-ai-prompt').addEventListener('click', function () {
+    var t = $('ai-prompt').value;
+    (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(function () {
+      $('ai-out').textContent = '✅ Инструкция скопирована: вставьте её в чат с ИИ и допишите тему.';
+    }).catch(function () { $('ai-prompt').closest('details').open = true; $('ai-prompt').select(); $('ai-out').textContent = 'Выделено: скопируйте вручную.'; });
+  });
+  // Если целый документ вставили во вкладку HTML — переносим его в нужный режим
+  if (hasCM) {
+    ed.html.on('change', function (cm, change) {
+      if (change.origin === 'paste' && isFullDoc(cm.getValue())) {
+        ed.full.setValue(cm.getValue());
+        cm.setValue('');
+        setMode(true);
+        $('save-state').textContent = 'Это целый HTML-документ — переключено в режим «Целый HTML-документ».';
+      }
+    });
+  }
+  $('btn-copy-errors').addEventListener('click', function () {
+    var items = Array.prototype.map.call($('errors').querySelectorAll('li:not(.muted)'), function (li) { return li.textContent; });
+    var text = items.length ? 'Исправь ошибки в задании:\n' + items.join('\n') : '';
+    if (!text) { $('save-state').textContent = 'Ошибок нет.'; return; }
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { $('save-state').textContent = '✅ Ошибки скопированы.'; });
+  });
+  $('btn-run').addEventListener('click', run);
+  $('btn-restart').addEventListener('click', function () { previewProgress = null; run(); });
+  $('btn-clear-errors').addEventListener('click', clearErrors);
+
+  async function save(publish) {
+    var body = collect();
+    body.publish = !!publish;
+    $('save-state').textContent = 'Сохраняем…';
+    var res = await post('/admin/interactive/' + T.id + '/save', body);
+    if (res.error) { $('save-state').textContent = '⚠️ ' + res.error; return false; }
+    dirty = false;
+    $('ia-title-view').textContent = body.title;
+    $('ia-status').textContent = res.status === 'published' ? '✅ опубликовано' : '📝 черновик';
+    $('save-state').textContent = publish ? '✅ Опубликовано' : '✅ Черновик сохранён';
+    var pr = $('ia-problems'); if (pr && !(res.problems || []).length) pr.remove();
+    if (publish) setTimeout(function () { location.reload(); }, 700);
+    return true;
+  }
+  $('btn-save').addEventListener('click', function () { save(false); });
+  $('btn-publish').addEventListener('click', function () { save(true); });
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(false); }
+  });
+  window.addEventListener('beforeunload', function (e) { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+
+  $('btn-check').addEventListener('click', async function () {
+    var sample;
+    try { sample = JSON.parse($('f-sample').value || 'null'); } catch (err) { $('check-out').textContent = 'Пример ответа — не JSON.'; return; }
+    var r = await post('/admin/interactive/check', {answer_key: $('f-key').value, max_score: $('f-max').value, answer: sample});
+    $('check-out').textContent = r.error ? '⚠️ ' + r.error : ('Баллы: ' + r.score + ' из ' + r.max + (r.correct ? ' — всё верно' : ''));
+  });
+
+  // картинки
+  function renderAssets() {
+    var ul = $('assets');
+    ul.innerHTML = '';
+    if (!assets.length) { ul.innerHTML = '<li class="muted">Картинок пока нет.</li>'; return; }
+    assets.forEach(function (a) {
+      var li = document.createElement('li');
+      var img = document.createElement('img'); img.src = a.url; img.alt = '';
+      var code = document.createElement('code'); code.textContent = a.url;
+      var ins = document.createElement('button'); ins.type = 'button'; ins.className = 'btn-small'; ins.textContent = 'Вставить в HTML';
+      ins.onclick = function () {
+        var target = $('mode-full').checked ? ed.full : ed.html;
+        target.replaceSelection('<img src="' + a.url + '" alt="">');
+      };
+      var del = document.createElement('button'); del.type = 'button'; del.className = 'btn-small btn-danger'; del.textContent = 'Удалить';
+      del.onclick = async function () {
+        if (!confirm('Удалить картинку? В коде задания она перестанет показываться.')) return;
+        var r = await post('/admin/interactive/assets/' + a.id + '/delete', {});
+        if (!r.error) { assets = assets.filter(function (x) { return x.id !== a.id; }); renderAssets(); }
+      };
+      li.append(img, code, ins, del);
+      ul.appendChild(li);
+    });
+  }
+  renderAssets();
+  $('btn-upload').addEventListener('click', async function () {
+    var f = $('asset-file').files[0];
+    if (!f) { $('upload-out').textContent = 'Выберите файл.'; return; }
+    var fd = new FormData(); fd.append('file', f);
+    $('upload-out').textContent = 'Загружаем…';
+    var r = await fetch('/admin/interactive/' + T.id + '/assets', {method: 'POST', body: fd});
+    var data = {}; try { data = await r.json(); } catch (e) {}
+    if (!r.ok || data.error) { $('upload-out').textContent = '⚠️ ' + (data.error || ('Ошибка ' + r.status)); return; }
+    assets.push(data.asset); renderAssets(); $('upload-out').textContent = '✅ Загружено'; $('asset-file').value = '';
+  });
+
+  run();
+})();
+</script>
+{% endblock %}

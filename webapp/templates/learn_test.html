@@ -1,0 +1,664 @@
+{% extends "base.html" %}
+{% block title %}Тест: {{ lesson.title }} — Smart ENT{% endblock %}
+{% block page_title %}Тест{% endblock %}
+{% block content %}
+
+{% if back_url %}<p><a href="{{ back_url }}">&larr; {{ back_title }}</a></p>{% endif %}
+<h1>📝 {{ lesson.title }}</h1>
+{% if instruction %}
+<section class="test-note-strip"><div><b>ℹ️ Инструкция</b>
+  <p style="white-space:pre-wrap;margin:4px 0 0;">{{ instruction }}</p></div></section>
+{% endif %}
+
+{# Тест часто открывают из раздела «Тесты», минуя страницу урока — а конспект
+   к нему прочитать всё равно надо. Даём ссылку прямо здесь. #}
+{% if has_note %}
+<section class="test-note-strip">
+  <div>
+    <b>📖 Конспект к этому уроку</b>
+    <p class="muted">Откроется в личных сообщениях бота — с вашей персональной
+       меткой, без возможности переслать. Прочитайте и возвращайтесь к тесту:
+       эта страница никуда не денется.</p>
+  </div>
+  <a class="btn btn-primary" target="_blank" rel="noopener"
+     href="https://t.me/{{ bot_username }}?start=lesson_{{ lesson.url_id or lesson.id }}">
+     Открыть конспект</a>
+</section>
+{% endif %}
+
+{% if is_resume %}
+<div id="resume-banner" class="alert alert-ok">
+  📌 У вас есть незавершённая попытка — продолжаем с того же места.
+  {% if not link_mode %}<a href="?restart=1" onclick="return confirm('Начать тест заново? Текущий прогресс будет сброшен.');"
+     style="margin-left:8px;">🔄 Начать заново</a>{% endif %}
+</div>
+{% endif %}
+{% if preview_mode %}
+<div class="alert">👁 Предпросмотр: это пробное прохождение, оно не попадёт в результаты учеников.</div>
+{% endif %}
+<div id="lease-lost" class="alert" style="display:none;">
+  ⚠️ Этот тест открыт в другой вкладке или окне, поэтому здесь ответы не сохраняются.
+  <button type="button" class="btn-small" onclick="window.location.reload()">Продолжить здесь</button>
+</div>
+
+<div class="quiz-progress">
+  <span id="quiz-progress-text"></span>
+  <span id="quiz-timer" class="quiz-timer"></span>
+  <span id="quiz-overall" class="quiz-timer"></span>
+  <div class="quiz-progress-bar"><div id="quiz-progress-fill"></div></div>
+</div>
+
+{% include "_music_player.html" %}
+
+<div id="quiz-card" class="quiz-card"></div>
+<div id="quiz-status" class="quiz-status muted" style="display:none;"></div>
+<div class="quiz-bottom-bar" id="quiz-bottom-bar" style="display:none;">
+  <button id="quiz-continue" class="btn btn-primary quiz-continue">Продолжить</button>
+</div>
+
+{% include "_favorites.html" %}
+<script id="quiz-data" type="application/json">{{ questions_json | safe }}</script>
+<script id="quiz-answered" type="application/json">{{ answered_json | safe }}</script>
+<script>
+// === Telegram Mini App: стабильность внутри webview ===
+(function() {
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg) return;
+  try { tg.ready(); } catch (_) {}
+  try { if (typeof tg.expand === 'function') tg.expand(); } catch (_) {}
+  try { if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes(); } catch (_) {}
+})();
+
+const attemptId = {{ attempt_id }};
+const questions = JSON.parse(document.getElementById('quiz-data').textContent);
+const answeredMap = JSON.parse(document.getElementById('quiz-answered').textContent || '{}');
+const timePerQuestion = {{ time_per_question|default(0) }};
+const lessonId = {{ lesson.id or 0 }};
+// Попытки по ссылке (и предпросмотр): вкладка-«арендатор» и таймеры на сервере
+const LEASE = {{ (lease or '')|tojson }};
+const serverClock = {{ 'true' if lease else 'false' }};
+let initialRemainingMs = {{ 'null' if remaining_ms is none or remaining_ms is not defined else remaining_ms }};
+let overallDeadline = {{ 'null' if overall_left_ms is none or overall_left_ms is not defined else ('Date.now() + ' ~ overall_left_ms) }};
+// ⭐️ Избранное: узнать, какие вопросы этого теста уже отмечены
+if (window.SmartENT && SmartENT.favInit) SmartENT.favInit(questions.map(function(q) { return q.id; }));
+
+// Состояния вопроса: 'loading' | 'question' | 'answered' | 'error' | 'finishing'
+let uiState = 'loading';
+let selected = [];   // что ученик отметил в текущем вопросе
+let current = 0;
+let deadline = null;        // таймер по абсолютному времени — переживает сворачивание
+let timerInterval = null;
+let transitioning = false;  // защита от двойного «Продолжить»
+let finishing = false;
+
+const card = document.getElementById('quiz-card');
+const progressText = document.getElementById('quiz-progress-text');
+const progressFill = document.getElementById('quiz-progress-fill');
+const timerEl = document.getElementById('quiz-timer');
+const statusEl = document.getElementById('quiz-status');
+const bottomBar = document.getElementById('quiz-bottom-bar');
+const continueBtn = document.getElementById('quiz-continue');
+
+function log(stage, extra) {
+  try {
+    console.info('[quiz]', stage, JSON.stringify(Object.assign({
+      attempt: attemptId, idx: current,
+      qid: questions[current] ? questions[current].id : null,
+      state: uiState,
+      tg: !!(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData),
+    }, extra || {})));
+  } catch (_) {}
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function setStatus(text) {
+  statusEl.style.display = text ? 'block' : 'none';
+  statusEl.textContent = text || '';
+}
+
+// === Надёжная отправка: ретраи с паузой, тайм-аут на запрос ===
+async function apiPost(url, body, attempts) {
+  attempts = attempts || 3;
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      // В старых WebView нет AbortController: без проверки запрос падал, даже не начавшись
+      const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const to = setTimeout(function() { if (ctl) ctl.abort(); }, 12000);
+      const opts = {
+        method: 'POST',
+        headers: Object.assign({'Content-Type': 'application/json'}, LEASE ? {'X-Lease': LEASE} : {}),
+        body: body ? JSON.stringify(body) : null,
+      };
+      if (ctl) opts.signal = ctl.signal;
+      const resp = await fetch(url, opts);
+      clearTimeout(to);
+      if (resp.status === 401) {
+        // Вход пропал и сам не восстановился (base.html уже пробовал) — повторять бесполезно
+        const err = new Error('auth');
+        err.auth = true;
+        throw err;
+      }
+      if (resp.status === 409) {
+        // Тест открыт в другой вкладке: здесь больше ничего не сохраняем
+        const err = new Error('lease_lost');
+        err.lease = true;
+        throw err;
+      }
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return await resp.json();
+    } catch (e) {
+      lastErr = e;
+      log('retry', {try: i + 1, err: String(e)});
+      if (e && (e.auth || e.lease)) break;
+      if (i < attempts - 1) await new Promise(r => setTimeout(r, 800 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+function firstUnansweredIndex() {
+  for (let i = 0; i < questions.length; i++) {
+    if (!answeredMap[String(questions[i].id)]) return i;
+  }
+  return questions.length; // всё отвечено
+}
+
+function sendAppeal(questionId, btn) {
+  const text = window.prompt(
+    'Что не так с этим вопросом?\n\n' +
+    'Например: «правильный ответ B, а не A» или «в вопросе опечатка».\n' +
+    'Опишите коротко — админ проверит.');
+  if (text === null) return;
+  if (text.trim().length < 5) { alert('Опишите проблему хотя бы парой слов.'); return; }
+  btn.disabled = true;
+  fetch('/appeals/create', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({question_id: questionId, text: text.trim()}),
+  }).then(r => r.json()).then(res => {
+    if (res && res.ok) {
+      btn.textContent = '✅ Апелляция отправлена';
+    } else {
+      alert((res && res.error) || 'Не удалось отправить апелляцию.');
+      btn.disabled = false;
+    }
+  }).catch(() => { alert('Нет связи. Попробуйте ещё раз.'); btn.disabled = false; });
+}
+
+function lostLease() {
+  // Тест открыт в другой вкладке: здесь ничего не сохраняем и не считаем время
+  uiState = 'lost';
+  clearInterval(timerInterval); timerInterval = null; deadline = null;
+  timerEl.textContent = '';
+  setStatus('');
+  bottomBar.style.display = 'none';
+  card.querySelectorAll('button, input, select').forEach(el => { el.disabled = true; });
+  const banner = document.getElementById('lease-lost');
+  if (banner) banner.style.display = 'block';
+}
+
+let typedAnswer = null;   // ответ на вопрос ввода / сопоставления / последовательности
+
+function typedReady(q) {
+  if (!typedAnswer) return false;
+  if (q.type === 'text') return !!(typedAnswer.text || '').trim();
+  if (q.type === 'matching') return Object.keys(typedAnswer.map || {}).length === q.left.length;
+  if (q.type === 'ordering') return (typedAnswer.order || []).length === q.items.length;
+  return false;
+}
+
+function renderTyped(q) {
+  let html = '';
+  if (q.type === 'text') {
+    html += '<div class="quiz-typed"><input type="text" class="quiz-text" maxlength="300" autocomplete="off" '
+          + 'autocapitalize="off" spellcheck="false" placeholder="Введите ответ"'
+          + (q.numeric ? ' inputmode="decimal"' : '') + '></div>';
+  } else if (q.type === 'matching') {
+    html += '<div class="quiz-match">';
+    q.left.forEach(l => {
+      html += '<div class="quiz-match-row"><span class="qm-left">' + escapeHtml(l.text) + '</span>'
+            + '<select class="qm-sel" data-left="' + l.i + '"><option value="">— выберите —</option>';
+      q.right.forEach(r => { html += '<option value="' + r.i + '">' + escapeHtml(r.text) + '</option>'; });
+      html += '</select></div>';
+    });
+    html += '</div>';
+  } else if (q.type === 'ordering') {
+    html += '<p class="muted quiz-hint">Расставьте элементы по порядку: кнопки ▲ ▼ или перетаскивание.</p>'
+          + '<ol class="quiz-order">';
+    q.items.forEach(it => {
+      html += '<li draggable="true" data-i="' + it.i + '"><span class="qo-text">' + escapeHtml(it.text) + '</span>'
+            + '<span class="qo-btns"><button type="button" class="qo-up" aria-label="Выше">▲</button>'
+            + '<button type="button" class="qo-down" aria-label="Ниже">▼</button></span></li>';
+    });
+    html += '</ol>';
+  }
+  return html;
+}
+
+function bindTyped(q) {
+  const confirmBtn = card.querySelector('.quiz-confirm');
+  const refresh = () => { if (confirmBtn) confirmBtn.disabled = !typedReady(q); };
+  if (q.type === 'text') {
+    typedAnswer = {text: ''};
+    const inp = card.querySelector('.quiz-text');
+    inp.addEventListener('input', () => { typedAnswer.text = inp.value; refresh(); });
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); onConfirmAnswer(); } });
+  } else if (q.type === 'matching') {
+    typedAnswer = {map: {}};
+    card.querySelectorAll('.qm-sel').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const li = sel.getAttribute('data-left');
+        if (sel.value === '') delete typedAnswer.map[li]; else typedAnswer.map[li] = parseInt(sel.value);
+        refresh();
+      });
+    });
+  } else if (q.type === 'ordering') {
+    const list = card.querySelector('.quiz-order');
+    const sync = () => {
+      typedAnswer = {order: Array.from(list.children).map(li => parseInt(li.getAttribute('data-i')))};
+      refresh();
+    };
+    list.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if (!btn || uiState !== 'question') return;
+      const li = btn.closest('li');
+      if (btn.classList.contains('qo-up') && li.previousElementSibling) list.insertBefore(li, li.previousElementSibling);
+      if (btn.classList.contains('qo-down') && li.nextElementSibling) list.insertBefore(li.nextElementSibling, li);
+      sync();
+    });
+    let dragging = null;
+    list.querySelectorAll('li').forEach(li => {
+      li.addEventListener('dragstart', () => { if (uiState === 'question') { dragging = li; li.classList.add('qo-drag'); } });
+      li.addEventListener('dragend', () => { li.classList.remove('qo-drag'); dragging = null; sync(); });
+    });
+    list.addEventListener('dragover', e => {
+      e.preventDefault();
+      if (!dragging) return;
+      let after = null;
+      for (const it of list.querySelectorAll('li:not(.qo-drag)')) {
+        const box = it.getBoundingClientRect();
+        if (e.clientY < box.top + box.height / 2) { after = it; break; }
+      }
+      if (after) list.insertBefore(dragging, after); else list.appendChild(dragging);
+    });
+    sync();
+  }
+  refresh();
+}
+
+function renderQuestion() {
+  const q = questions[current];
+  if (!q) { doFinish(); return; }
+  uiState = 'question';
+  transitioning = false;
+  typedAnswer = null;
+  const qType = q.type || 'choice';
+  progressText.textContent = `Вопрос ${current + 1} из ${questions.length}`;
+  progressFill.style.width = (current / questions.length * 100) + '%';
+  setStatus('');
+  bottomBar.style.display = 'none';
+  continueBtn.disabled = false;
+  continueBtn.textContent = current + 1 >= questions.length ? 'Завершить тест' : 'Продолжить';
+
+  let html = '';
+  if (q.web_image_path) {
+    html += `<img src="${q.web_image_path}" class="quiz-image" alt="" draggable="false">`;
+  }
+  if (qType === 'choice' && window.SmartENT && SmartENT.favButton) html += '<div class="fav-row">' + SmartENT.favButton(q.id) + '</div>';
+  html += `<h2 class="quiz-question">${escapeHtml(q.text)}</h2>`;
+  if (qType === 'choice') {
+    html += '<div class="quiz-options">';
+    q.options.forEach(opt => {
+      html += `<button class="quiz-option" data-option-id="${opt.id}">${escapeHtml(opt.text)}</button>`;
+    });
+    html += '</div>';
+  } else {
+    html += renderTyped(q);
+  }
+  // Подтверждение ответа. Кнопка одна и та же для любого вопроса: ученик сам
+  // решает, сколько вариантов отметить, и по количеству кнопок или их форме
+  // не может догадаться, сколько правильных ответов на самом деле.
+  html += '<div class="quiz-confirm-wrap">'
+        + '<button type="button" class="btn btn-primary quiz-confirm" disabled>✅ Ответить</button>'
+        + '</div>';
+  // Кнопка апелляции под каждым вопросом — как в боте. Жалоба уходит админу
+  // и копится на странице «Апелляции» в админке.
+  html += `<div class="quiz-appeal"><button type="button" data-appeal="${q.id}">⚠️ Пожаловаться на вопрос</button></div>`;
+  card.innerHTML = html;
+  if (window.SmartENT && SmartENT.favPaint) SmartENT.favPaint(card);
+
+  selected = [];
+  if (qType === 'choice') {
+    card.querySelectorAll('.quiz-option').forEach(btn => {
+      btn.addEventListener('click', onOptionClick);
+    });
+  } else {
+    bindTyped(q);
+  }
+  const confirmBtn = card.querySelector('.quiz-confirm');
+  if (confirmBtn) confirmBtn.addEventListener('click', onConfirmAnswer);
+  const appealBtn = card.querySelector('[data-appeal]');
+  if (appealBtn) appealBtn.addEventListener('click', () => sendAppeal(q.id, appealBtn));
+
+  // Уже отвеченный вопрос (продолжение после возврата) — показать и идти дальше
+  const prev = answeredMap[String(q.id)];
+  if (prev) {
+    applyFeedback(prev, prev.selected_option_ids
+                        || (prev.selected_option_id ? [prev.selected_option_id] : []), prev.answer || null);
+    return;
+  }
+  startTimer();
+  log('question_rendered');
+}
+
+async function startTimer() {
+  clearInterval(timerInterval);
+  timerInterval = null;
+  if (!timePerQuestion) { timerEl.textContent = ''; deadline = null; return; }
+  let ms = timePerQuestion * 1000;
+  if (serverClock) {
+    // Время вопроса считает сервер: оно не обнуляется от перезагрузки страницы
+    // и от перехода между платформой и сайтом
+    if (initialRemainingMs !== null) { ms = initialRemainingMs; initialRemainingMs = null; }
+    else {
+      const qid = questions[current] ? questions[current].id : null;
+      try {
+        const r = await apiPost(`/learn/api/test/${attemptId}/question-start`, {question_id: qid}, 2);
+        if (r && typeof r.remaining_ms === 'number') ms = r.remaining_ms;
+      } catch (e) { if (e && e.lease) { lostLease(); return; } }
+    }
+    if (uiState !== 'question') return;
+  }
+  deadline = Date.now() + ms;
+  tickTimer();
+  timerInterval = setInterval(tickTimer, 500);
+}
+
+// Общее время теста (если задано): считает сервер, здесь только показ и переход к итогам
+const overallEl = document.getElementById('quiz-overall');
+let overallInterval = null;
+function overallTick() {
+  if (overallDeadline === null) return;
+  const left = Math.max(0, Math.ceil((overallDeadline - Date.now()) / 1000));
+  overallEl.textContent = `⏳ всего ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+  if (left > 0 || finishing || uiState === 'lost') return;
+  overallDeadline = null;
+  clearInterval(overallInterval);
+  overallEl.textContent = '⏳ время вышло';
+  if (uiState === 'question') submitAnswer([], null);   // ответ засчитается пропуском, затем итоги
+  else if (uiState === 'answered') doFinish();
+}
+function startOverall() {
+  if (overallDeadline === null) return;
+  overallTick();
+  overallInterval = setInterval(overallTick, 1000);
+}
+
+function tickTimer() {
+  if (deadline === null) return;
+  const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+  timerEl.textContent = `⏱ ${left}с`;
+  if (left <= 0) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+    deadline = null;
+    if (uiState === 'question') submitAnswer([], null); // время вышло — пропуск
+  }
+}
+
+function viewHtml(v) {
+  if (!v) return '';
+  if (v.type === 'text') return '<b>Правильный ответ:</b> ' + (v.answers || []).map(escapeHtml).join(' / ');
+  if (v.type === 'matching') {
+    return '<b>Правильные пары:</b><ul>' + (v.pairs || []).map(p => '<li>' + escapeHtml(p[0]) + ' → ' + escapeHtml(p[1]) + '</li>').join('') + '</ul>';
+  }
+  if (v.type === 'ordering') {
+    return '<b>Правильный порядок:</b><ol>' + (v.items || []).map(i => '<li>' + escapeHtml(i) + '</li>').join('') + '</ol>';
+  }
+  return '';
+}
+
+function applyFeedback(result, chosenIds, given) {
+  uiState = 'answered';
+  clearInterval(timerInterval);
+  timerInterval = null;
+  deadline = null;
+  timerEl.textContent = '';
+  const q = questions[current];
+  const qType = (q && q.type) || 'choice';
+  const chosen = Array.isArray(chosenIds) ? chosenIds
+                 : (chosenIds ? [chosenIds] : []);
+  // Правильные варианты подсвечиваем ТОЛЬКО сейчас, после подтверждения.
+  // До этого момента ученик не должен видеть ни одной подсказки.
+  const right = result.correct_option_ids
+                || (result.correct_option_id ? [result.correct_option_id] : []);
+  const confirmWrap = card.querySelector('.quiz-confirm-wrap');
+  if (confirmWrap) confirmWrap.style.display = 'none';
+
+  // Прямо говорим, засчитан ответ или нет. Без этого ученик, выбравший два
+  // правильных варианта из трёх, видел бы вокруг только зелёное и считал,
+  // что ответил верно.
+  if (result.correct !== null && result.correct !== undefined) {
+    const verdict = document.createElement('div');
+    verdict.className = 'quiz-verdict ' + (result.correct ? 'ok' : 'bad');
+    verdict.textContent = result.correct ? '✅ Верно' : '❌ Неверно';
+    card.appendChild(verdict);
+  }
+
+  if (qType !== 'choice') {
+    // Вопросы ввода, сопоставления и последовательности: показываем введённое,
+    // блокируем поля и (если разрешено) правильный ответ
+    card.querySelectorAll('input, select, .qo-btns button').forEach(el => { el.disabled = true; });
+    const inp = card.querySelector('.quiz-text');
+    if (inp && given && given.text !== undefined) inp.value = given.text;
+    if (qType === 'matching' && given && given.map) {
+      card.querySelectorAll('.qm-sel').forEach(sel => {
+        const v = given.map[sel.getAttribute('data-left')];
+        if (v !== undefined) sel.value = String(v);
+      });
+    }
+    if (qType === 'ordering' && given && given.order) {
+      const list = card.querySelector('.quiz-order');
+      given.order.forEach(i => { const li = list.querySelector('li[data-i="' + i + '"]'); if (li) list.appendChild(li); });
+      list.querySelectorAll('li').forEach(li => { li.draggable = false; });
+    }
+    if (result.correct !== null && result.correct !== undefined) {
+      card.querySelectorAll('.quiz-text, .qm-sel, .quiz-order').forEach(el => {
+        el.classList.add(result.correct ? 'quiz-field-ok' : 'quiz-field-bad');
+      });
+    }
+    if (result.correct_view && result.correct !== true) {
+      const view = document.createElement('div');
+      view.className = 'quiz-right-view';
+      view.innerHTML = viewHtml(result.correct_view);
+      card.appendChild(view);
+    }
+  } else {
+    card.querySelectorAll('.quiz-option').forEach(btn => {
+      btn.disabled = true;
+      const id = parseInt(btn.getAttribute('data-option-id'));
+      const picked = chosen.indexOf(id) >= 0;
+      btn.classList.remove('quiz-picked');
+      if (result.correct === null || result.correct === undefined) {
+        if (picked) btn.classList.add('quiz-chosen');
+        return; // показ ответа выключен админом
+      }
+      const isRight = right.indexOf(id) >= 0;
+      if (picked && isRight) btn.classList.add('quiz-correct');
+      else if (picked && !isRight) btn.classList.add('quiz-wrong');
+      else if (isRight) btn.classList.add('quiz-missed');    // верный, но не выбран
+    });
+  }
+  if (result.explanation) {
+    const ex = document.createElement('div');
+    ex.className = 'quiz-explain';
+    ex.textContent = '💡 ' + result.explanation;
+    card.appendChild(ex);
+  }
+  bottomBar.style.display = 'flex';
+  continueBtn.disabled = false;
+}
+
+function showError(message, retryFn) {
+  uiState = 'error';
+  setStatus('');
+  const box = document.createElement('div');
+  box.className = 'quiz-error-box';
+  box.innerHTML = `<p>⚠️ ${escapeHtml(message)}</p>`;
+  const retry = document.createElement('button');
+  retry.className = 'btn btn-primary';
+  retry.textContent = '🔁 Повторить';
+  retry.onclick = function() { box.remove(); retryFn(); };
+  box.appendChild(retry);
+  card.appendChild(box);
+}
+
+async function submitAnswer(optionIds, typed) {
+  if (uiState !== 'question') return; // двойной клик / гонка с таймером
+  uiState = 'saving';
+  clearInterval(timerInterval);
+  timerInterval = null;
+  const q = questions[current];
+  const qType = q.type || 'choice';
+  const ids = (optionIds || []).slice();
+  // Мгновенная визуальная реакция: отмеченное остаётся отмеченным
+  card.querySelectorAll('.quiz-option').forEach(btn => {
+    btn.disabled = true;
+    if (ids.indexOf(parseInt(btn.getAttribute('data-option-id'))) >= 0) {
+      btn.classList.add('quiz-chosen');
+    }
+  });
+  card.querySelectorAll('.quiz-text, .qm-sel, .qo-btns button').forEach(el => { el.disabled = true; });
+  const confirmBtn = card.querySelector('.quiz-confirm');
+  if (confirmBtn) confirmBtn.disabled = true;
+  setStatus('Сохраняем ответ…');
+  log('answer_submit', {opts: ids});
+  try {
+    const payload = qType === 'choice'
+      ? {question_id: q.id, option_ids: ids, option_id: ids.length === 1 ? ids[0] : null}
+      : {question_id: q.id, answer: typed};
+    const result = await apiPost(`/learn/api/test/${attemptId}/answer`, payload);
+    if (result.error === 'time_over') { setStatus(''); doFinish(); return; }
+    if (result.error) throw new Error(result.error);
+    answeredMap[String(q.id)] = qType === 'choice' ? {
+      selected_option_ids: ids,
+      selected_option_id: ids.length ? ids[0] : null,
+      correct: result.correct,
+      correct_option_ids: result.correct_option_ids,
+      correct_option_id: result.correct_option_id,
+      skipped: !!result.skipped,
+    } : {answer: typed, correct: result.correct, correct_view: result.correct_view, skipped: !!result.skipped};
+    setStatus('');
+    applyFeedback(result, ids, typed);
+    log('answer_saved');
+  } catch (e) {
+    log('answer_failed', {err: String(e)});
+    setStatus('');
+    if (e && e.lease) { lostLease(); return; }
+    uiState = 'question';
+    // Возвращаем кнопки в кликабельное состояние и предлагаем повторить
+    card.querySelectorAll('.quiz-option').forEach(btn => { btn.disabled = false; });
+    card.querySelectorAll('.quiz-text, .qm-sel, .qo-btns button').forEach(el => { el.disabled = false; });
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (window.SmartENT && SmartENT.log) SmartENT.log('net', 'ответ не сохранён: ' + String(e), {attempt: attemptId});
+    showError(e && e.auth
+              ? 'Вход закончился. Нажмите «Повторить» — приложение войдёт заново, ответы сохранены.'
+              : 'Не удалось сохранить ответ (проблема с сетью). Проверьте интернет и попробуйте ещё раз.',
+              function() { submitAnswer(ids, typed); });
+  }
+}
+
+// Нажатие на вариант только ставит и снимает отметку. Ответ засчитывается
+// после кнопки «Ответить» — так одинаково работают вопросы с одним и с
+// несколькими правильными ответами, и подсказки о типе вопроса нет.
+function onOptionClick(e) {
+  if (uiState !== 'question') return;
+  const btn = e.currentTarget;
+  const id = parseInt(btn.getAttribute('data-option-id'));
+  const pos = selected.indexOf(id);
+  if (pos >= 0) { selected.splice(pos, 1); btn.classList.remove('quiz-picked'); }
+  else { selected.push(id); btn.classList.add('quiz-picked'); }
+  const confirmBtn = card.querySelector('.quiz-confirm');
+  if (confirmBtn) confirmBtn.disabled = selected.length === 0;
+}
+
+function onConfirmAnswer() {
+  if (uiState !== 'question') return;
+  const q = questions[current];
+  if ((q.type || 'choice') === 'choice') {
+    if (!selected.length) return;
+    submitAnswer(selected, null);
+  } else {
+    if (!typedReady(q)) return;
+    submitAnswer([], typedAnswer);
+  }
+}
+
+async function onContinue() {
+  if (transitioning || uiState !== 'answered') return;
+  transitioning = true;
+  continueBtn.disabled = true;
+  try {
+    current += 1;
+    if (current < questions.length) {
+      renderQuestion(); // сбросит transitioning
+    } else {
+      await doFinish();
+    }
+  } finally {
+    if (uiState !== 'finishing') transitioning = false;
+  }
+}
+
+async function doFinish() {
+  if (finishing) return;
+  finishing = true;
+  uiState = 'finishing';
+  clearInterval(timerInterval);
+  progressFill.style.width = '100%';
+  bottomBar.style.display = 'none';
+  setStatus('Подводим итоги…');
+  log('finish_start');
+  try {
+    await apiPost(`/learn/api/test/${attemptId}/finish`, null);
+    window.location.href = `/learn/test/${attemptId}/result`;
+  } catch (e) {
+    log('finish_failed', {err: String(e)});
+    finishing = false;
+    if (e && e.lease) { lostLease(); return; }
+    uiState = 'answered';
+    setStatus('');
+    if (window.SmartENT && SmartENT.log) SmartENT.log('net', 'тест не завершён: ' + String(e), {attempt: attemptId});
+    showError('Не удалось завершить тест (сеть). Ответы сохранены — нажмите «Повторить».',
+              doFinish);
+    bottomBar.style.display = 'flex';
+    continueBtn.disabled = false;
+  }
+}
+
+continueBtn.addEventListener('click', onContinue);
+
+// Возврат в Mini App после сворачивания: пересчитать таймер по дедлайну
+document.addEventListener('visibilitychange', function() {
+  if (!document.hidden && (deadline !== null || overallDeadline !== null)) tickTimer();
+});
+
+// Старт: при продолжении перескакиваем на первый неотвеченный вопрос
+startOverall();
+current = firstUnansweredIndex();
+if (current >= questions.length) {
+  doFinish();
+} else {
+  renderQuestion();
+}
+log('test_start', {total: questions.length, resume: {{ 'true' if is_resume else 'false' }}});
+</script>
+
+{% include "_screen_protect.html" %}
+
+{% endblock %}

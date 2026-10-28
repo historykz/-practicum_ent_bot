@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}{{ test.title }} — конструктор — Smart ENT{% endblock %}
+
+{# Поля вопроса: общие для «добавить» и «изменить». q — вопрос или пусто. #}
+{% macro qfields(q) %}
+  {% set kind = q.kind if q else 'single' %}
+  {% set p = q.payload_obj if q else {} %}
+  <label>Тип вопроса</label>
+  <select name="q_type" class="qtype" autocomplete="off">
+    {% for k, label in type_labels.items() %}<option value="{{ k }}" {% if k == kind %}selected{% endif %}>{{ label }}</option>{% endfor %}
+  </select>
+
+  <label>Текст вопроса</label>
+  <textarea name="text" rows="3" required maxlength="2000">{{ q.text if q else '' }}</textarea>
+
+  <div class="qf" data-for="single multiple">
+    <label>Варианты ответа. Галочкой слева отметьте правильные.</label>
+    <div class="opt-list">
+      {% set rows = q.options if q and q.options else [] %}
+      {% for i in range(([rows|length, 4]|max)) %}
+      <div class="opt-row">
+        <input type="checkbox" name="opt_correct" value="{{ i }}" {% if rows|length > i and rows[i].is_correct %}checked{% endif %}>
+        <input type="text" name="opt_text" maxlength="500" value="{{ rows[i].text if rows|length > i else '' }}" placeholder="Вариант {{ i + 1 }}">
+      </div>
+      {% endfor %}
+    </div>
+    <button type="button" class="btn-small add-opt">+ вариант</button>
+    <p class="muted">Один правильный: отметьте ровно один вариант. Несколько правильных: отметьте два и больше.
+       Ученик не видит, сколько правильных ответов.</p>
+  </div>
+
+  <div class="qf" data-for="text">
+    <label>Допустимые ответы, по одному в строке</label>
+    <textarea name="text_answers" rows="3" placeholder="Астана&#10;Нур-Султан">{{ (p.answers or [])|join('\n') }}</textarea>
+    <label class="admin-checkbox"><input type="checkbox" name="case_sensitive" {% if p.case_sensitive %}checked{% endif %}> Учитывать регистр букв</label>
+    <label class="admin-checkbox"><input type="checkbox" name="numeric" {% if p.numeric %}checked{% endif %}> Ответ число (сравнивать как число)</label>
+    <label>Допуск для числа (например 0.5)</label>
+    <input type="text" name="tolerance" value="{{ p.tolerance if p.tolerance is defined else '' }}" inputmode="decimal" placeholder="0">
+    <p class="muted">Лишние пробелы и «е/ё» не мешают. Если допустимы разные написания, добавьте каждое в своей строке.</p>
+  </div>
+
+  <div class="qf" data-for="matching">
+    <label>Пары: слева элемент, справа его пара</label>
+    <div class="pair-list">
+      {% set pairs = p.pairs or [] %}
+      {% for i in range(([pairs|length, 4]|max)) %}
+      <div class="pair-row">
+        <input type="text" name="pair_l" maxlength="300" value="{{ pairs[i].l if pairs|length > i else '' }}" placeholder="Слева {{ i + 1 }}">
+        <span>→</span>
+        <input type="text" name="pair_r" maxlength="300" value="{{ pairs[i].r if pairs|length > i else '' }}" placeholder="Справа {{ i + 1 }}">
+      </div>
+      {% endfor %}
+    </div>
+    <button type="button" class="btn-small add-pair">+ пара</button>
+    <label>Лишние элементы справа (необязательно), по одному в строке</label>
+    <textarea name="extra_right" rows="2">{{ (p.extra or [])|join('\n') }}</textarea>
+    <p class="muted">Ученик увидит элементы слева и перемешанный список справа. Лишние элементы справа усложняют задание.</p>
+  </div>
+
+  <div class="qf" data-for="ordering">
+    <label>Элементы в ПРАВИЛЬНОМ порядке, по одному в строке</label>
+    <textarea name="order_items" rows="5" placeholder="Первый&#10;Второй&#10;Третий">{{ (p.get('items') or [])|join('\n') }}</textarea>
+    <p class="muted">Ученику элементы покажутся в случайном порядке, а проверка сравнит его порядок с вашим.</p>
+  </div>
+
+  <label>Баллы за вопрос</label>
+  <input type="number" name="points" min="1" max="100" value="{{ q.points if q else 1 }}">
+  <label>Пояснение (покажется после ответа и в разборе)</label>
+  <textarea name="explanation" rows="2" maxlength="1500">{{ (q.explanation or '') if q else '' }}</textarea>
+  <label>Тема вопроса (для сводки частых ошибок)</label>
+  <input type="text" name="topic" maxlength="200" value="{{ (q.topic or '') if q else '' }}">
+  <label>Картинка к вопросу (необязательно, до 5 МБ)</label>
+  <input type="file" name="image" accept="image/*">
+{% endmacro %}
+
+{% block content %}
+
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a><span>›</span>
+  <a href="/admin/tests">🧪 Конструктор</a><span>›</span><span class="crumb-current">{{ test.title }}</span>
+</nav>
+
+<h1>🧪 {{ test.title }}</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">⚠️ {{ error }}</div>{% endif %}
+
+<section class="admin-card">
+  <p>
+    Статус:
+    {% if test.builder_state == 'published' %}{% if test.status == 'active' %}<b>✅ опубликован</b>{% else %}<b>🙈 скрыт в боте</b>{% endif %}{% else %}<b>📝 черновик</b>{% endif %}
+    · Вопросов: <b>{{ questions|length }}</b> · Баллов всего: <b>{{ points_total }}</b>
+    · На сайте: <b>{% if web_effective %}🌐 разрешено{% else %}нет, только платформа{% endif %}</b>
+    · Прошли: <b>{{ stats.done }}</b>, идут сейчас: <b>{{ stats.active }}</b>
+  </p>
+  <div class="admin-actions">
+    <a class="btn btn-primary" href="/admin/tests/{{ test.id }}/preview" target="_blank">👁 Предпросмотр</a>
+    <a class="btn" href="/admin/tests/{{ test.id }}/preview?restart=1" target="_blank">🔁 Предпросмотр заново</a>
+    {% if test.builder_state == 'published' %}
+      <form method="post" action="/admin/tests/{{ test.id }}/unpublish" style="display:inline"
+            onsubmit="return confirm('Снять тест с публикации? Ученики перестанут его видеть, начатые попытки сохранятся.');">
+        <button type="submit" class="btn">⏸ Снять с публикации</button></form>
+    {% else %}
+      <form method="post" action="/admin/tests/{{ test.id }}/publish" style="display:inline">
+        <button type="submit" class="btn btn-primary">🚀 Опубликовать</button></form>
+    {% endif %}
+    <a class="btn" href="/admin/tests/{{ test.id }}/results">📊 Результаты</a>
+    <form method="post" action="/admin/tests/{{ test.id }}/duplicate" style="display:inline">
+      <button type="submit" class="btn">📄 Дублировать</button></form>
+    <form method="post" action="/admin/tests/{{ test.id }}/delete" style="display:inline"
+          onsubmit="return confirm('Удалить тест «{{ test.title|replace("'", "") }}» вместе с вопросами и результатами? Это необратимо.');">
+      <button type="submit" class="btn btn-danger">🗑 Удалить</button></form>
+  </div>
+  {% if problems %}
+  <div class="alert" style="margin-top:12px;"><b>Что мешает опубликовать:</b>
+    <ul style="margin:6px 0 0;padding-left:20px;">{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+  </div>
+  {% elif test.builder_state != 'published' %}
+  <p class="muted" style="margin-top:10px;">✅ Ошибок не найдено: тест можно публиковать.</p>
+  {% endif %}
+  {% if lesson_linked %}<p class="muted">🔗 Тест привязан к уроку, удалить его отсюда нельзя.</p>{% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>⚙️ Настройки теста</h2>
+  <form method="post" action="/admin/tests/{{ test.id }}/settings" class="admin-form">
+    <label>Название</label>
+    <input type="text" name="title" value="{{ test.title }}" required maxlength="200">
+    <label>Предмет</label>
+    <input type="text" name="subject" value="{{ test.subject or '' }}" maxlength="120">
+    <label>Тема</label>
+    <input type="text" name="topic" value="{{ test.topic or '' }}" maxlength="200">
+    <label>Инструкция для ученика</label>
+    <textarea name="instruction" rows="3" maxlength="2000">{{ test.instruction or '' }}</textarea>
+    <label>Язык</label>
+    <select name="language"><option value="ru" {% if test.language != 'kz' %}selected{% endif %}>Русский</option>
+      <option value="kz" {% if test.language == 'kz' %}selected{% endif %}>Қазақша</option></select>
+    {% if categories %}
+    <label>Раздел каталога в боте</label>
+    <select name="category_id"><option value="">— без раздела —</option>
+      {% for c in categories %}<option value="{{ c.id }}" {% if test.category_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+    </select>
+    {% endif %}
+
+    <fieldset class="admin-mode-box">
+      <legend>⏱ Время и попытки</legend>
+      <label>Секунд на один вопрос (0 = без ограничения)</label>
+      <input type="number" name="time_per_question" min="0" max="3600" value="{{ test.time_per_question or 0 }}">
+      <label>Общее время на тест, минут (0 = без ограничения)</label>
+      <input type="number" name="time_limit_min" min="0" max="600" value="{{ test.time_limit_min or 0 }}">
+      <label>Сколько попыток у ученика (0 = без ограничения)</label>
+      <input type="number" name="attempts_limit" min="0" max="100" value="{{ test.attempts_limit or 0 }}">
+      <label class="admin-checkbox"><input type="checkbox" name="first_attempt_only" {% if test.first_attempt_only %}checked{% endif %}> В рейтинг идёт только первая попытка</label>
+    </fieldset>
+
+    <fieldset class="admin-mode-box">
+      <legend>🔀 Перемешивание</legend>
+      <label class="admin-checkbox"><input type="checkbox" name="shuffle_questions" {% if test.shuffle_questions %}checked{% endif %}> Перемешивать вопросы</label>
+      <label class="admin-checkbox"><input type="checkbox" name="shuffle_options" {% if test.shuffle_options %}checked{% endif %}> Перемешивать варианты ответа (элементы сопоставления и последовательности перемешиваются всегда)</label>
+    </fieldset>
+
+    <fieldset class="admin-mode-box">
+      <legend>📈 Что видит ученик после ответа и в конце</legend>
+      <label class="admin-checkbox"><input type="checkbox" name="show_correct" {% if test.show_correct %}checked{% endif %}> Показывать правильные ответы и пояснения</label>
+      <label class="admin-checkbox"><input type="checkbox" name="show_results" {% if test.show_results %}checked{% endif %}> Показывать итог (баллы и процент) после завершения</label>
+    </fieldset>
+
+    <fieldset class="admin-mode-box">
+      <legend>🌐 Где проходить</legend>
+      <label class="admin-checkbox"><input type="checkbox" name="allow_web" {% if web_effective %}checked{% endif %}> Разрешить прохождение на сайте</label>
+      <p class="muted">Включено: в боте у ученика с доступом два действия, «Пройти на платформе» и «Перейти на сайт».
+         Сайт открывается по его личной ссылке. Выключено: тест проходят только в боте, новые попытки на сайте
+         не создаются, в том числе по ранее выданным ссылкам (начатая попытка завершается).
+         {% if has_typed %}<br><b>В тесте есть ввод, сопоставление или последовательность: в боте они не показываются, нужен сайт.</b>{% endif %}</p>
+      <label class="admin-checkbox"><input type="checkbox" name="is_private" {% if test.is_private %}checked{% endif %}> Приватный тест (доступ выдаётся вручную, как у личных тестов в боте)</label>
+    </fieldset>
+
+    <button type="submit" class="btn btn-primary">💾 Сохранить настройки</button>
+  </form>
+  {% if test.builder_state == 'published' %}
+  <form method="post" action="/admin/tests/{{ test.id }}/revoke-links" style="margin-top:10px"
+        onsubmit="return confirm('Отозвать все выданные ученикам ссылки на этот тест? Они получат новые в боте.');">
+    <button type="submit" class="btn-small">🔒 Отозвать все персональные ссылки</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="admin-card" id="questions">
+  <h2>📋 Вопросы ({{ questions|length }})</h2>
+  {% if test.builder_state == 'published' %}
+  <p class="muted">Тест опубликован: правки вопросов сразу видны ученикам, у начатых попыток они тоже изменятся.</p>
+  {% endif %}
+  {% for q in questions %}
+  <details class="q-card{% if q.problem %} q-broken{% endif %}" id="q{{ q.id }}">
+    <summary>
+      <span class="q-num">{{ loop.index }}</span>
+      <span class="q-sum-text">{{ q.text[:80] }}{% if q.text|length > 80 %}…{% endif %}</span>
+      <span class="q-correct">{{ q.kind_label }} · {{ q.points }} б.</span>
+      {% if q.problem %}<span class="q-flag">{{ q.problem }}</span>{% endif %}
+    </summary>
+    <p class="muted">{{ q.summary }}</p>
+    {% if q.image_url %}<img src="{{ q.image_url }}" alt="" class="q-image">{% endif %}
+    <form method="post" action="/admin/tests/questions/{{ q.id }}/save" enctype="multipart/form-data" class="admin-form">
+      {{ qfields(q) }}
+      {% if q.image_url %}<label class="admin-checkbox"><input type="checkbox" name="remove_image" value="1"> Убрать картинку</label>{% endif %}
+      <button type="submit" class="btn-small">💾 Сохранить вопрос</button>
+    </form>
+    <div class="q-tools">
+      <form method="post" action="/admin/tests/questions/{{ q.id }}/move" style="display:inline"><input type="hidden" name="dir" value="up"><button class="btn-small" title="Выше">▲</button></form>
+      <form method="post" action="/admin/tests/questions/{{ q.id }}/move" style="display:inline"><input type="hidden" name="dir" value="down"><button class="btn-small" title="Ниже">▼</button></form>
+      <form method="post" action="/admin/tests/questions/{{ q.id }}/duplicate" style="display:inline"><button class="btn-small">📄 Дублировать</button></form>
+      <form method="post" action="/admin/tests/questions/{{ q.id }}/delete" style="display:inline"
+            onsubmit="return confirm('Удалить только этот вопрос?');"><button class="btn-small btn-danger">🗑 Удалить</button></form>
+    </div>
+  </details>
+  {% else %}
+  <p class="muted">Вопросов пока нет. Добавьте первый ниже.</p>
+  {% endfor %}
+</section>
+
+<section class="admin-card" id="add">
+  <h2>➕ Добавить вопрос</h2>
+  <form method="post" action="/admin/tests/{{ test.id }}/questions/add" enctype="multipart/form-data" class="admin-form">
+    {{ qfields(none) }}
+    <button type="submit" class="btn btn-primary">Добавить вопрос</button>
+  </form>
+</section>
+
+<style>
+  .opt-row, .pair-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  .opt-row input[type=text], .pair-row input[type=text] { flex: 1; min-width: 0; }
+  .qf { margin: 8px 0; }
+  .admin-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  .admin-actions form { margin: 0; }
+</style>
+<script>
+(function () {
+  // после сохранения возвращаемся к вопросу и раскрываем его
+  if (location.hash && /^#q\d+$/.test(location.hash)) {
+    var d = document.querySelector(location.hash);
+    if (d && d.tagName === 'DETAILS') { d.open = true; d.scrollIntoView({block: 'start'}); }
+  }
+  function apply(form) {
+    var sel = form.querySelector('select.qtype');
+    if (!sel) return;
+    form.querySelectorAll('.qf').forEach(function (g) {
+      g.style.display = g.getAttribute('data-for').split(' ').indexOf(sel.value) >= 0 ? '' : 'none';
+    });
+  }
+  document.querySelectorAll('form').forEach(function (form) {
+    var sel = form.querySelector('select.qtype');
+    if (sel) { sel.addEventListener('change', function () { apply(form); }); apply(form); }
+  });
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('.add-opt, .add-pair') : null;
+    if (!b) return;
+    var wrap = b.parentNode.querySelector(b.classList.contains('add-opt') ? '.opt-list' : '.pair-list');
+    var rows = wrap.children;
+    var max = b.classList.contains('add-opt') ? 10 : 12;
+    if (rows.length >= max) return;
+    var clone = rows[rows.length - 1].cloneNode(true);
+    clone.querySelectorAll('input').forEach(function (i) {
+      if (i.type === 'checkbox') { i.checked = false; i.value = String(rows.length); } else { i.value = ''; }
+      if (i.placeholder) i.placeholder = i.placeholder.replace(/\d+$/, String(rows.length + 1));
+    });
+    wrap.appendChild(clone);
+  });
+})();
+</script>
+{% endblock %}

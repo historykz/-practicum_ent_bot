@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Режим — Избранные вопросы — Smart ENT{% endblock %}
+{% block page_title %}Избранные вопросы{% endblock %}
+{% block content %}
+
+<p><a href="/tests/favorites">&larr; ⭐️ Избранные вопросы</a></p>
+<h1>Выберите режим</h1>
+<p class="muted">Во всех режимах — только ваши избранные вопросы.</p>
+
+<div class="fav-modes">
+  {% if n_test %}
+  <a class="btn btn-primary fav-mode" href="/tests/favorites/test">📝 Режим теста <span class="fav-mode-n">{{ n_test }}</span></a>
+  {% endif %}
+  {% if n_cards %}
+  <a class="btn btn-primary fav-mode" href="/tests/favorites/cards">🃏 Режим карточек <span class="fav-mode-n">{{ n_cards }}</span>{% if not premium %} 💎{% endif %}</a>
+  <a class="btn btn-primary fav-mode" href="/tests/favorites/study">🧠 Режим заучивания <span class="fav-mode-n">{{ n_cards }}</span>{% if not premium %} 💎{% endif %}</a>
+  {% endif %}
+</div>
+{% if not premium and n_cards %}
+<p class="muted" style="margin-top:12px;">💎 Карточки и заучивание открываются с Премиумом — так же, как на уроках.</p>
+{% endif %}
+<style>
+  .fav-modes { display: grid; gap: 12px; max-width: 520px; }
+  .fav-mode { display: flex; justify-content: space-between; align-items: center; padding: 16px 18px; font-size: 1.02rem; }
+  .fav-mode-n { opacity: .8; font-size: .86rem; }
+</style>
+
+{% endblock %}

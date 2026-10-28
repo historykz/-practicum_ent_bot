@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Интерактивные задания — Smart ENT{% endblock %}
+{% block content %}
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a><span>›</span><span class="crumb-current">🎮 Интерактивные задания</span>
+</nav>
+<h1>🎮 Интерактивные задания</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">⚠️ {{ error }}</div>{% endif %}
+
+<section class="admin-card ia-start">
+  <h2>Как добавить задания через ChatGPT или Claude</h2>
+  <ol class="ia-steps">
+    <li><a class="btn btn-primary" href="/admin/interactive/template.zip">⬇️ Скачать шаблон для создания интерактивных заданий через ИИ</a></li>
+    <li>Откройте ChatGPT или Claude, приложите скачанный шаблон и опишите идею. Например:
+      <i>«Создай 10 разных интерактивных игр по теме „Строение клетки“. Подготовь готовый ZIP для SMART ЕНТ».</i></li>
+    <li>Загрузите сюда ZIP, который пришлёт нейросеть. Сайт сам найдёт все задания в архиве.</li>
+    <li>Проверьте задания в предпросмотре, опубликуйте и вставьте в нужные уроки.</li>
+  </ol>
+  <form method="post" action="/admin/interactive/upload" enctype="multipart/form-data" class="admin-form admin-inline" id="zip-form">
+    <input type="file" name="file" accept=".zip,application/zip" required>
+    <button type="submit" class="btn btn-primary">📦 Загрузить ZIP</button>
+  </form>
+  <p class="muted">Архив до {{ zip_mb }} МБ. В одном архиве может быть одно задание или много (до 200). Каждое задание получит свою
+     отдельную карточку, свои файлы и свои результаты.</p>
+  <details class="admin-details">
+    <summary>✍️ Вставить готовый код вручную (без архива)</summary>
+    <form method="post" action="/admin/interactive/create" class="admin-form admin-inline">
+      <input type="text" name="title" placeholder="Название задания" maxlength="200" required>
+      <button type="submit" class="btn">Создать кодом</button>
+    </form>
+    <p class="muted">Откроется редактор: вставьте HTML целиком (или HTML, CSS и JavaScript по отдельности), запустите и сохраните.</p>
+  </details>
+</section>
+
+{% if packages %}
+<section class="admin-card">
+  <details class="admin-details"><summary>📦 Последние загрузки архивов ({{ packages|length }})</summary>
+  <ul class="lesson-list">
+    {% for p in packages %}
+    <li><a href="/admin/interactive/package/{{ p.id }}">{{ p.title or p.file_name or ('Загрузка №' ~ p.id) }}</a>
+        <span class="muted">· заданий в архиве: {{ p.tasks_total }}, принято: {{ p.tasks_ok }}, осталось в библиотеке: {{ p.alive }} · {{ (p.created_at or '')[:16] }}</span></li>
+    {% endfor %}
+  </ul>
+  </details>
+</section>
+{% endif %}
+
+<section class="admin-card">
+  <h2>📚 Библиотека ({{ tasks|length }}{% if tasks|length != total %} из {{ total }}{% endif %})</h2>
+  <form method="get" action="/admin/interactive" class="admin-form admin-inline ia-filter">
+    <input type="search" name="q" value="{{ f.q }}" placeholder="Поиск по названию и теме">
+    <select name="subject"><option value="">Все предметы</option>
+      {% for s in subjects %}<option value="{{ s }}" {% if f.subject == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    <select name="status"><option value="">Любой статус</option>
+      <option value="published" {% if f.status == 'published' %}selected{% endif %}>Опубликованные</option>
+      <option value="draft" {% if f.status == 'draft' %}selected{% endif %}>Черновики</option></select>
+    <select name="source"><option value="">Любой источник</option>
+      <option value="zip" {% if f.source == 'zip' %}selected{% endif %}>Из ZIP</option>
+      <option value="code" {% if f.source == 'code' %}selected{% endif %}>Созданные кодом</option></select>
+    <button type="submit" class="btn-small">Найти</button>
+  </form>
+
+  {% if tasks %}
+  <form method="post" action="/admin/interactive/bulk" id="bulk">
+    <input type="hidden" name="next" value="/admin/interactive?q={{ f.q|urlencode }}&subject={{ f.subject|urlencode }}&status={{ f.status }}&source={{ f.source }}">
+    <div class="table-scroll"><table class="ia-table">
+      <thead><tr><th><input type="checkbox" id="all" aria-label="Выбрать все"></th><th>Задание</th><th>Статус</th><th>Оценка</th><th>Уроков</th><th>Учеников</th></tr></thead>
+      <tbody>
+      {% for t in tasks %}
+      <tr>
+        <td><input type="checkbox" name="task_id" value="{{ t.id }}" class="pick"></td>
+        <td><a href="/admin/interactive/{{ t.id }}">{{ t.title }}</a>
+            <br><span class="muted">{% if t.source == 'zip' %}📦 ZIP{% else %}✍️ код{% endif %}{% if t.subject %} · {{ t.subject }}{% endif %}{% if t.topic %} · {{ t.topic }}{% endif %}{% if t.visibility == 'lessons' %} · только в уроках{% endif %}{% if t.pending_files_key %} · 🆕 новая версия ждёт проверки{% endif %}</span></td>
+        <td>{% if t.status == 'published' %}✅ опубл.{% else %}📝 черновик{% endif %}</td>
+        <td>{% if t.grading == 'server' %}🏆 сервер{% else %}🧪 тренировка{% endif %}</td>
+        <td>{{ t.lessons_count }}</td>
+        <td>{{ t.users_count }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    <div class="ia-bulk">
+      <span class="muted">С отмеченными:</span>
+      <select name="action" id="bulk-action" required>
+        <option value="">— выберите действие —</option>
+        <option value="publish">Опубликовать</option>
+        <option value="unpublish">Снять с публикации</option>
+        <option value="lesson">Вставить в урок</option>
+        <option value="vis_all">Показывать в общем списке</option>
+        <option value="vis_lessons">Показывать только в уроках</option>
+        <option value="delete">Удалить</option>
+      </select>
+      <select name="lesson_id" id="bulk-lesson" hidden>
+        <option value="">— урок —</option>
+        {% for l in lessons %}<option value="{{ l.id }}">{{ l.subject_title }} › {{ l.section_title }} › {{ l.title }}</option>{% endfor %}
+      </select>
+      <button type="submit" class="btn-small">Выполнить</button>
+    </div>
+  </form>
+  {% else %}
+  <p class="muted">Заданий не найдено.</p>
+  {% endif %}
+  <p class="muted">Ученики видят опубликованные задания внутри уроков, а задания «в общем списке» ещё и в разделе
+     <a href="/interactive">«Интерактивные задания»</a>.</p>
+</section>
+
+<style>
+  .ia-steps { margin: 6px 0 12px; padding-left: 22px; line-height: 1.6; }
+  .ia-steps li { margin: 6px 0; }
+  .ia-filter input[type=search] { min-width: 180px; }
+  .ia-bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  .ia-bulk select { max-width: 100%; }
+  .ia-table td:first-child, .ia-table th:first-child { width: 32px; }
+</style>
+<script>
+(function () {
+  var all = document.getElementById('all');
+  if (all) all.addEventListener('change', function () { document.querySelectorAll('.pick').forEach(function (c) { c.checked = all.checked; }); });
+  var act = document.getElementById('bulk-action'), les = document.getElementById('bulk-lesson');
+  if (act) act.addEventListener('change', function () { les.hidden = act.value !== 'lesson'; les.required = act.value === 'lesson'; });
+  var bulk = document.getElementById('bulk');
+  if (bulk) bulk.addEventListener('submit', function (e) {
+    if (!document.querySelector('.pick:checked')) { e.preventDefault(); alert('Отметьте задания галочками.'); return; }
+    if (act.value === 'delete' && !confirm('Удалить отмеченные задания? Они пропадут и из всех уроков.')) e.preventDefault();
+  });
+  var zf = document.getElementById('zip-form');
+  if (zf) zf.addEventListener('submit', function () { var b = zf.querySelector('button'); b.disabled = true; b.textContent = 'Загружаем и проверяем…'; });
+})();
+</script>
+{% endblock %}

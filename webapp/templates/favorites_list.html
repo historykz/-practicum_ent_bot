@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Избранные вопросы — Smart ENT{% endblock %}
+{% block page_title %}Избранные вопросы{% endblock %}
+{% block content %}
+
+<p><a href="/tests">&larr; Тесты</a></p>
+<h1>⭐️ Избранные вопросы{% if count %} — {{ count }}{% endif %}</h1>
+
+{% if not items %}
+<section class="section-card fav-empty">
+  <p><b>У вас пока нет избранных вопросов ⭐️</b></p>
+  <p class="muted">Добавляйте вопросы в избранное во время прохождения тестов, чтобы потом повторять их отдельно.</p>
+  <a class="btn" href="/tests">📝 К тестам</a>
+</section>
+{% else %}
+<div class="hero-actions" style="justify-content:flex-start;margin-bottom:14px;">
+  {% if ready %}
+  <a class="btn btn-primary" href="/tests/favorites/start">▶️ НАЧАТЬ ТЕСТ</a>
+  {% else %}
+  <button class="btn btn-primary" disabled>▶️ НАЧАТЬ ТЕСТ</button>
+  {% endif %}
+</div>
+{% if locked %}
+<div class="how-to">
+  🔒 Вопросов из уроков, к которым сейчас нет доступа: <b>{{ locked }}</b>. В тренировку они не попадут,
+  пока доступ не вернётся.
+</div>
+{% endif %}
+
+<ul class="fav-list">
+  {% for q in items %}
+  <li class="section-card fav-item{% if not q.accessible %} is-locked{% endif %}">
+    <div class="fav-item-head">
+      <span class="muted fav-where">{% if not q.accessible %}🔒 {% endif %}{{ q.where }}</span>
+      <button type="button" class="fav-btn is-on" data-fav="{{ q.id }}">⭐️ В избранном</button>
+    </div>
+    {% if q.image and q.accessible %}<img src="{{ q.image }}" class="quiz-image" alt="" draggable="false">{% endif %}
+    <p class="fav-text">{{ q.text }}</p>
+    {% if q.accessible and q.answer %}
+    <details class="fav-answer"><summary>Показать ответ</summary><p>✅ {{ q.answer }}</p></details>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+<style>
+  .fav-list { list-style: none; padding: 0; margin: 0; }
+  .fav-item { margin-bottom: 10px; }
+  .fav-item.is-locked { opacity: .65; }
+  .fav-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .fav-where { font-size: .84rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fav-text { margin: 4px 0; white-space: pre-wrap; overflow-wrap: break-word; }
+  .fav-answer summary { cursor: pointer; color: var(--accent); font-size: .9rem; }
+</style>
+{% endif %}
+
+{% include "_favorites.html" %}
+<script>
+// Убрали звезду на этой странице — вопрос уходит из списка при следующем открытии
+(function() { if (window.SmartENT && SmartENT.favInit) SmartENT.favInit({{ items|map(attribute='id')|list|tojson }}); })();
+</script>
+
+{% endblock %}
