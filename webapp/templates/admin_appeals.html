@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Апелляции — Smart ENT{% endblock %}
+{% block page_title %}Апелляции{% endblock %}
+{% block content %}
+
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a>
+  <span>›</span><span class="crumb-current">⚠️ Апелляции</span>
+</nav>
+
+<h1>⚠️ Апелляции на вопросы</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
+<p class="muted">Жалобы учеников на спорные вопросы — из бота и с сайта.
+   <b>Принять</b> — если ученик прав (вопрос стоит поправить в редакторе).
+   <b>Отклонить</b> — если жалоба необоснованная: ученик получит предупреждение.</p>
+
+<p>
+  <a class="btn-small" href="/admin/appeals?status=pending">На рассмотрении ({{ pending_count }})</a>
+  <a class="btn-small" href="/admin/appeals?status=approved">Принятые</a>
+  <a class="btn-small" href="/admin/appeals?status=rejected">Отклонённые</a>
+  <a class="btn-small" href="/admin/appeals?status=all">Все</a>
+</p>
+
+{% if appeals %}
+{% for a in appeals %}
+<section class="admin-card appeal-card">
+  <p class="muted">{{ a.when }} · {{ a.who }}{% if a.username %} · @{{ a.username }}{% endif %}
+     · ID {{ a.user_tg_id }}
+     {% if a.status != 'pending' %}<b> · {{ a.status }}</b>{% endif %}</p>
+
+  <p><b>Вопрос{% if a.serial_no %} №{{ a.serial_no }}{% endif %}:</b> {{ a.qtext or '— вопрос удалён —' }}</p>
+  {% if a.correct_ans %}<p class="muted">Верным считается: <b>{{ a.correct_ans }}</b></p>{% endif %}
+  {% if a.test_title %}<p class="muted">Тест: {{ a.test_title }}{% if a.lesson_title %} · урок «{{ a.lesson_title }}»{% endif %}</p>{% endif %}
+
+  <blockquote class="appeal-text">{{ a.user_text }}</blockquote>
+
+  {% if a.status == 'pending' %}
+  <div class="hero-actions" style="justify-content:flex-start;">
+    <form method="post" action="/admin/appeals/{{ a.id }}/resolve" style="display:inline">
+      <input type="hidden" name="next" value="/admin/appeals?status={{ filter_status }}">
+      <input type="hidden" name="action" value="approve">
+      <button type="submit" class="btn-small">✅ Принять</button>
+    </form>
+    <form method="post" action="/admin/appeals/{{ a.id }}/resolve" style="display:inline"
+          onsubmit="return confirm('Отклонить? Ученик получит предупреждение.');">
+      <input type="hidden" name="next" value="/admin/appeals?status={{ filter_status }}">
+      <input type="hidden" name="action" value="reject">
+      <button type="submit" class="btn-small btn-danger">❌ Отклонить</button>
+    </form>
+    {% if a.question_id %}
+    <a class="btn-small" href="/admin/learn/questions/{{ a.question_id }}/goto">✏️ Исправить вопрос</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endfor %}
+{% else %}
+<p class="muted">Апелляций нет.</p>
+{% endif %}
+
+{% endblock %}

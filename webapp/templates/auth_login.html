@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Вход — Smart ENT{% endblock %}
+{% block page_title %}Вход{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <h1>Вход</h1>
+  {% if error %}<div class="alert">{{ error }}
+    {% if bot_username %}<br><a class="btn btn-primary" style="margin-top:8px;"
+       href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">Открыть бота</a>{% endif %}
+  </div>{% endif %}
+  <form method="post" action="/login" class="auth-form">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label>Telegram username</label>
+    <div class="auth-uname"><span>@</span>
+      <input type="text" name="username" value="{{ username or '' }}"
+             placeholder="student123" autocomplete="username" required></div>
+    <label>Пароль</label>
+    <input type="password" name="password" autocomplete="current-password" required>
+    <button type="submit" class="btn btn-primary">Войти</button>
+  </form>
+  <p class="muted auth-alt">
+    <a href="/forgot">Забыли пароль?</a> · <a href="/register">Регистрация</a></p>
+  <p class="muted">Если аккаунт привязан к Telegram, после пароля придёт
+     одноразовый код в бота — так в него не войдёт никто посторонний.</p>
+</section>
+{% endblock %}

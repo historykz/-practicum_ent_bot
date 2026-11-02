@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Профиль ученика — Smart ENT{% endblock %}
+{% block page_title %}Профиль{% endblock %}
+{% macro act(name) %}<form method="post" action="/admin/users/{{ u.tg_id }}/action" class="admin-inline" style="display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center;margin:2px 0;"><input type="hidden" name="action" value="{{ name }}">{{ caller() }}</form>{% endmacro %}
+{% block content %}
+<nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><a href="/admin/users">👥 Пользователи</a><span>›</span><span class="crumb-current">{{ u.first_name or u.username or u.tg_id }}</span></nav>
+<h1>{{ u.first_name or '' }} {{ u.last_name or '' }}{% if u.username %} <span class="muted">@{{ u.username }}</span>{% endif %}</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<section class="admin-card">
+  <p>Telegram ID: <b>{{ u.tg_id }}</b>{% if is_owner_row %} · владелец{% endif %}<br>Школа: {{ u.school or '—' }}, город: {{ u.city or '—' }}<br>Создан: {{ (u.created_at or '')[:16] }}, активность: {{ (u.last_activity_at or '')[:16] or '—' }}<br>Статус: <b>{{ 'заблокирован' if u.is_blocked else 'активен' }}</b></p>
+  {% if u.is_blocked %}{% call act('unblock') %}<button class="btn" type="submit">Разблокировать</button>{% endcall %}
+  {% elif not is_owner_row %}{% call act('block') %}<button class="btn btn-danger" type="submit" onclick="return confirm('Заблокировать пользователя?');">Заблокировать</button>{% endcall %}{% endif %}
+  {% call act('reset_sessions') %}<button class="btn" type="submit" onclick="return confirm('Выйти из всех сеансов этого человека на сайте?');">Сбросить сеансы</button>{% endcall %}
+</section>
+<section class="admin-card">
+  <h2>💎 Premium</h2>
+  <p>{% if premium %}Активен{% if premium.expires_at %} до {{ premium.expires_at[:10] }}{% else %}, бессрочно{% endif %}.{% else %}Нет.{% endif %}</p>
+  {% call act('premium') %}<input type="number" name="days" min="0" max="3650" value="30" aria-label="Дней" style="width:90px;"><button class="btn" type="submit">{{ 'Продлить' if premium else 'Выдать' }} (0 = навсегда)</button>{% endcall %}
+  {% if premium %}{% call act('premium_revoke') %}<button class="btn btn-danger" type="submit" onclick="return confirm('Переместить Premium в корзину? Вы сможете восстановить его в течение 48 часов.');">Отозвать</button>{% endcall %}{% endif %}
+  {% if grants %}<div class="table-scroll"><table><thead><tr><th>Когда</th><th>Источник</th><th>Дней</th><th>Сумма</th></tr></thead><tbody>{% for g in grants %}<tr><td>{{ (g.created_at or '')[:16] }}</td><td>{{ g.source }}</td><td>{{ g.days }}</td><td>{{ g.amount or '' }} {{ g.currency or '' }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+</section>
+<section class="admin-card">
+  <h2>📚 Доступ к предметам</h2>
+  {% for s in subjects %}<p>{{ s.title }}{% if s.expires_at %} до {{ s.expires_at[:10] }}{% endif %} {% call act('subject_revoke') %}<input type="hidden" name="subject_id" value="{{ s.subject_id }}"><button class="btn btn-small btn-danger" type="submit">Снять</button>{% endcall %}</p>{% else %}<p class="muted">Нет выданных предметов.</p>{% endfor %}
+  {% call act('subject_grant') %}<select name="subject_id" required>{% for s in all_subjects %}<option value="{{ s.id }}">{{ s.title }}</option>{% endfor %}</select><input type="number" name="days" min="0" value="0" aria-label="Дней" style="width:90px;"><button class="btn" type="submit">Выдать (0 = навсегда)</button>{% endcall %}
+</section>
+<section class="admin-card">
+  <h2>🔒 Приватные тесты</h2>
+  {% for t in tests %}<p>№{{ t.test_id }} {{ t.title }} {% call act('test_revoke') %}<input type="hidden" name="access_id" value="{{ t.id }}"><button class="btn btn-small btn-danger" type="submit">Снять</button>{% endcall %}</p>{% else %}<p class="muted">Нет.</p>{% endfor %}
+  {% call act('test_grant') %}<input type="number" name="test_id" min="1" required placeholder="Номер теста" style="width:130px;"><button class="btn" type="submit">Выдать</button>{% endcall %}
+</section>
+<section class="admin-card">
+  <h2>🎮 Приватные интерактивы</h2>
+  {% for t in ia_tasks %}<p>№{{ t.id }} {{ t.title }} {% call act('ia_revoke') %}<input type="hidden" name="task_id" value="{{ t.id }}"><button class="btn btn-small btn-danger" type="submit">Снять</button>{% endcall %}</p>{% else %}<p class="muted">Нет.</p>{% endfor %}
+  {% call act('ia_grant') %}<input type="number" name="task_id" min="1" required placeholder="Номер задания" style="width:150px;"><button class="btn" type="submit">Выдать</button>{% endcall %}
+</section>
+<section class="admin-card">
+  <h2>🔗 Личные ссылки на тесты</h2>
+  {% for k in links %}<p>{{ k.title }}: создана {{ (k.created_at or '')[:16] }}, открывали {{ k.uses or 0 }} раз{% if k.revoked %}, отозвана{% else %} {% call act('link_revoke') %}<input type="hidden" name="link_id" value="{{ k.id }}"><button class="btn btn-small btn-danger" type="submit">Отозвать</button>{% endcall %}{% endif %}</p>{% else %}<p class="muted">Ссылок нет.</p>{% endfor %}
+</section>
+<section class="admin-card">
+  <h2>📱 Устройства</h2>
+  <p class="muted">С какими браузерами входили на сайт. Записывается с версии v92.</p>
+  {% for d in devices %}<p>{{ d.details or 'неизвестно' }} <span class="muted">последний вход {{ (d.last_at or '')[:16] }}, всего {{ d.n }}</span></p>{% else %}<p class="muted">Пока нет записей.</p>{% endfor %}
+</section>
+<section class="admin-card">
+  <h2>📝 Последние попытки тестов</h2>
+  <div class="table-scroll"><table><thead><tr><th>Когда</th><th>Тест</th><th>Статус</th><th>Верно</th><th>Баллы</th></tr></thead><tbody>{% for a in attempts %}<tr><td>{{ (a.created_at or '')[:16] }}</td><td>{{ a.title }}</td><td>{{ a.status }}</td><td>{{ a.correct_answers }}</td><td>{{ a.score }}</td></tr>{% else %}<tr><td colspan="5" class="muted">Пока нет.</td></tr>{% endfor %}</tbody></table></div>
+</section>
+<section class="admin-card">
+  <h2>📜 История</h2>
+  <p><b>Действия администраторов</b></p>
+  {% for a in actions %}<p class="muted">{{ a.ts[:16] }}: {{ a.action }} {{ a.details or '' }} ({{ a.actor_name or a.actor_tg }})</p>{% else %}<p class="muted">Нет.</p>{% endfor %}
+  <p><b>Входы и пароль</b></p>
+  {% for e in events %}<p class="muted">{{ (e.created_at or '')[:16] }}: {{ e.event }}</p>{% else %}<p class="muted">Нет.</p>{% endfor %}
+</section>
+{% endblock %}

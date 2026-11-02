@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Рассылка — Smart ENT{% endblock %}
+{% block page_title %}Рассылка{% endblock %}
+{% block content %}
+<nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><span class="crumb-current">📣 Рассылка</span></nav>
+<h1>📣 Рассылка</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<section class="admin-card">
+  <p>Получат сейчас: <b>{{ aud.targets }}</b> из {{ aud.all }}. Заблокированных админом: {{ aud.banned }}.</p>
+  {% if active %}<div class="alert">Сейчас идёт рассылка №{{ active.id }}. Новую можно начать после её окончания.</div>{% else %}
+  <form method="post" action="/admin/broadcast/send" class="admin-form">
+    <label>Текст сообщения. Фото и кнопки пока отправляются только из бота.</label>
+    <textarea name="text" rows="6" required maxlength="4000"></textarea>
+    <label class="admin-checkbox"><input type="checkbox" name="confirm" value="1" required> Отправить всем {{ aud.targets }} ученикам</label>
+    <button class="btn btn-primary" type="submit" onclick="return confirm('Отправить сообщение всем ученикам? Это нельзя отозвать с сайта.');">Отправить</button>
+  </form>{% endif %}
+</section>
+<section class="admin-card">
+  <h2>Последние рассылки</h2>
+  {% for b in recent %}<p class="muted">№{{ b.id }}: {{ b.preview }} · {{ b.status }} · получателей {{ b.total or 0 }}</p>{% else %}<p class="muted">Пока нет.</p>{% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Безопасность — Smart ENT{% endblock %}
+{% block page_title %}Безопасность{% endblock %}
+{% block content %}
+<nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><span class="crumb-current">🛡 Безопасность</span></nav>
+<h1>🛡 Безопасность</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+<section class="admin-card">
+  <h2>Пароль администратора</h2>
+  {% if not has_pw %}<p class="muted">Пароль ещё не задан, поэтому вход через скрытое окно пока не работает. Задайте его здесь.</p>{% endif %}
+  <form method="post" action="/admin/security/password" class="admin-form" autocomplete="off">
+    {% if has_pw %}<label>Старый пароль</label><input type="password" name="old" required autocomplete="current-password">{% endif %}
+    <label>Новый пароль (не меньше {{ min_len }} символов)</label><input type="password" name="new" required minlength="{{ min_len }}" autocomplete="new-password">
+    <label>Повторите новый пароль</label><input type="password" name="repeat" required minlength="{{ min_len }}" autocomplete="new-password">
+    <label class="admin-checkbox"><input type="checkbox" name="end_others" checked> Завершить другие сеансы</label>
+    <button class="btn btn-primary" type="submit">{% if has_pw %}Изменить пароль{% else %}Задать пароль{% endif %}</button>
+  </form>
+  <p class="muted">Забыли пароль? Отправьте боту команду /owner_password. Бот пришлёт только вам одноразовую ссылку на {{ reset_ttl }} минут.</p>
+</section>
+
+<section class="admin-card">
+  <h2>Подтверждение кодом в Telegram</h2>
+  <p>Сейчас: <b>{{ 'включено' if twofa else 'выключено' }}</b>. Если включено, после пароля бот присылает одноразовый код.</p>
+  {% if has_pw %}
+  <form method="post" action="/admin/security/settings" class="admin-form" autocomplete="off">
+    <input type="hidden" name="what" value="twofa"><input type="hidden" name="on" value="{{ '0' if twofa else '1' }}">
+    <label>Пароль для подтверждения</label><input type="password" name="password" required autocomplete="current-password">
+    <button class="btn" type="submit">{{ 'Выключить' if twofa else 'Включить' }}</button>
+  </form>
+  {% else %}<p class="muted">Сначала задайте пароль.</p>{% endif %}
+</section>
+
+<section class="admin-card">
+  <h2>Сеансы</h2>
+  <form method="post" action="/admin/security/end-sessions" onsubmit="return confirm('Завершить все другие сеансы владельца?');">
+    <button class="btn" type="submit">Завершить другие сеансы</button>
+  </form>
+  <form method="post" action="/admin/security/settings" class="admin-form" style="margin-top:12px;">
+    <input type="hidden" name="what" value="idle">
+    <label>Выход при бездействии после входа по паролю, минут</label>
+    <input type="number" name="minutes" min="5" max="1440" value="{{ state.idle_min }}">
+    <button class="btn" type="submit">Сохранить</button>
+  </form>
+</section>
+
+<section class="admin-card">
+  <h2>Комбинация для окна входа</h2>
+  <p class="muted">Быстрые нажатия на название SMART ЕНТ внизу страницы. Комбинация только открывает окно и прав не даёт.</p>
+  <form method="post" action="/admin/security/settings" class="admin-form">
+    <input type="hidden" name="what" value="gate">
+    <label>Сколько нажатий</label><input type="number" name="taps" min="3" max="20" value="{{ gate.taps }}">
+    <label>За сколько секунд</label><input type="number" name="seconds" min="2" max="30" value="{{ gate.seconds }}">
+    <button class="btn" type="submit">Сохранить</button>
+  </form>
+</section>
+
+<section class="admin-card">
+  <h2>История входов</h2>
+  <div class="table-scroll"><table>
+    <thead><tr><th>Когда</th><th>Итог</th><th>Причина</th><th>Адрес</th><th>Устройство</th></tr></thead>
+    <tbody>{% for r in log %}<tr><td>{{ r.ts_local }}</td><td>{{ '✅' if r.ok else '❌' }}</td><td>{{ r.reason }}</td><td>{{ r.ip }}</td><td>{{ r.ua }}</td></tr>{% else %}<tr><td colspan="5" class="muted">Попыток не было.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}
