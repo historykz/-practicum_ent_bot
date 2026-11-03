@@ -1,0 +1,143 @@
+{# Плеер интерактивных заданий. Подключается на странице урока (любое число заданий)
+   и на отдельной странице задания. Разметка одного задания:
+     <div class="ia-embed" data-task="ID" data-lesson="ID урока или пусто" data-height="600"
+          data-graded="1|0" data-src="адрес документа (необязательно)"></div>
+   Каждое задание — в своём изолированном окне (sandbox без allow-same-origin): ни
+   страницы урока, ни входа, ни других заданий оно не видит. Окна загружаются, когда
+   до них доходит прокрутка, поэтому урок с 20 заданиями открывается быстро.
+   Ошибка или зависание одного задания не ломает остальные и сам урок. #}
+<style>
+  .ia-embed { margin: 14px 0 18px; }
+  .ia-embed-box { position: relative; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; }
+  .ia-embed iframe { width: 100%; border: 0; display: block; background: #fff; min-height: 220px; }
+  .ia-embed-load { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                   color: #64748b; font-size: .95rem; background: #fff; }
+  .ia-embed-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
+  .ia-embed-title { font-weight: 700; }
+  .ia-embed-kind { font-size: .8rem; color: var(--muted); }
+  .ia-embed-tools { display: flex; gap: 6px; }
+  .ia-embed-tools button { min-height: 32px; padding: 4px 10px; border-radius: 10px; border: 1px solid var(--border);
+                           background: transparent; color: var(--text); cursor: pointer; font-size: .85rem; }
+  .ia-embed-result { margin-top: 8px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); font-size: .95rem; }
+  .ia-embed-result.graded { border-color: #34c759; background: rgba(52,199,89,.10); }
+  .ia-embed-result.practice { border-color: #f5a623; background: rgba(245,166,35,.10); }
+  .ia-embed-result.err { border-color: #ff453a; background: rgba(255,69,58,.08); }
+  .ia-embed.is-full .ia-embed-box { position: fixed; inset: 0; z-index: 9998; border-radius: 0; }
+  .ia-embed.is-full iframe { height: 100% !important; }
+</style>
+<script>
+(function () {
+  if (window.__iaEmbed) { window.__iaEmbed.scan(); return; }
+  var SANDBOX = 'allow-scripts allow-popups allow-modals allow-pointer-lock';
+  var items = [];
+  function q(el, s) { return el.querySelector(s); }
+  function show(it, kind, text) {
+    var box = q(it.el, '.ia-embed-result');
+    box.hidden = false; box.className = 'ia-embed-result ' + kind; box.textContent = text;
+  }
+  function api(it, path, body) {
+    var qs = [];
+    if (it.lesson) qs.push('lesson=' + encodeURIComponent(it.lesson));
+    if (it.preview) qs.push('preview=1');
+    var url = '/interactive/api/' + it.task + '/' + path + (qs.length ? '?' + qs.join('&') : '');
+    return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+                       body: JSON.stringify(body)})
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok && !d.error) d.error = 'Не удалось сохранить (ошибка ' + r.status + ').'; return d; }); })
+      .catch(function () { return {error: 'Нет связи. Проверьте интернет и попробуйте ещё раз.'}; });
+  }
+  function load(it) {
+    if (it.loaded) return;
+    it.loaded = true;
+    var src = it.el.getAttribute('data-src') || ('/interactive/frame/' + it.task + (it.lesson ? '?lesson=' + encodeURIComponent(it.lesson) : ''));
+    fetch(src, {credentials: 'same-origin', cache: 'no-store'})
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(function (html) { it.frame.srcdoc = html; })
+      .catch(function () {
+        var l = q(it.el, '.ia-embed-load');
+        if (l) l.textContent = '⚠️ Задание не загрузилось. Обновите страницу.';
+      });
+  }
+  function setup(el) {
+    if (el.__ia) return;
+    var it = {el: el, task: el.getAttribute('data-task'), lesson: el.getAttribute('data-lesson') || '',
+              graded: el.getAttribute('data-graded') === '1', loaded: false,
+              preview: el.getAttribute('data-preview') === '1'};
+    el.__ia = it;
+    var h = parseInt(el.getAttribute('data-height') || '0', 10) || 520;
+    var box = document.createElement('div'); box.className = 'ia-embed-box';
+    var frame = document.createElement('iframe');
+    frame.setAttribute('sandbox', SANDBOX);
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.setAttribute('allow', 'autoplay; fullscreen; microphone');
+    frame.setAttribute('title', el.getAttribute('data-title') || 'Интерактивное задание');
+    frame.style.height = h + 'px';
+    var ld = document.createElement('div'); ld.className = 'ia-embed-load'; ld.textContent = 'Загружаем задание…';
+    box.appendChild(frame); box.appendChild(ld);
+    var res = document.createElement('div'); res.className = 'ia-embed-result'; res.hidden = true; res.setAttribute('role', 'status');
+    el.appendChild(box); el.appendChild(res);
+    it.frame = frame;
+    frame.addEventListener('load', function () { if (frame.srcdoc && ld.parentNode) ld.remove(); });
+    var tools = q(el, '.ia-embed-tools');
+    if (tools) {
+      tools.addEventListener('click', function (e) {
+        var b = e.target.closest('button'); if (!b) return;
+        if (b.getAttribute('data-act') === 'restart') { it.loaded = false; frame.removeAttribute('srcdoc'); load(it); }
+        if (b.getAttribute('data-act') === 'full') { el.classList.toggle('is-full'); b.textContent = el.classList.contains('is-full') ? '✕ Закрыть' : '⛶ На весь экран'; }
+      });
+    }
+    items.push(it);
+    if (near(it)) { load(it); return; }
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (ents) {
+        ents.forEach(function (en) { if (en.isIntersecting) { io.disconnect(); load(it); } });
+      }, {rootMargin: '700px 0px'});
+      io.observe(el);
+    }
+  }
+  // Ленивая загрузка: окно задания грузится, когда до него осталось меньше ~700 px.
+  // Кроме IntersectionObserver проверяем сами (прокрутка и таймер): в некоторых
+  // webview наблюдатель молчит, а задание всё равно должно открыться.
+  function near(it) {
+    if (!(window.innerHeight > 0)) return true;
+    var r = it.el.getBoundingClientRect();
+    return r.top < window.innerHeight + 700 && r.bottom > -700;
+  }
+  function sweep() { items.forEach(function (it) { if (!it.loaded && near(it)) load(it); }); }
+  var sweepT = null;
+  window.addEventListener('scroll', function () { clearTimeout(sweepT); sweepT = setTimeout(sweep, 120); }, {passive: true, capture: true});
+  window.addEventListener('resize', sweep);
+  setInterval(sweep, 2000);
+  function find(win) { for (var i = 0; i < items.length; i++) if (items[i].frame.contentWindow === win) return items[i]; return null; }
+  window.addEventListener('message', function (e) {
+    var it = find(e.source);           // только сообщения от окна своего задания
+    if (!it) return;
+    var m = e.data || {};
+    if (!m.__smartent) return;
+    var send = function (type, data) { try { it.frame.contentWindow.postMessage({__smartent: 1, type: type, data: data}, '*'); } catch (x) {} };
+    if (m.type === 'progress') {
+      api(it, 'progress', {state: m.data}).then(function (r) { if (r.error) show(it, 'err', '⚠️ ' + r.error); });
+    } else if (m.type === 'submit') {
+      api(it, 'submit', {answer: (m.data || {}).answer}).then(function (res) {
+        if (res.error) { show(it, 'err', '⚠️ ' + res.error); send('result', {error: res.error}); return; }
+        show(it, 'graded', (res.kind === 'preview' ? '👁 ' : '🏆 ') + 'Проверено сервером: ' + res.score + ' из ' + res.max + ' (' + res.percent + '%)' +
+             (res.note ? '. ' + res.note : (res.attempts_left !== undefined ? '. Осталось попыток: ' + res.attempts_left : '')));
+        send('result', res);
+      });
+    } else if (m.type === 'practice') {
+      api(it, 'practice', {score: (m.data || {}).score, max: (m.data || {}).max}).then(function (p) {
+        if (p.error) { show(it, 'err', '⚠️ ' + p.error); send('practice_result', {error: p.error}); return; }
+        show(it, 'practice', '🧪 Тренировочный результат: ' + p.score + ' из ' + p.max +
+             (p.kind === 'preview' ? '. Предпросмотр: не сохранён.' : '. В оценку не идёт.'));
+        send('practice_result', p);
+      });
+    } else if (m.type === 'resize') {
+      if (it.el.classList.contains('is-full')) return;
+      var h = Math.max(220, Math.min(4000, Math.ceil((m.data && m.data.h) || 520)));
+      it.frame.style.height = h + 'px';
+    }
+  });
+  window.__iaEmbed = {scan: function () { document.querySelectorAll('.ia-embed').forEach(setup); }};
+  window.__iaEmbed.scan();
+})();
+</script>

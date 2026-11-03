@@ -1,0 +1,134 @@
+{# Защита закрытого контента в Telegram Mini App: белый экран, пока окно свёрнуто
+   или ушло из виду, + запрет контекстного меню, перетаскивания и сохранения.
+   Полностью запретить скриншот в WebView Telegram не позволяет — это делается
+   на максимально доступном уровне (снимок пойманного момента = белый экран).
+
+   ВАЖНО: заслонка никогда не должна оставаться поверх страницы, когда человек
+   на неё смотрит. Раньше она снималась только после ответа сервера на
+   /auth/ping (без тайм-аута) и только по событию focus. На телефоне после
+   возврата в Telegram сеть «просыпается» не сразу, а focus приходит не всегда —
+   и белый экран во весь размер, с самым высоким z-index, оставался висеть:
+   ничего не видно и ничего нельзя нажать, помогал только перезапуск. #}
+<div id="screen-guard" aria-hidden="true"></div>
+<style>
+  #screen-guard {
+    position: fixed; inset: 0; z-index: 2147483647;
+    background: #ffffff; display: none;
+  }
+  #screen-guard.on { display: block; }
+  /* Запрет выделения/копирования защищённого контента */
+  .lesson-content, .lesson-images, .quiz-card, .quiz-question, .quiz-options,
+  .flashcard, .lesson-video, .fc-text, .lesson-photo, .quiz-image, .fc-image {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+</style>
+<script>
+(function() {
+  var guard = document.getElementById('screen-guard');
+  if (!guard) return;
+
+  // Защита включается только для вошедших: гостю скрывать нечего — сервер
+  // и так отдал ему страницу без материалов.
+  var loggedIn = {{ 'true' if logged_in else 'false' }};
+  if (!loggedIn) return;
+
+  var watch = null;          // сторож: снимает заслонку, как только окно снова на виду
+  var touchDevice = false;
+  try {
+    touchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) ||
+      (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  } catch (_) {}
+  var shownAt = 0;
+
+  function visible() {
+    try { return !document.hidden; } catch (_) { return true; }
+  }
+
+  function hide() {
+    guard.classList.remove('on');
+    if (watch) { clearInterval(watch); watch = null; }
+  }
+
+  function show() {
+    // Фокус ушёл внутрь страницы (видео в iframe, поле ввода) — человек никуда
+    // не уходил, прятать нечего. Раньше тап по видео закрывал его белым экраном.
+    try {
+      var el = document.activeElement;
+      if (visible() && el && (el.tagName === 'IFRAME' || el.tagName === 'VIDEO')) return;
+    } catch (_) {}
+    guard.classList.add('on');
+    shownAt = Date.now();
+    if (!watch) {
+      watch = setInterval(function() {
+        var focused = true;
+        try { focused = document.hasFocus(); } catch (_) {}
+        // Окно снова на виду и в фокусе — снимаем, не дожидаясь событий.
+        // Страховка для телефона: там hasFocus() после возврата в приложение
+        // нередко остаётся false, поэтому дольше 4 секунд на видимой странице
+        // заслонка не висит. На компьютере фокус приходит надёжно, а любое
+        // нажатие снимает заслонку сразу — там страховка по времени не нужна.
+        if (visible() && (focused || (touchDevice && Date.now() - shownAt > 4000))) hide();
+      }, 300);
+    }
+  }
+
+  // Возврат: заслонку снимаем СРАЗУ. Проверка входа идёт в фоне, с тайм-аутом,
+  // и страницу не держит — при потере входа его тихо восстановит base.html.
+  var pinging = false;
+  function back() {
+    var wasOn = guard.classList.contains('on');
+    hide();
+    if (!wasOn || pinging || !window.fetch) return;
+    pinging = true;
+    fetch('/auth/ping', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function() { pinging = false; }, function() { pinging = false; });
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) show(); else back();
+  });
+  window.addEventListener('blur', function() {
+    // blur приходит и при тапе по iframe, и при системных окнах Telegram;
+    // проверяем чуть позже, действительно ли окно потеряло фокус
+    setTimeout(function() {
+      var focused = true;
+      try { focused = document.hasFocus(); } catch (_) {}
+      if (!focused || document.hidden) show();
+    }, 0);
+  });
+  window.addEventListener('focus', back);
+  window.addEventListener('pagehide', show);
+  window.addEventListener('pageshow', back);
+
+  // Любое касание означает, что человек здесь: заслонка не должна мешать
+  ['pointerdown', 'touchstart', 'mousedown', 'keydown'].forEach(function(ev) {
+    window.addEventListener(ev, function() { if (guard.classList.contains('on')) back(); }, true);
+  });
+
+  // Telegram WebView-события, если доступны
+  try {
+    var tg = window.Telegram && window.Telegram.WebApp;
+    if (tg && typeof tg.onEvent === 'function') {
+      tg.onEvent('viewportChanged', function() { if (visible()) back(); });
+      tg.onEvent('activated', back);
+    }
+  } catch (_) {}
+
+  // Запрет контекстного меню, перетаскивания и сохранения картинок
+  document.addEventListener('contextmenu', function(e) {
+    if (e.target && e.target.closest &&
+        e.target.closest('.lesson-content, .lesson-images, .quiz-card, .flashcard, .lesson-video')) {
+      e.preventDefault();
+    }
+  });
+  document.addEventListener('dragstart', function(e) {
+    if (e.target && e.target.tagName === 'IMG') e.preventDefault();
+  });
+  // Запрет длинного тапа-сохранения на изображениях
+  document.querySelectorAll('img').forEach(function(img) {
+    img.setAttribute('draggable', 'false');
+    img.oncontextmenu = function() { return false; };
+  });
+})();
+</script>

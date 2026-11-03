@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Настройки бота — Smart ENT{% endblock %}
+{% block page_title %}Настройки бота{% endblock %}
+{% block content %}
+<nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><span class="crumb-current">🤖 Настройки бота</span></nav>
+<h1>🤖 Настройки бота</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+<section class="admin-card">
+  <h2>Режим обслуживания</h2>
+  <p class="muted">Когда включён, ученики в боте видят сообщение ниже и не могут проходить тесты. Админы работают как обычно.</p>
+  <form method="post" action="/admin/bot-settings" class="admin-form">
+    <label class="admin-checkbox"><input type="checkbox" name="maintenance"{% if maintenance %} checked{% endif %}> Приостановить бота для учеников</label>
+    <label>Текст для учеников</label><textarea name="maintenance_text" rows="3" maxlength="1000">{{ maintenance_text }}</textarea>
+    <h2 style="margin-top:18px;">Кнопка «Поделиться»</h2>
+    <input type="hidden" name="share_form" value="1">
+    <p class="muted">В шапке сайта она даёт ссылку на сайт, в мини-приложении — на мини-приложение, на странице урока — на этот урок
+       (у урока её можно выключить в его настройках). Ссылка доступ не даёт: закрытый урок откроется только тем, кому он открыт.</p>
+    <label class="admin-checkbox"><input type="checkbox" name="share_site" {% if share_site %}checked{% endif %}> Показывать на сайте</label>
+    <label class="admin-checkbox"><input type="checkbox" name="share_app" {% if share_app %}checked{% endif %}> Показывать в мини-приложении</label>
+    <label>Текст приглашения</label><input type="text" name="share_text" value="{{ share_text }}" maxlength="300">
+    <label>Текст для урока (после него название урока)</label><input type="text" name="share_lesson_text" value="{{ share_lesson_text }}" maxlength="300">
+    <h2 style="margin-top:18px;">Устройства учеников</h2>
+    <p class="muted">Сколько устройств одновременно может войти в один аккаунт через браузер. Мини-приложение в Telegram
+       не считается. Устройство, которым не пользовались 7 дней, тоже. Админы без лимита. Личный лимит — в профиле ученика.</p>
+    <label>Лимит устройств (0 — без ограничения)</label>
+    <input type="number" name="device_limit" min="0" max="50" value="{{ dev_cfg.limit }}">
+    <label>Когда лимит превышен</label>
+    <select name="device_policy">{% for k, v in dev_policies.items() %}<option value="{{ k }}"{% if dev_cfg.policy == k %} selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+    <label>Предупреждать меня, если за сутки вошли с стольких разных устройств</label>
+    <input type="number" name="device_warn" min="2" max="100" value="{{ dev_cfg.warn }}">
+    <h2 style="margin-top:18px;">Водяные знаки на уроках</h2>
+    <p class="muted">У учеников знак бледный: заметен на снимке экрана, но не мешает читать. У админов на сайте знака нет.
+       Отключить знак отдельному ученику можно в его профиле.</p>
+    <label>Насколько заметен знак, % (3–30, советуем 5–8)</label>
+    <input type="number" name="wm_percent" min="3" max="30" value="{{ wm_percent }}">
+    <button class="btn btn-primary" type="submit">Сохранить</button>
+  </form>
+</section>
+{% endblock %}
