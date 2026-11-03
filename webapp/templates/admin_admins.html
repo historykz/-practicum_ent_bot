@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Администраторы — Smart ENT{% endblock %}
+{% block page_title %}Администраторы{% endblock %}
+{% block content %}
+<nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><span class="crumb-current">🛠 Администраторы</span></nav>
+<h1>🛠 Администраторы</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<section class="admin-card">
+  <h2>Админы сайта</h2>
+  <form method="post" action="/admin/admins/action" class="admin-form admin-inline"><input type="hidden" name="action" value="site_add"><input type="text" name="user" required placeholder="@username или Telegram ID"><button class="btn btn-primary" type="submit">Добавить</button></form>
+  {% for a in site %}
+  <details style="margin-top:10px;"><summary><b>{% if a.username %}@{{ a.username }}{% else %}{{ a.tg_id }}{% endif %}</b></summary>
+    <form method="post" action="/admin/admins/action">
+      <input type="hidden" name="action" value="site_perms"><input type="hidden" name="tg_id" value="{{ a.tg_id }}">
+      <div class="perm-grid">{% for k, t in perm_names.items() %}<label class="admin-checkbox"><input type="checkbox" name="perm_{{ k }}"{% if a['perm_' + k] %} checked{% endif %}> {{ t }}</label>{% endfor %}</div>
+      <p class="muted">Корзина только по этим предметам (ничего не отмечено — все предметы):</p>
+      <div class="perm-grid">{% for s in all_subjects %}<label class="admin-checkbox"><input type="checkbox" name="subjects" value="{{ s.id }}"{% if s.id in a.subjects %} checked{% endif %}> {{ s.title }}</label>{% endfor %}</div>
+      <button class="btn" type="submit">Сохранить права</button>
+    </form>
+    <form method="post" action="/admin/admins/action" style="margin-top:6px;" onsubmit="return confirm('Убрать этого админа сайта?');"><input type="hidden" name="action" value="site_remove"><input type="hidden" name="tg_id" value="{{ a.tg_id }}"><button class="btn btn-small btn-danger" type="submit">Убрать</button></form>
+  </details>
+  {% else %}<p class="muted">Пока никого.</p>{% endfor %}
+</section>
+<section class="admin-card">
+  <h2>Админы бота</h2>
+  <p class="muted">Уровень 1: создаёт тесты. Уровень 2: ещё импорт текстом и из QuizPoll. Полный доступ только у владельца.</p>
+  <form method="post" action="/admin/admins/action" class="admin-form admin-inline"><input type="hidden" name="action" value="bot_add"><input type="text" name="user" required placeholder="@username или Telegram ID"><select name="level"><option value="1">Уровень 1</option><option value="2">Уровень 2</option></select><button class="btn btn-primary" type="submit">Добавить</button></form>
+  {% for a in bot %}
+  <p>{% if a.username %}@{{ a.username }}{% else %}{{ a.first_name or a.tg_id }}{% endif %}
+    <form method="post" action="/admin/admins/action" style="display:inline-flex;gap:6px;"><input type="hidden" name="action" value="bot_level"><input type="hidden" name="tg_id" value="{{ a.tg_id }}"><select name="level"><option value="1"{% if a.level == 1 %} selected{% endif %}>Уровень 1</option><option value="2"{% if a.level == 2 %} selected{% endif %}>Уровень 2</option></select><button class="btn btn-small" type="submit">Сохранить</button></form>
+    <form method="post" action="/admin/admins/action" style="display:inline;" onsubmit="return confirm('Убрать этого админа бота?');"><input type="hidden" name="action" value="bot_remove"><input type="hidden" name="tg_id" value="{{ a.tg_id }}"><button class="btn btn-small btn-danger" type="submit">Убрать</button></form>
+  </p>
+  {% else %}<p class="muted">Пока никого.</p>{% endfor %}
+</section>
+<section class="admin-card">
+  <h2>История изменений</h2>
+  {% for h in history %}<p class="muted">{{ h.ts_local }}: {{ h.details }} {{ h.title }} ({{ h.actor_name or h.actor_tg }})</p>{% else %}<p class="muted">Пока пусто.</p>{% endfor %}
+</section>
+{% endblock %}
