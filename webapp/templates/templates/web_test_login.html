@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Вход — Smart ENT{% endblock %}
+{% block page_title %}Вход{% endblock %}
+{% block content %}
+<section class="err-card">
+  <div class="err-emoji">🔐</div>
+  <h1>Войдите, чтобы открыть тест</h1>
+  <p class="muted">Ссылка на тест личная: она работает только в вашем аккаунте. В Telegram вход
+     выполняется сам, в браузере войдите и вы вернётесь к тесту.</p>
+  <div class="err-actions">
+    <a class="btn btn-primary" href="/login?next={{ next|urlencode }}">Войти</a>
+    <a class="btn" href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">🤖 Открыть бота</a>
+  </div>
+</section>
+{% endblock %}

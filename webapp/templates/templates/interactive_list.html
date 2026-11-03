@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Интерактивные задания — Smart ENT{% endblock %}
+{% block page_title %}Интерактивные задания{% endblock %}
+{% block content %}
+<h1>🎮 Интерактивные задания</h1>
+{% if not logged_in %}
+<div class="how-to"><b>Войдите, чтобы выполнять задания</b>
+  <p>Прогресс и результаты сохраняются в аккаунте. <a href="/cabinet">Войти →</a></p></div>
+{% endif %}
+{% if tasks %}
+<ul class="lesson-list">
+  {% for t in tasks %}
+  <li class="lesson-row is-free">
+    <a class="lesson-row-body" href="/interactive/{{ t.id }}">
+      <span class="lesson-row-title">{{ t.title }}</span>
+      <span class="lesson-row-meta">
+        {% if t.subject %}<span class="muted">{{ t.subject }}{% if t.topic %} · {{ t.topic }}{% endif %}</span>{% endif %}
+        <span class="tag {% if t.grading == 'server' %}tag-paid{% else %}tag-free{% endif %}">{% if t.grading == 'server' %}🏆 с оценкой{% else %}🧪 тренировка{% endif %}</span>
+        <span class="lesson-go">Открыть →</span>
+      </span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="muted">Заданий пока нет.</p>
+{% endif %}
+{% endblock %}

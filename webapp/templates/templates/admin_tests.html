@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Конструктор тестов — Smart ENT{% endblock %}
+{% block content %}
+
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a><span>›</span><span class="crumb-current">🧪 Конструктор тестов</span>
+</nav>
+
+<h1>🧪 Конструктор тестов</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+<div class="how-to">
+  <b>Как это работает</b>
+  <p>Тест собирается вручную прямо здесь: вопросы с одним или несколькими правильными ответами, ввод ответа,
+     сопоставление и последовательность, картинки, пояснения и баллы. Пока тест черновик, его не видит никто.
+     После публикации он появляется в боте, а если включено «Разрешить прохождение на сайте» — ученик может
+     открыть его и на сайте по своей личной ссылке.</p>
+</div>
+
+<section class="admin-card">
+  <h2>➕ Новый тест</h2>
+  <form method="post" action="/admin/tests/create" class="admin-form">
+    <input type="text" name="title" placeholder="Название теста" required maxlength="200">
+    <input type="text" name="subject" placeholder="Предмет (например, История Казахстана)" maxlength="120">
+    <input type="text" name="topic" placeholder="Тема" maxlength="200">
+    <textarea name="instruction" rows="3" placeholder="Инструкция для ученика (необязательно)" maxlength="2000"></textarea>
+    <label>Язык</label>
+    <select name="language"><option value="ru">Русский</option><option value="kz">Қазақша</option></select>
+    <button type="submit" class="btn btn-primary">Создать и перейти к вопросам</button>
+  </form>
+</section>
+
+<section class="admin-card">
+  <h2>Тесты из конструктора ({{ tests|length }})</h2>
+  {% if tests %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Тест</th><th>Статус</th><th>Вопросов</th><th>На сайте</th><th>Прошли</th><th>Сейчас</th><th></th></tr></thead>
+    <tbody>
+    {% for t in tests %}
+      <tr>
+        <td><a href="/admin/tests/{{ t.id }}">{{ t.title }}</a>{% if t.subject %}<br><span class="muted">{{ t.subject }}{% if t.topic %} · {{ t.topic }}{% endif %}</span>{% endif %}</td>
+        <td>{% if t.builder_state == 'published' %}{% if t.status == 'active' %}✅ опубликован{% else %}🙈 скрыт{% endif %}{% else %}📝 черновик{% endif %}</td>
+        <td>{{ t.q_count }}</td>
+        <td>{% if t.allow_web %}🌐 да{% else %}нет{% endif %}</td>
+        <td>{{ t.done_count }}</td>
+        <td>{{ t.active_count }}</td>
+        <td><a class="btn-small" href="/admin/tests/{{ t.id }}">Открыть</a>
+            <a class="btn-small" href="/admin/tests/{{ t.id }}/results">Результаты</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">Тестов пока нет. Создайте первый выше.</p>
+  {% endif %}
+</section>
+
+<p class="muted">Тесты из уроков и из бота здесь не показываются: их вопросы правятся в разделе
+   «✏️ Вопросы» у урока. Прохождение на сайте для них включается в карточке теста урока.</p>
+
+{% endblock %}
