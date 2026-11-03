@@ -1,0 +1,24 @@
+{# Кому открыто приватное задание #}
+<details class="admin-card" {% if audience == 'private' %}open{% endif %} style="margin:12px 0;">
+  <summary><b>🔒 Люди с приватным доступом: {{ people.granted|length }}{% if people.waiting %}, ждут запуска бота: {{ people.waiting|length }}{% endif %}</b></summary>
+  {% if audience != 'private' %}<p class="muted">Список работает, когда выбран режим «Приватно».</p>{% endif %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/people" class="admin-form admin-inline" autocomplete="off">
+    <input type="hidden" name="action" value="add">
+    <input type="text" name="users" required placeholder="@username или Telegram ID через пробел">
+    <button class="btn" type="submit">Выдать</button>
+  </form>
+  {% for p in people.granted %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/people" style="margin:4px 0;">
+    <input type="hidden" name="action" value="remove"><input type="hidden" name="tg_id" value="{{ p.tg_id }}">
+    {% if p.username %}@{{ p.username }}{% else %}{{ p.first_name or p.tg_id }}{% endif %} <span class="muted">{{ p.tg_id }}</span>
+    <button class="btn-small btn-danger" type="submit">Снять</button>
+  </form>
+  {% endfor %}
+  {% for u in people.waiting %}
+  <form method="post" action="/admin/interactive/{{ task.id }}/people" style="margin:4px 0;">
+    <input type="hidden" name="action" value="remove_waiting"><input type="hidden" name="username" value="{{ u }}">
+    @{{ u }} <span class="muted">ждёт первого запуска бота</span>
+    <button class="btn-small btn-danger" type="submit">Снять</button>
+  </form>
+  {% endfor %}
+</details>
