@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}{% if mode == 'cards' %}Карточки по ошибкам{% else %}Тест по ошибкам{% endif %} — Smart ENT{% endblock %}
+{% block page_title %}Работа над ошибками{% endblock %}
+{% block content %}
+
+<p><a href="/cabinet/errors">&larr; Мои ошибки</a></p>
+<h1>{% if mode == 'cards' %}🃏 Карточки по ошибкам{% else %}📝 Тест по ошибкам{% endif %}</h1>
+
+{% if not items %}
+  <section class="profile-card">
+    <p>Неисправленных ошибок нет — отличная работа! 🎉</p>
+    <a class="btn btn-primary" href="/cabinet/errors">К моим ошибкам</a>
+  </section>
+{% else %}
+<section class="profile-card">
+  <p class="muted">Вопросов в работе: <b>{{ items|length }}</b>.
+     {% if mode == 'cards' %}Нажмите на карточку, чтобы увидеть ответ.
+     {% else %}Выберите вариант — проверка сразу.{% endif %}</p>
+  <div class="practice-progress"><span id="pr-done">1</span> / {{ items|length }}</div>
+</section>
+
+<div id="practice-root" data-mode="{{ mode }}"></div>
+
+<section class="profile-card" id="practice-done" style="display:none;">
+  <h2>Готово!</h2>
+  <p id="practice-score"></p>
+  <a class="btn btn-primary" href="/cabinet/errors">К моим ошибкам</a>
+  <a class="btn btn-primary" href="{{ '/cabinet/errors/cards' if mode == 'test' else '/cabinet/errors/retest' }}">
+    {% if mode == 'test' %}🃏 Прогнать карточками{% else %}📝 Пройти тестом{% endif %}</a>
+</section>
+
+<script id="practice-data" type="application/json">{{ items|tojson }}</script>
+<script>
+(function () {
+  var items = JSON.parse(document.getElementById('practice-data').textContent);
+  var mode = document.getElementById('practice-root').dataset.mode;
+  var root = document.getElementById('practice-root');
+  var i = 0, right = 0;
+
+  function finish() {
+    root.innerHTML = '';
+    document.getElementById('practice-done').style.display = '';
+    document.getElementById('practice-score').textContent =
+      mode === 'test'
+        ? ('Верно ' + right + ' из ' + items.length)
+        : ('Просмотрено карточек: ' + items.length);
+  }
+
+  function render() {
+    if (i >= items.length) { finish(); return; }
+    var q = items[i];
+    document.getElementById('pr-done').textContent = i + 1;
+    var box = document.createElement('section');
+    box.className = 'profile-card practice-card';
+
+    var meta = document.createElement('p');
+    meta.className = 'muted';
+    meta.textContent = [q.topic, q.test_title].filter(Boolean).join(' · ');
+    box.appendChild(meta);
+
+    var qEl = document.createElement('h2');
+    qEl.textContent = q.qtext;
+    box.appendChild(qEl);
+
+    if (mode === 'cards') {
+      var ans = document.createElement('div');
+      ans.className = 'practice-answer';
+      ans.textContent = 'Нажмите, чтобы увидеть ответ';
+      ans.onclick = function () { ans.textContent = q.correct_text; ans.classList.add('revealed'); };
+      box.appendChild(ans);
+      var next = document.createElement('button');
+      next.className = 'btn btn-primary';
+      next.textContent = 'Следующая →';
+      next.onclick = function () { i++; render(); };
+      box.appendChild(next);
+    } else {
+      q.options.forEach(function (o) {
+        var b = document.createElement('button');
+        b.className = 'btn practice-option';
+        b.textContent = o.text;
+        b.onclick = function () {
+          if (box.dataset.answered) return;
+          box.dataset.answered = '1';
+          Array.prototype.forEach.call(box.querySelectorAll('.practice-option'), function (x) {
+            x.disabled = true;
+          });
+          if (o.correct) { b.classList.add('opt-right'); right++; }
+          else {
+            b.classList.add('opt-wrong');
+            Array.prototype.forEach.call(box.querySelectorAll('.practice-option'), function (x) {
+              if (x.textContent === q.correct_text) x.classList.add('opt-right');
+            });
+          }
+          setTimeout(function () { i++; render(); }, 1100);
+        };
+        box.appendChild(b);
+      });
+    }
+    root.innerHTML = '';
+    root.appendChild(box);
+  }
+  render();
+})();
+</script>
+{% endif %}
+
+{% include "_screen_protect.html" %}
+{% endblock %}
