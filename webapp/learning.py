@@ -782,6 +782,8 @@ async def learn_subject(request: web.Request) -> web.Response:
         return sub_page
     # Вознаграждения, рейтинг и кнопка «✨ НАЧАТЬ ОБУЧЕНИЕ ✨» (None — нет Премиума)
     from services import reward_service as _rs
+    # В предмете без кнопки обучение начинается само (уже при открытии предмета)
+    data["need_start"] = await asyncio.to_thread(_needs_start_sync, subject_id, tg_id)
     data["reward"] = await asyncio.to_thread(_rs.subject_view, tg_id, subject_id)
     data["start_flag"] = request.query.get("start")     # required — пришёл с урока без старта
     # Предмет продаётся отдельно: цена, доступ, что входит — и только потом кнопки покупки
@@ -843,6 +845,14 @@ async def learn_section(request: web.Request) -> web.Response:
 
 # === Студент: урок ===
 
+def _start_auto_sync(subject_id: int) -> bool:
+    """Предмет без кнопки «Начать обучение»: смотрим и на сам предмет, и на оригинал копии."""
+    ids = {int(subject_id), int(sc.orig_subject_id(subject_id))}
+    row = db.fetchone(f"SELECT 1 FROM subjects WHERE id IN ({','.join('?' * len(ids))}) AND COALESCE(start_auto,0)=1",
+                      tuple(ids))
+    return row is not None
+
+
 def _needs_start_sync(subject_id: int, tg_id) -> bool:
     """«✨ Начать обучение» — обязательная точка входа: без неё ученика нет в
     общем рейтинге предмета, поэтому уроки открываются только после неё.
@@ -863,10 +873,27 @@ def _needs_start_sync(subject_id: int, tg_id) -> bool:
         row = db.fetchone(
             f"SELECT 1 FROM subject_participants WHERE user_id=? AND is_active=1 "
             f"AND subject_id IN ({','.join('?' * len(group))}) LIMIT 1", (user["id"], *group))
+        if row is None and _start_auto_sync(subject_id):
+            # В предмете кнопка убрана: начинаем обучение за ученика, тем же способом, что и кнопка
+            res = rs.start(tg_id, user["id"], subject_id)
+            return not res.get("ok")
         return row is None
     except Exception as e:
         logger.warning("проверка «Начать обучение» tg=%s предмет=%s: %s", tg_id, subject_id, e)
         return False
+
+
+def _lesson_free_sync(raw, lesson: dict, subject: dict) -> bool:
+    """Бесплатный урок открытого предмета: без доступа к предмету, без оплаты, на этой платформе."""
+    from services import platforms as _pf
+    if sc.needs_subject_access(subject) or lesson.get("is_paid") or raw["is_paid"]:
+        return False
+    return _pf.ok(raw["platforms"] if "platforms" in raw.keys() else "all")
+
+
+def lesson_open_for_guest_sync(lesson_id: int) -> bool:
+    data = _lesson_detail_sync(int(lesson_id), None)
+    return bool(data) and data.get("access_state") == "full"
 
 
 def _lesson_detail_sync(lesson_id: int, tg_id: Optional[int]) -> Optional[dict]:
@@ -893,6 +920,21 @@ def _lesson_detail_sync(lesson_id: int, tg_id: Optional[int]) -> Optional[dict]:
 
     base = {"lesson": lesson, "section": dict(section), "subject": subject}
     base.update(_paywall_context_sync())
+
+    if tg_id is None and _lesson_free_sync(raw, lesson, subject):
+        # v98: бесплатный урок открытого предмета гость смотрит прямо на сайте:
+        # конспект, задания, видео и тест (без сохранения результата). Учёт
+        # просмотров и прогресса — только у вошедших, поэтому здесь его нет.
+        base.update({"access_state": "full", "guest": True, "free_view": True, "prev_gate": None,
+                     "min_read_min": 0, "read_seconds_left": 0, "pass_percent": subject.get("pass_percent") or 0,
+                     "lesson_images": _lesson_images_sync(sc.orig_lesson_id(lesson_id))})
+        base["test_info"] = None
+        if lesson.get("test_id"):
+            qc = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (lesson["test_id"],))["c"]
+            if qc:
+                base["test_info"] = {"test_id": lesson["test_id"], "questions_count": qc, "attempts_used": 0,
+                                     "attempts_limit": 0, "attempts_left": None, "blocked": False, "guest": True}
+        return base
 
     if tg_id is None:
         # Гостю на сайте вход не нужен: конспект он открывает в Telegram,
@@ -940,6 +982,8 @@ def _lesson_detail_sync(lesson_id: int, tg_id: Optional[int]) -> Optional[dict]:
         return base
 
     base["access_state"] = "full"
+    # Бесплатный урок: конспект прямо на странице, без перехода в Telegram
+    base["free_view"] = _lesson_free_sync(raw, lesson, subject)
 
     # Просмотр отмечаем на ОРИГИНАЛЕ урока: прогресс, доступ и статистика
     # у копии-витрины общие с ним. Раньше здесь стоял id копии, и урок без
@@ -1072,15 +1116,18 @@ async def learn_lesson(request: web.Request) -> web.Response:
     data["error"] = request.query.get("error")
     _raw_l = data.get("lesson") or {}
     if _raw_l.get("share_enabled") is None or _raw_l.get("share_enabled"):
-        data["share_lesson"] = {"id": lesson_id, "title": _raw_l.get("title") or ""}
+        data["share_lesson"] = {"id": lesson_id, "title": _raw_l.get("title") or "", "free": bool(data.get("free_view"))}
     if data["access_state"] in ("need_payment", "need_subject_access"):
         from services import unit_sales as _us
         data["offer"] = await asyncio.to_thread(_us.subject_offer, data["subject"]["id"], tg_id)
     if data["access_state"] == "full":
-        data["watermark_svg"] = await asyncio.to_thread(_watermark_svg_sync, tg_id)
+        data["watermark_svg"] = await asyncio.to_thread(_watermark_svg_sync, tg_id) if tg_id else ""
         if (data["lesson"].get("video_url") or "").startswith("/uploads/videos/"):
             from webapp import lesson_materials_web as _lm
-            data["video_src"] = f"/learn/lesson/{lesson_id}/video?t={_lm.video_token(lesson_id, tg_id)}"
+            data["video_src"] = f"/learn/lesson/{lesson_id}/video?t={_lm.video_token(lesson_id, tg_id or 0)}"
+        if data.get("free_view"):
+            data["conspect_html"] = _conspect_html(data["lesson"].get("content_html") or "")
+            data["conspect_pages"] = [f"/learn/lesson/{lesson_id}/page/{im['id']}" for im in data.get("lesson_images") or []]
 
         def _blocks():
             # Содержимое урока на сайте: текст, интерактивы, картинки, видео — по порядку.
@@ -1102,7 +1149,7 @@ async def learn_lesson(request: web.Request) -> web.Response:
                 info["size_label"] = _wb.size_label(info.get("size") or 0)
             return info
 
-        data["workbook"] = await asyncio.to_thread(_wb_info)
+        data["workbook"] = await asyncio.to_thread(_wb_info) if tg_id else None
         if data["workbook"]:
             # Ссылка с подписью: Telegram скачивает файл сам, без cookies сайта
             from services import workbook_mark_service as _wm
@@ -1111,6 +1158,127 @@ async def learn_lesson(request: web.Request) -> web.Response:
             data["workbook"]["personal_name"] = _wm.personal_name(
                 data["workbook"]["name"], tg_id)
     return aiohttp_jinja2.render_template("learn_lesson.html", request, data)
+
+
+def _conspect_html(content: str):
+    """Конспект урока на странице. Его пишет админ: HTML как есть, обычный текст — с переносами строк."""
+    from markupsafe import Markup, escape
+    content = (content or "").strip()
+    if not content:
+        return ""
+    if "<" in content and ">" in content:
+        return Markup(content)
+    return Markup("<p>" + "</p><p>".join(str(escape(p)).replace("\n", "<br>") for p in content.split("\n\n")) + "</p>")
+
+
+async def lesson_page_image(request: web.Request) -> web.Response:
+    """Страница конспекта на сайте: тем, кому открыт урок (на бесплатном уроке — и гостю)."""
+    lesson_id = int(request.match_info["lesson_id"])
+    image_id = int(request.match_info["image_id"])
+    tg_id = await auth.get_logged_in_tg_id(request)
+    from webapp import interactive_web as _iw
+    if not (tg_id and utils.is_site_admin(tg_id)) and not await asyncio.to_thread(_iw._lesson_open_sync, tg_id, lesson_id):
+        raise web.HTTPForbidden(text="Нет доступа к уроку")
+    row = await asyncio.to_thread(db.fetchone, "SELECT * FROM lesson_images WHERE id=? AND lesson_id=?",
+                                  (image_id, sc.orig_lesson_id(lesson_id)))
+    if not row:
+        raise web.HTTPNotFound()
+    headers = {"Cache-Control": "private, max-age=600", "X-Content-Type-Options": "nosniff"}
+    path = (row["image_path"] or "").strip()
+    if (row["storage"] or "disk") == "disk" and path:
+        p = _lessons_image_dir() / path.rsplit("/", 1)[-1]
+        if not p.exists():
+            raise web.HTTPNotFound()
+        return web.FileResponse(p, headers=headers)
+    if not row["file_id"]:
+        raise web.HTTPNotFound()
+    cache = _tg_cache_dir() / f"{row['file_unique_id'] or image_id}.bin"
+    if not cache.exists():
+        from aiogram import Bot
+        bot = Bot(token=config.BOT_TOKEN)
+        try:
+            buf = await bot.download(row["file_id"])
+            await asyncio.to_thread(cache.write_bytes, buf.read())
+        except Exception as e:
+            logger.warning("страница конспекта %s: %s", image_id, e)
+            raise web.HTTPNotFound()
+        finally:
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
+    return web.FileResponse(cache, headers={**headers, "Content-Type": "image/jpeg"})
+
+
+# === Гость: тест бесплатного урока без входа ===
+
+def _guest_test_sync(lesson_id: int) -> Optional[dict]:
+    """Тест бесплатного урока для гостя: те же вопросы, проверка на сервере, без сохранения."""
+    if not lesson_open_for_guest_sync(lesson_id):
+        return None
+    raw = db.fetchone("SELECT * FROM lessons WHERE id=?", (lesson_id,))
+    lesson = sc.resolve_lesson(raw)
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (lesson.get("test_id"),)) if lesson.get("test_id") else None
+    if not test:
+        return None
+    from services import platforms as _pf
+    if not _pf.ok(test["web_platforms"] if "web_platforms" in test.keys() else "all"):
+        return None
+    q_ids = [r["id"] for r in db.fetchall("SELECT id FROM questions WHERE test_id=? ORDER BY order_num, id", (test["id"],))]
+    if test["shuffle_questions"]:
+        random.shuffle(q_ids)
+    order = {}
+    if test["shuffle_options"]:
+        for qid in q_ids:
+            ids = [o["id"] for o in db.fetchall("SELECT id FROM question_options WHERE question_id=? ORDER BY order_num, id", (qid,))]
+            random.shuffle(ids)
+            order[str(qid)] = ids
+    lesson["url_id"] = lesson_id
+    return {"attempt_id": 0, "guest_mode": True, "lesson": lesson, "questions": _build_questions_out(q_ids, order),
+            "time_per_question": test["time_per_question"] or 0, "answered": {}, "resume": False,
+            "instruction": (test["instruction"] if "instruction" in test.keys() else "") or ""}
+
+
+def _guest_answer_sync(lesson_id: int, question_id: int, option_ids, answer) -> dict:
+    """Проверить ответ гостя. Ничего не записывается: ни попытки, ни статистики."""
+    from services import answer_check as _ac
+    from services import typed_answers as _ta
+    if not lesson_open_for_guest_sync(lesson_id):
+        return {"error": "forbidden"}
+    lesson = sc.resolve_lesson(db.fetchone("SELECT * FROM lessons WHERE id=?", (lesson_id,)))
+    q = db.fetchone("SELECT * FROM questions WHERE id=?", (int(question_id),))
+    if not q or q["test_id"] != lesson.get("test_id"):
+        return {"error": "bad_question"}
+    q = dict(q)
+    test = dict(db.fetchone("SELECT * FROM tests WHERE id=?", (q["test_id"],)))
+    show = bool(test.get("show_correct"))
+    if _ta.question_kind(q) in _ta.TYPED_TYPES:
+        parsed, empty = _ta.parse_answer(q, answer)
+        ok = (not empty) and _ta.is_correct(q, parsed)
+        res = {"skipped": bool(empty), "correct_view": _ta.correct_view(q) if show else None}
+    else:
+        chosen = _ac.belongs_to_question(q["id"], option_ids or [])
+        ok = bool(chosen) and _ac.is_answer_correct(q["id"], chosen)
+        right = _ac.correct_option_ids(q["id"])
+        res = {"skipped": not chosen, "correct_option_ids": right if show else None,
+               "correct_option_id": (right[0] if right else None) if show else None}
+    res["correct"] = ok if show else None
+    # Итог в конце теста — только если тест его показывает
+    res["counted"] = ok if bool(test.get("show_results", 1)) else None
+    if bool(test.get("show_explanation")) and (q.get("explanation") or "").strip():
+        res["explanation"] = q["explanation"].strip()
+    return res
+
+
+async def guest_test_answer(request: web.Request) -> web.Response:
+    lesson_id = int(request.match_info["lesson_id"])
+    try:
+        body = await request.json()
+        qid = int(body["question_id"])
+    except Exception:
+        raise web.HTTPBadRequest(text="bad_request")
+    res = await asyncio.to_thread(_guest_answer_sync, lesson_id, qid, body.get("option_ids"), body.get("answer"))
+    return web.json_response(res, status=403 if res.get("error") == "forbidden" else 200)
 
 
 # === Студент: прохождение теста ===
@@ -1372,8 +1540,20 @@ def _start_attempt_sync(lesson_id: int, tg_id: int, restart: bool = False) -> Op
 
 
 async def learn_test_start(request: web.Request) -> web.Response:
-    tg_id = await _require_login(request)
     lesson_id = int(request.match_info["lesson_id"])
+    if await auth.get_logged_in_tg_id(request) is None:
+        # Гость: тест бесплатного урока без входа (результат не сохраняется)
+        data = await asyncio.to_thread(_guest_test_sync, lesson_id)
+        if data is None:
+            raise web.HTTPFound("/login?next=" + f"/learn/lesson/{lesson_id}/test")
+        data.update(await auth.nav_context(request))
+        data["questions_json"] = json.dumps(data["questions"], ensure_ascii=False)
+        data["answered_json"] = "{}"
+        data["is_resume"] = False
+        data["watermark_svg"] = ""
+        data["has_note"] = False
+        return aiohttp_jinja2.render_template("learn_test.html", request, data)
+    tg_id = await _require_login(request)
     restart = request.query.get("restart") == "1"
     data = await asyncio.to_thread(_start_attempt_sync, lesson_id, tg_id, restart)
     if data is None:
@@ -3776,6 +3956,18 @@ async def admin_add_required_channel(request: web.Request) -> web.Response:
     raise _back(data, "Обязательный канал добавлен")
 
 
+async def admin_subject_start_mode(request: web.Request) -> web.Response:
+    """Убрать кнопку «Начать обучение» в предмете (обучение начнётся само) или вернуть её."""
+    tg_id = await _require_admin(request)
+    subject_id = int(request.match_info["subject_id"])
+    data = await request.post()
+    auto = 1 if (data.get("auto") or "").strip() == "1" else 0
+    await asyncio.to_thread(db.execute, "UPDATE subjects SET start_auto=? WHERE id=?", (auto, subject_id))
+    logger.info("Админ %s: предмет %s — «Начать обучение» %s", tg_id, subject_id, "убрана" if auto else "возвращена")
+    raise _back(data, "Кнопка «Начать обучение» убрана: обучение начинается само" if auto
+                else "Кнопка «Начать обучение» возвращена")
+
+
 async def admin_toggle_subject_channel_gate(request: web.Request) -> web.Response:
     """Ручной выключатель: не требовать подписку на каналы в этом предмете
     (даже глобальную) или вернуть требование."""
@@ -4823,6 +5015,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/l/{code:[a-z0-9]{6,20}}", lesson_link)
     app.router.add_get("/learn/lesson/{lesson_id:\\d+}/workbook", lesson_workbook)
     app.router.add_get("/learn/lesson/{lesson_id:\\d+}/test", learn_test_start)
+    app.router.add_post("/learn/api/guest-test/{lesson_id:\\d+}/answer", guest_test_answer)
+    app.router.add_get("/learn/lesson/{lesson_id:\\d+}/page/{image_id:\\d+}", lesson_page_image)
     app.router.add_post("/learn/api/test/{attempt_id:\\d+}/answer", learn_test_answer)
     app.router.add_post("/learn/api/test/{attempt_id:\\d+}/finish", learn_test_finish)
     app.router.add_get("/learn/test/{attempt_id:\\d+}/result", learn_test_result)
@@ -4898,6 +5092,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/admin/learn/channels/{channel_id:\\d+}/delete", admin_delete_channel)
     app.router.add_post("/admin/learn/reqchannels/create", admin_add_required_channel)
     app.router.add_post("/admin/learn/reqchannels/{channel_id:\\d+}/delete", admin_delete_required_channel)
+    app.router.add_post("/admin/learn/subjects/{subject_id:\\d+}/start-mode", admin_subject_start_mode)
     app.router.add_post("/admin/learn/subjects/{subject_id:\\d+}/channel-gate", admin_toggle_subject_channel_gate)
     app.router.add_get("/admin/backup.zip", admin_download_backup)
     app.router.add_post("/admin/backup/upload-chunk", admin_backup_upload_chunk)
