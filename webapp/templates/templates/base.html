@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>{% block title %}Smart ENT — подготовка к ЕНТ{% endblock %}</title>
+{# Превью ссылки в Telegram и мессенджерах: название, описание, картинка #}
+<meta property="og:site_name" content="SMART ЕНТ">
+<meta property="og:type" content="{% block og_type %}website{% endblock %}">
+<meta property="og:title" content="{% block og_title %}SMART ЕНТ — подготовка к ЕНТ{% endblock %}">
+<meta property="og:description" content="{% block og_description %}Уроки, конспекты, интерактивные задания и тесты для подготовки к ЕНТ.{% endblock %}">
+<meta property="og:image" content="{{ site_base }}/static/og.png">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
@@ -385,7 +392,7 @@
     {% if share %}
     {# «Поделиться»: на сайте — ссылка на сайт, в мини-приложении — на мини-приложение;
        на странице урока — ссылка именно на этот урок (если её не выключили у урока) #}
-    <button type="button" class="app-share" id="app-share" hidden
+    <button type="button" class="app-share{% if share_lesson %} app-share-lesson{% if share_lesson.free %} app-share-hot{% endif %}{% endif %}" id="app-share" hidden
       data-site="{{ share.site }}" data-app="{{ share.app }}" data-on-site="{{ 1 if share.on_site else 0 }}"
       data-on-app="{{ 1 if share.on_app else 0 }}" data-text="{{ share.text }}"
       {% if share_lesson %}data-lesson-site="{{ share.site }}/learn/lesson/{{ share_lesson.id }}"
