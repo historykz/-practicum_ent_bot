@@ -2,6 +2,12 @@
 {% block title %}{{ subject.title }} — Smart ENT{% endblock %}
 {% block page_title %}{{ subject.title }}{% endblock %}
 {% block content %}
+{% if need_start %}
+{# Ученик с доступом ещё не нажал «Начать обучение»: уроки не откроются, пока не нажмёт #}
+<a class="start-warn" href="#start" id="start-warn">
+  ⚠️ ЧТОБЫ НАЧАТЬ И СМОТРЕТЬ УРОКИ, НАЖМИТЕ НА «✨ НАЧАТЬ ОБУЧЕНИЕ ✨» 👇
+</a>
+{% endif %}
 
 <p class="crumbs"><a href="/learn">← Все предметы</a></p>
 <h1>{{ subject.title }}</h1>
@@ -102,7 +108,7 @@
     <p class="start-note">Рейтинг, вознаграждение и грамота — там. Это тот же курс, второй раз он не начисляется.</p>
   {% elif not reward.started %}
     {% if start_flag == 'required' %}
-    <p class="start-hint" style="color:#b45309;font-weight:600">Чтобы открыть урок, сначала нажмите «Начать обучение» — вы попадёте в общий рейтинг предмета, и все уроки откроются.</p>
+    <p class="start-hint start-hint-angry">Чтобы открыть урок, сначала нажмите «Начать обучение» — вы попадёте в общий рейтинг предмета, и все уроки откроются.</p>
     {% endif %}
     <form method="post" action="/learn/{{ subject.id }}/start"
           onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='⏳ Запускаю…';">
@@ -173,4 +179,37 @@
 <p class="muted">Разделов пока нет.</p>
 {% endif %}
 
+{% if need_start %}
+<div class="start-scold" id="start-scold" hidden></div>
+<script>
+(function () {
+  // Уроки без «Начать обучение» не откроются: вместо перехода — к кнопке, и строго
+  var btn = document.querySelector('#start .start-btn');
+  var box = document.getElementById('start-scold');
+  if (!btn || !box) return;
+  var n = 0, timer = null;
+  var words = ['СНАЧАЛА НАЖМИТЕ «✨ НАЧАТЬ ОБУЧЕНИЕ ✨»!',
+               'ВЫ НЕ НАЖАЛИ «НАЧАТЬ ОБУЧЕНИЕ»! Уроки не откроются, пока не нажмёте золотую кнопку 👇',
+               'СТОП! 😤 Хватит нажимать на уроки — НАЖМИТЕ ЗОЛОТУЮ КНОПКУ «✨ НАЧАТЬ ОБУЧЕНИЕ ✨»!'];
+  function toStart() {
+    btn.scrollIntoView({behavior: 'smooth', block: 'center'});
+    btn.classList.remove('start-shake'); void btn.offsetWidth; btn.classList.add('start-shake');
+  }
+  function scold() {
+    box.textContent = words[Math.min(n, words.length - 1)]; n += 1;
+    box.hidden = false; clearTimeout(timer); timer = setTimeout(function () { box.hidden = true; }, 4000);
+    toStart();
+  }
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a[href*="/section/"], a[href*="/learn/lesson/"]') : null;
+    if (!a || a.closest('#start')) return;
+    e.preventDefault();
+    scold();
+  }, true);
+  var w = document.getElementById('start-warn');
+  if (w) w.addEventListener('click', function (e) { e.preventDefault(); toStart(); });
+  if (location.search.indexOf('start=required') >= 0) { n = 1; setTimeout(scold, 300); }
+})();
+</script>
+{% endif %}
 {% endblock %}
