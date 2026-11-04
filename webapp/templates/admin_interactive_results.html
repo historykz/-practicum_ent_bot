@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Результаты — {{ task.title }} — Smart ENT{% endblock %}
+{% block content %}
+<nav class="admin-crumbs">
+  <a href="/admin/interactive">🎮 Интерактивные задания</a><span>›</span>
+  <a href="/admin/interactive/{{ task.id }}">{{ task.title }}</a><span>›</span><span class="crumb-current">📊 Результаты</span>
+</nav>
+<h1>📊 Результаты: {{ task.title }}</h1>
+<p class="muted">«Проверено сервером» — баллы по ключу ответа, их нельзя подделать из кода задания.
+   «Тренировочный» — результат посчитало само задание, в оценку он не идёт.</p>
+<section class="admin-card">
+  {% if rows %}
+  <div class="table-scroll"><table>
+    <thead><tr><th>Ученик</th><th>Вид</th><th>Баллы</th><th>%</th><th>Урок</th><th>Когда (UTC)</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{% if r.username %}@{{ r.username }}{% else %}{{ r.first_name or r.tg_id }}{% endif %}</td>
+      <td>{% if r.kind == 'graded' %}🏆 проверено сервером{% else %}🧪 тренировочный{% endif %}</td>
+      <td>{{ r.score }} из {{ r.max_score }}</td><td>{{ r.percent }}%</td><td>{{ r.lesson_title or '—' }}</td><td>{{ (r.created_at or '')[:16] }}</td>
+    </tr>
+    {% endfor %}
+    </tbody></table></div>
+  {% else %}<p class="muted">Результатов пока нет.</p>{% endif %}
+</section>
+{% endblock %}

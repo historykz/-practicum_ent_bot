@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Все тесты — Smart ENT{% endblock %}
+{% block page_title %}Все тесты{% endblock %}
+{% block content %}
+<nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><span class="crumb-current">📝 Все тесты</span></nav>
+<h1>📝 Все тесты <span class="muted">({{ total }})</span></h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+<form method="get" class="admin-card admin-inline"><input type="search" name="q" value="{{ q }}" placeholder="Название или номер теста"><button class="btn" type="submit">Найти</button></form>
+<div class="table-scroll"><table>
+  <thead><tr><th>№</th><th>Тест</th><th>Раздел</th><th>Вопросов</th><th>Прошли</th><th></th></tr></thead>
+  <tbody>{% for t in rows %}<tr>
+    <td>{{ t.id }}</td>
+    <td>{{ t.title }}{% if t.is_private %} 🔒{% endif %}{% if t.lesson_id %} <a class="muted" href="/admin/learn/lessons/{{ t.lesson_id }}/edit">тест урока</a>{% endif %}</td>
+    <td>{{ t.category or '—' }}</td><td>{{ t.questions }}</td><td>{{ t.passed }}</td>
+    <td style="white-space:nowrap;">
+      <a class="btn btn-small" href="/admin/learn/tests/{{ t.id }}/questions">Вопросы</a>
+      <form method="post" action="/admin/all-tests/{{ t.id }}/delete" style="display:inline;" onsubmit="return confirm('Переместить тест в корзину? Вы сможете восстановить его в течение 48 часов.');"><button class="btn btn-small btn-danger" type="submit">Удалить</button></form>
+    </td>
+  </tr>{% else %}<tr><td colspan="6" class="muted">Тестов нет.</td></tr>{% endfor %}</tbody>
+</table></div>
+{% if pages > 1 %}<p>{% if page > 0 %}<a class="btn btn-small" href="?q={{ q|urlencode }}&page={{ page - 1 }}">Назад</a>{% endif %} Страница {{ page + 1 }} из {{ pages }} {% if page + 1 < pages %}<a class="btn btn-small" href="?q={{ q|urlencode }}&page={{ page + 1 }}">Дальше</a>{% endif %}</p>{% endif %}
+{% endblock %}
