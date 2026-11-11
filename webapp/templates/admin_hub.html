@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Админ-панель — Smart ENT{% endblock %}
+{% block page_title %}Админ-панель{% endblock %}
+{% block content %}
+<h1>⚙️ Админ-панель</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+<h2>Материалы</h2>
+<div class="hub-grid">
+  <a class="hub-card" href="/admin/learn"><b>📚 Предметы и уроки</b><span>Разделы, уроки, конспекты, видео, тетради, зачёты, копии</span></a>
+  <a class="hub-card" href="/admin/all-tests"><b>📝 Все тесты</b><span>И созданные в боте: поиск, вопросы, удаление в корзину</span></a>
+  <a class="hub-card" href="/admin/tests"><b>🧪 Конструктор тестов</b><span>Вопросы всех типов, личные ссылки, результаты</span></a>
+  <a class="hub-card" href="/admin/interactive"><b>🎮 Интерактивы</b><span>Код от ИИ, ZIP, картинки, результаты</span></a>
+  <a class="hub-card" href="/admin/publications"><b>📢 Публикации</b><span>Тесты в каналах и группах</span></a>
+  <a class="hub-card" href="/admin/live"><b>🎬 Live-эфир</b><span>Запуск и отчёты</span></a>
+  <a class="hub-card" href="/admin/autoruns"><b>⏰ Автозапуски</b><span>Расписание тестов</span></a>
+  <a class="hub-card" href="/admin/music"><b>🎵 Музыка</b><span>Фоновая музыка на тестах</span></a>
+  <a class="hub-card" href="/admin/appeals"><b>⚠️ Апелляции</b><span>Жалобы на вопросы{% if appeals_pending %}: {{ appeals_pending }}{% endif %}</span></a>
+  <a class="hub-card" href="/admin/learn/top-mistakes"><b>📉 Частые ошибки</b><span>Сложные вопросы</span></a>
+  <a class="hub-card" href="/admin/learn/rewards/journal"><b>📒 Награды</b><span>Журнал начислений</span></a>
+</div>
+{% if owner %}
+<h2>Люди и доступы</h2>
+<div class="hub-grid">
+  <a class="hub-card" href="/admin/users"><b>👥 Пользователи</b><span>Поиск, профиль, Premium, доступы, блокировка, устройства, ссылки, сеансы</span></a>
+  <a class="hub-card" href="/admin/users?filter=suspicious"><b>⚠️ Подозрительные{% if suspicious_n %}: {{ suspicious_n }}{% endif %}</b><span>Много разных устройств за сутки</span></a>
+  <a class="hub-card" href="/admin/admins"><b>🛠 Администраторы</b><span>Назначение, права галочками, ограничение по предметам, история</span></a>
+  <a class="hub-card" href="/admin/learn/premium-log"><b>💎 Журнал Premium</b><span>Цены и тарифы — в разделе «Предметы и уроки»</span></a>
+  <a class="hub-card" href="/admin/categories"><b>📂 Разделы каталога</b><span>Разделы тестов в боте</span></a>
+</div>
+<h2>Управление</h2>
+<div class="hub-grid">
+  <a class="hub-card" href="/admin/stats"><b>📊 Статистика</b><span>Активность, популярные тесты, новые ученики</span></a>
+  <a class="hub-card" href="/admin/announce"><b>📢 Анонсы и автотесты</b><span>Анонсы в канале, шаблоны, реклама после тестов, журнал</span></a>
+  <a class="hub-card" href="/admin/broadcast"><b>📣 Рассылка</b><span>Сообщение всем ученикам через бота</span></a>
+  <a class="hub-card" href="/admin/bot-settings"><b>🤖 Настройки бота</b><span>Режим обслуживания</span></a>
+  <a class="hub-card" href="/admin/security"><b>🛡 Безопасность</b><span>Пароль, код в Telegram, сеансы, история входов</span></a>
+  <a class="hub-card" href="/admin/export/users.csv"><b>⬇️ Ученики CSV</b><span>Выгрузка для таблиц</span></a>
+  <a class="hub-card" href="/admin/export/results.csv"><b>⬇️ Результаты CSV</b><span>Выгрузка попыток</span></a>
+  <a class="hub-card" href="/admin/health"><b>🩺 Сервер</b><span>Состояние и ошибки</span></a>
+  <a class="hub-card" href="/admin/storage"><b>💾 Память и место</b><span>Сколько занимают бот, база, видео и мусор; уборка</span></a>
+</div>
+{% endif %}
+<h2>Корзина и журнал</h2>
+<div class="hub-grid">
+  {% if perms.trash_view %}<a class="hub-card" href="/admin/trash"><b>🗑 Корзина{% if trash_n %}: {{ trash_n }}{% endif %}</b><span>Удалённое за 48 часов, с сайта и из бота</span></a>{% endif %}
+  {% if perms.trash_history %}<a class="hub-card" href="/admin/trash/journal"><b>📜 Журнал действий</b><span>Кто что удалил, вернул и изменил</span></a>{% endif %}
+</div>
+{% endblock %}

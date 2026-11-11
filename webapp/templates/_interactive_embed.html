@@ -1,0 +1,278 @@
+{# Плеер интерактивных заданий. Подключается на странице урока (любое число заданий)
+   и на отдельной странице задания. Разметка одного задания:
+     <div class="ia-embed" data-task="ID" data-lesson="ID урока или пусто" data-height="600"
+          data-graded="1|0" data-src="адрес документа (необязательно)"></div>
+   Каждое задание — в своём изолированном окне (sandbox без allow-same-origin): ни
+   страницы урока, ни входа, ни других заданий оно не видит. Окна загружаются, когда
+   до них доходит прокрутка, поэтому урок с 20 заданиями открывается быстро.
+   Ошибка или зависание одного задания не ломает остальные и сам урок. #}
+<style>
+  .ia-embed { margin: 14px 0 18px; }
+  .ia-embed-box { position: relative; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; }
+  .ia-embed iframe { width: 100%; border: 0; display: block; background: #fff; min-height: 220px; }
+  .ia-embed-load { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                   color: #64748b; font-size: .95rem; background: #fff; }
+  .ia-embed-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
+  .ia-embed-title { font-weight: 700; }
+  .ia-embed-kind { font-size: .8rem; color: var(--muted); }
+  .ia-embed-tools { display: flex; gap: 6px; }
+  .ia-embed-tools button { min-height: 32px; padding: 4px 10px; border-radius: 10px; border: 1px solid var(--border);
+                           background: transparent; color: var(--text); cursor: pointer; font-size: .85rem; }
+  .ia-embed-result { margin-top: 8px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); font-size: .95rem; }
+  .ia-embed-result.graded { border-color: #34c759; background: rgba(52,199,89,.10); }
+  .ia-embed-result.practice { border-color: #f5a623; background: rgba(245,166,35,.10); }
+  .ia-embed-result.err { border-color: #ff453a; background: rgba(255,69,58,.08); }
+  .ia-embed-rot { position: relative; }
+  .ia-embed-ctl { display: none; position: absolute; top: 10px; right: 10px; z-index: 6; gap: 8px; }
+  .ia-embed-ctl button { min-width: 44px; min-height: 44px; padding: 0 12px; border-radius: 22px; border: 1px solid rgba(255,255,255,.35);
+                         background: rgba(0,0,0,.55); color: #fff; font: 600 15px/1 system-ui, -apple-system, sans-serif; cursor: pointer; }
+  .ia-embed-ctl .ia-embed-turn[hidden] { display: none; }
+  /* Весь экран: окно задания поверх всей страницы. Меню и шапку прячем, чтобы не закрывали
+     ролик и кнопку выхода; прокрутку страницы держим, пока открыт полный экран. */
+  .ia-embed.is-full .ia-embed-box { position: fixed; inset: 0; z-index: 2147483000; border: 0; border-radius: 0; background: #000; }
+  .ia-embed.is-full .ia-embed-rot { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+  .ia-embed.is-full iframe { height: 100% !important; min-height: 0; }
+  .ia-embed.is-full .ia-embed-ctl { display: flex; }
+  .ia-embed-box:fullscreen { background: #000; }
+  .ia-embed-box:-webkit-full-screen { width: 100%; height: 100%; background: #000; }
+  html.ia-full-open, html.ia-full-open body { overflow: hidden !important; overscroll-behavior: none; }
+  html.ia-full-open .tabbar, html.ia-full-open .app-topbar, html.ia-full-open .site-header,
+  html.ia-full-open .share-fab { visibility: hidden !important; }
+</style>
+<script>
+(function () {
+  if (window.__iaEmbed) { window.__iaEmbed.scan(); return; }
+  var SANDBOX = 'allow-scripts allow-popups allow-modals allow-pointer-lock';
+  var items = [];
+  function q(el, s) { return el.querySelector(s); }
+  function show(it, kind, text) {
+    var box = q(it.el, '.ia-embed-result');
+    box.hidden = false; box.className = 'ia-embed-result ' + kind; box.textContent = text;
+  }
+  function api(it, path, body) {
+    var qs = [];
+    if (it.lesson) qs.push('lesson=' + encodeURIComponent(it.lesson));
+    if (it.preview) qs.push('preview=1');
+    var url = '/interactive/api/' + it.task + '/' + path + (qs.length ? '?' + qs.join('&') : '');
+    return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+                       body: JSON.stringify(body)})
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok && !d.error) d.error = 'Не удалось сохранить (ошибка ' + r.status + ').'; return d; }); })
+      .catch(function () { return {error: 'Нет связи. Проверьте интернет и попробуйте ещё раз.'}; });
+  }
+  function load(it) {
+    if (it.loaded) return;
+    it.loaded = true;
+    var src = it.el.getAttribute('data-src') || ('/interactive/frame/' + it.task + (it.lesson ? '?lesson=' + encodeURIComponent(it.lesson) : ''));
+    fetch(src, {credentials: 'same-origin', cache: 'no-store'})
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(function (html) { it.frame.srcdoc = html; })
+      .catch(function () {
+        var l = q(it.el, '.ia-embed-load');
+        if (l) l.textContent = '⚠️ Задание не загрузилось. Обновите страницу.';
+      });
+  }
+  function setup(el) {
+    if (el.__ia) return;
+    var it = {el: el, task: el.getAttribute('data-task'), lesson: el.getAttribute('data-lesson') || '',
+              graded: el.getAttribute('data-graded') === '1', loaded: false,
+              preview: el.getAttribute('data-preview') === '1'};
+    el.__ia = it;
+    var h = parseInt(el.getAttribute('data-height') || '0', 10) || 520;
+    var box = document.createElement('div'); box.className = 'ia-embed-box';
+    var rot = document.createElement('div'); rot.className = 'ia-embed-rot';
+    var frame = document.createElement('iframe');
+    frame.setAttribute('sandbox', SANDBOX);
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.setAttribute('allow', 'autoplay; fullscreen; microphone');
+    frame.setAttribute('title', el.getAttribute('data-title') || 'Интерактивное задание');
+    frame.style.height = h + 'px';
+    var ld = document.createElement('div'); ld.className = 'ia-embed-load'; ld.textContent = 'Загружаем задание…';
+    var ctl = document.createElement('div'); ctl.className = 'ia-embed-ctl';
+    var bTurn = document.createElement('button'); bTurn.type = 'button'; bTurn.className = 'ia-embed-turn'; bTurn.textContent = '⟳';
+    bTurn.title = 'Повернуть'; bTurn.setAttribute('aria-label', 'Повернуть экран'); bTurn.hidden = true;
+    var bX = document.createElement('button'); bX.type = 'button'; bX.className = 'ia-embed-x'; bX.textContent = '✕';
+    bX.title = 'Выйти из полного экрана'; bX.setAttribute('aria-label', 'Выйти из полного экрана');
+    ctl.appendChild(bTurn); ctl.appendChild(bX);
+    rot.appendChild(frame); rot.appendChild(ctl); box.appendChild(rot); box.appendChild(ld);
+    var res = document.createElement('div'); res.className = 'ia-embed-result'; res.hidden = true; res.setAttribute('role', 'status');
+    el.appendChild(box); el.appendChild(res);
+    it.frame = frame;
+    frame.addEventListener('load', function () { if (frame.srcdoc && ld.parentNode) ld.remove(); });
+    var tools = q(el, '.ia-embed-tools');
+    if (tools) {
+      tools.addEventListener('click', function (e) {
+        var b = e.target.closest('button'); if (!b) return;
+        if (b.getAttribute('data-act') === 'restart') { it.loaded = false; frame.removeAttribute('srcdoc'); load(it); }
+        if (b.getAttribute('data-act') === 'full') setFull(it, !it.full);
+      });
+    }
+    it.box = box; it.rot = rot; it.turn = bTurn; it.full = false; it.real = false;
+    it.video = el.getAttribute('data-material') === 'video'; it.rotate = it.video;
+    it.fullBtn = q(el, '[data-act="full"]');
+    bX.addEventListener('click', function () { setFull(it, false); });
+    bTurn.addEventListener('click', function () { it.rotate = !it.rotate; layout(it); });
+    items.push(it);
+    if (near(it)) { load(it); return; }
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (ents) {
+        ents.forEach(function (en) { if (en.isIntersecting) { io.disconnect(); load(it); } });
+      }, {rootMargin: '700px 0px'});
+      io.observe(el);
+    }
+  }
+  // Ленивая загрузка: окно задания грузится, когда до него осталось меньше ~700 px.
+  // Кроме IntersectionObserver проверяем сами (прокрутка и таймер): в некоторых
+  // webview наблюдатель молчит, а задание всё равно должно открыться.
+  function near(it) {
+    if (!(window.innerHeight > 0)) return true;
+    var r = it.el.getBoundingClientRect();
+    return r.top < window.innerHeight + 700 && r.bottom > -700;
+  }
+  function sweep() { items.forEach(function (it) { if (!it.loaded && near(it)) load(it); }); }
+  var sweepT = null;
+  window.addEventListener('scroll', function () { clearTimeout(sweepT); sweepT = setTimeout(sweep, 120); }, {passive: true, capture: true});
+  window.addEventListener('resize', sweep);
+  setInterval(sweep, 2000);
+  function find(win) { for (var i = 0; i < items.length; i++) if (items[i].frame.contentWindow === win) return items[i]; return null; }
+  window.addEventListener('message', function (e) {
+    var it = find(e.source);           // только сообщения от окна своего задания
+    if (!it) return;
+    var m = e.data || {};
+    if (!m.__smartent) return;
+    var send = function (type, data) { try { it.frame.contentWindow.postMessage({__smartent: 1, type: type, data: data}, '*'); } catch (x) {} };
+    if (m.type === 'progress') {
+      api(it, 'progress', {state: m.data}).then(function (r) { if (r.error) show(it, 'err', '⚠️ ' + r.error); });
+    } else if (m.type === 'submit') {
+      api(it, 'submit', {answer: (m.data || {}).answer}).then(function (res) {
+        if (res.error) { show(it, 'err', '⚠️ ' + res.error); send('result', {error: res.error}); return; }
+        show(it, 'graded', (res.kind === 'preview' ? '👁 ' : '🏆 ') + 'Проверено сервером: ' + res.score + ' из ' + res.max + ' (' + res.percent + '%)' +
+             (res.note ? '. ' + res.note : (res.attempts_left !== undefined ? '. Осталось попыток: ' + res.attempts_left : '')));
+        send('result', res);
+      });
+    } else if (m.type === 'practice') {
+      api(it, 'practice', {score: (m.data || {}).score, max: (m.data || {}).max}).then(function (p) {
+        if (p.error) { show(it, 'err', '⚠️ ' + p.error); send('practice_result', {error: p.error}); return; }
+        show(it, 'practice', '🧪 Тренировочный результат: ' + p.score + ' из ' + p.max +
+             (p.kind === 'preview' ? '. Предпросмотр: не сохранён.' : '. В оценку не идёт.'));
+        send('practice_result', p);
+      });
+    } else if (m.type === 'fullscreen') {
+      setFull(it, !!(m.data && m.data.on));
+    } else if (m.type === 'resize') {
+      if (it.el.classList.contains('is-full')) return;
+      var h = Math.max(220, Math.min(4000, Math.ceil((m.data && m.data.h) || 520)));
+      it.frame.style.height = h + 'px';
+    }
+  });
+  /* ── весь экран ──
+     Настоящий полный экран браузера, если он есть (компьютер, Android). В мини-приложении
+     Telegram и на iPhone, где его нет, окно задания растягивается на всё окно поверх
+     страницы. Выход: ✕, Esc, повторное ⛶ (на странице и внутри ролика). */
+  function inMiniApp() {
+    return document.documentElement.classList.contains('in-miniapp') ||
+           !!(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData);
+  }
+  function tell(it) {
+    try { it.frame.contentWindow.postMessage({__smartent: 1, type: 'fullscreen_state', data: {on: it.full}}, '*'); } catch (x) {}
+    if (it.fullBtn) it.fullBtn.textContent = it.full ? '✕ Закрыть' : '⛶ На весь экран';
+  }
+  /* У предков окна могут быть transform или filter (анимация перехода страниц): с ними
+     position: fixed считается от предка, а не от экрана. На время полного экрана снимаем. */
+  var NEUTRAL = {transform: 'none', filter: 'none', perspective: 'none', contain: 'none', willChange: 'auto',
+                 backdropFilter: 'none', webkitBackdropFilter: 'none', animation: 'none'};
+  function neutralize(it) {
+    it.saved = [];
+    for (var e = it.box.parentElement; e && e !== document.documentElement; e = e.parentElement) {
+      var cs = getComputedStyle(e), bad = false;
+      if ((cs.transform && cs.transform !== 'none') || (cs.filter && cs.filter !== 'none') || (cs.perspective && cs.perspective !== 'none') ||
+          (cs.contain && cs.contain !== 'none') || (cs.willChange && /transform|filter|perspective/.test(cs.willChange)) ||
+          (cs.backdropFilter && cs.backdropFilter !== 'none') || (cs.webkitBackdropFilter && cs.webkitBackdropFilter !== 'none')) bad = true;
+      if (!bad) continue;
+      var keep = {};
+      Object.keys(NEUTRAL).forEach(function (k) { keep[k] = e.style[k]; e.style[k] = NEUTRAL[k]; });
+      it.saved.push([e, keep]);
+    }
+  }
+  function restore(it) {
+    (it.saved || []).forEach(function (p) { Object.keys(p[1]).forEach(function (k) { p[0].style[k] = p[1][k]; }); });
+    it.saved = [];
+  }
+  function fsElement() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
+  /* Телефон держат вертикально, а ролик горизонтальный: поворачиваем окно ролика на 90°
+     (как в обычном видео на весь экран). Повернули телефон — поворот снимается сам. */
+  function layout(it) {
+    var r = it.rot, st = r.style;
+    var W = it.box.clientWidth, H = it.box.clientHeight;
+    var portrait = it.full && H > W * 1.15 && W < 760;
+    it.turn.hidden = !portrait;
+    if (it.full && portrait && it.rotate) {
+      st.width = H + 'px'; st.height = W + 'px'; st.left = W + 'px'; st.top = '0px';
+      st.transformOrigin = '0 0'; st.transform = 'rotate(90deg)';
+    } else {
+      st.width = st.height = st.left = st.top = st.transformOrigin = st.transform = '';
+    }
+  }
+  function pseudo(it) {
+    it.real = false;
+    neutralize(it);
+    document.documentElement.classList.add('ia-full-open');
+    layout(it);
+  }
+  function setFull(it, on) {
+    on = !!on;
+    if (on === it.full) { tell(it); return; }
+    if (on) {
+      items.forEach(function (o) { if (o !== it && o.full) setFull(o, false); });
+      it.full = true; it.scrollY = window.scrollY || 0;
+      it.el.classList.add('is-full');
+      it.rotate = it.video;
+      var box = it.box, req = box.requestFullscreen || box.webkitRequestFullscreen;
+      if (req && !inMiniApp()) {
+        it.real = true;
+        try {
+          var p = req.call(box);
+          if (p && p.then) p.then(function () {
+            try { if (screen.orientation && screen.orientation.lock && it.video !== false) screen.orientation.lock('landscape').catch(function () {}); } catch (x) {}
+            setTimeout(function () { layout(it); }, 250);
+          }, function () { if (it.full) pseudo(it); });
+          else setTimeout(function () { if (it.full && fsElement() !== box) pseudo(it); }, 300);
+        } catch (x) { pseudo(it); }
+        document.documentElement.classList.add('ia-full-open');
+      } else pseudo(it);
+      layout(it);
+    } else {
+      it.full = false;
+      if (fsElement() === it.box) {
+        var ex = document.exitFullscreen || document.webkitExitFullscreen;
+        try { var r = ex && ex.call(document); if (r && r.catch) r.catch(function () {}); } catch (x) {}
+      }
+      try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (x) {}
+      it.real = false;
+      it.el.classList.remove('is-full');
+      restore(it); layout(it);
+      if (!items.some(function (o) { return o.full; })) document.documentElement.classList.remove('ia-full-open');
+      // Браузер выходит из полного экрана не сразу: возвращаем страницу на место и после этого
+      var y = it.scrollY || 0;
+      window.scrollTo(0, y);
+      [80, 250, 600].forEach(function (ms) { setTimeout(function () { if (!it.full && Math.abs((window.scrollY || 0) - y) > 2) window.scrollTo(0, y); }, ms); });
+    }
+    tell(it);
+  }
+  function onFsChange() {
+    var cur = fsElement();
+    items.forEach(function (it) { if (it.full && it.real && cur !== it.box) setFull(it, false); else if (it.full) layout(it); });
+  }
+  document.addEventListener('fullscreenchange', onFsChange);
+  document.addEventListener('webkitfullscreenchange', onFsChange);
+  window.addEventListener('resize', function () { items.forEach(function (it) { if (it.full) layout(it); }); });
+  window.addEventListener('orientationchange', function () { setTimeout(function () { items.forEach(function (it) { if (it.full) layout(it); }); }, 250); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    items.forEach(function (it) { if (it.full && !it.real) setFull(it, false); });
+  });
+  window.__iaEmbed = {scan: function () { document.querySelectorAll('.ia-embed').forEach(setup); },
+                      full: function (n, on) { var it = items[n || 0]; if (it) setFull(it, on); }};
+  window.__iaEmbed.scan();
+})();
+</script>
