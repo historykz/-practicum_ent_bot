@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Восстановление пароля — Smart ENT{% endblock %}
+{% block page_title %}Восстановление{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <h1>Забыли пароль?</h1>
+  <p class="muted">Укажите свой Telegram username. Если аккаунт привязан
+     к Telegram, код для сброса придёт в бота.</p>
+  {% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+  {% if hint_no_telegram %}
+  <p class="muted">Если Telegram к аккаунту ещё не привязан, откройте
+     мини-приложение из бота — аккаунт свяжется автоматически, после чего
+     сброс пароля станет доступен.</p>
+  {% endif %}
+  <form method="post" action="/forgot" class="auth-form">
+    <label>Telegram username</label>
+    <div class="auth-uname"><span>@</span>
+      <input type="text" name="username" value="{{ username or '' }}" required></div>
+    <button type="submit" class="btn btn-primary">Отправить код</button>
+  </form>
+  <p class="muted auth-alt"><a href="/login">Вернуться ко входу</a></p>
+</section>
+{% endblock %}

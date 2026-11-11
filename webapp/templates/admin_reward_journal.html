@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Журнал наград и штрафов — Smart ENT{% endblock %}
+{% block content %}
+<nav class="admin-crumbs">
+  <a href="/admin/learn">⚙️ Все настройки</a><span>›</span>
+  {% if sid %}<a href="/admin/learn?subject={{ sid }}">📘 Предмет</a><span>›</span>{% endif %}
+  <span class="crumb-current">📒 Журнал наград и штрафов</span>
+</nav>
+<h1>📒 Журнал наград и штрафов</h1>
+<section class="admin-card">
+  <form method="get" action="/admin/learn/rewards/journal" class="admin-form">
+    <label>Предмет</label>
+    <select name="subject">
+      <option value="">— все —</option>
+      {% for s in subjects %}<option value="{{ s.id }}" {% if s.id == sid %}selected{% endif %}>{{ s.title }}</option>{% endfor %}
+    </select>
+    <label>Ученик</label>
+    <input type="text" name="u" value="{{ ident }}" placeholder="@username или Telegram ID">
+    <label>Что показать</label>
+    <select name="type">
+      <option value="">всё</option>
+      {% for k, t in kinds %}<option value="{{ k }}" {% if k == kind %}selected{% endif %}>{{ t }}</option>{% endfor %}
+    </select>
+    <label>Период</label>
+    <div class="admin-inline"><input type="date" name="from" value="{{ d_from }}"> — <input type="date" name="to" value="{{ d_to }}"></div>
+    <button type="submit" class="btn-small">Показать</button>
+  </form>
+  <p class="muted">Каждая строка — одна операция. Награда — один раз за урок (конспект, ДЗ, зачёт), повторы не
+    оплачиваются. Дни без новых учебных действий тоже записаны: первые два — 0 ₸, с третьего — штраф.
+    «Нет доступных новых заданий» — у ученика нечего было делать, день не считается.</p>
+</section>
+{% if not_found %}
+<div class="alert">Ученик «{{ ident }}» не найден в базе бота.</div>
+{% endif %}
+{% if participant %}
+<section class="admin-card">
+  <h2>👤 {{ user.first_name or '' }}{% if user.username %} @{{ user.username }}{% endif %} <span class="muted">{{ user.tg_id }}</span></h2>
+  <p>Статус: <b>{{ participant.status }}</b> · начал {{ participant.started }} · баланс <b>{{ participant.balance }}</b>
+     · к выплате {{ participant.payout }} · денежная акция: <b>{% if participant.money %}участвует{% else %}нет (новый ученик после закрытия){% endif %}</b>
+     · дней без новой активности подряд: {{ participant.run }} (проверено по {{ participant.checked }})</p>
+</section>
+{% endif %}
+{% if items %}
+<section class="admin-card">
+  <h2>🗂 Учёт заданий</h2>
+  <div style="overflow-x:auto;"><table>
+    <tr><th>Урок</th><th>Вид</th><th>ID урока / теста</th><th>Конспект открыт впервые</th><th>Последний раз</th><th>Открытий</th>
+        <th>Первое выполнение</th><th>Попыток</th><th>Принято</th><th>Статус</th><th>Награда</th></tr>
+    {% for it in items %}
+    <tr><td>{{ it.title }}</td><td>{{ it.kind_title }}</td><td>{{ it.lesson_id }}{% if it.test_id %} / {{ it.test_id }}{% endif %}</td>
+        <td>{{ it.first_opened_at_fmt }}</td><td>{{ it.last_opened_at_fmt }}</td><td>{{ it.opens }}</td>
+        <td>{{ it.first_attempt_at_fmt }}</td><td>{{ it.attempts }}</td><td>{{ it.completed_at_fmt }}</td>
+        <td>{{ it.status_title }}</td><td>{{ it.reward_fmt }}</td></tr>
+    {% endfor %}
+  </table></div>
+  <p class="muted">Повторные открытия и попытки сохраняются в статистике, но второй награды и сброса счётчика
+    пропусков не дают.</p>
+</section>
+{% endif %}
+<section class="admin-card">
+  <h2>Операции{% if rows %} ({{ rows|length }}){% endif %}</h2>
+  {% if rows %}
+  <p>Начислено: <b>{{ sum_rewards }}</b> · штрафы: <b>{{ sum_penalties }}</b></p>
+  <div style="overflow-x:auto;"><table>
+    <tr><th>Дата</th><th>Ученик</th><th>Предмет</th><th>Действие</th><th>Тип</th><th>За что</th><th>ID урока / теста</th>
+        <th>Сумма</th><th>Баланс до</th><th>Баланс после</th></tr>
+    {% for r in rows %}
+    <tr><td>{{ r.date }}</td>
+        <td><a href="/admin/learn/rewards/journal?subject={{ r.subject_id }}&u={{ r.tg_id }}">{{ r.who }}</a></td>
+        <td>{{ r.subject_title }}</td><td>{{ r.action }}</td><td>{{ r.type_label }}</td><td>{{ r.reason }}</td>
+        <td>{{ r.lesson_id or '—' }}{% if r.test_id %} / {{ r.test_id }}{% endif %}</td>
+        <td class="{% if r.negative %}money-neg{% elif r.amount > 0 %}money-pos{% endif %}">{{ r.amount_fmt }}</td>
+        <td>{{ r.before_fmt }}</td><td>{{ r.after_fmt }}</td></tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+  <p class="muted">Операций нет.</p>
+  {% endif %}
+</section>
+{% endblock %}
