@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — Smart ENT{% endblock %}
+{% block page_title %}Тест{% endblock %}
+{% block content %}
+<section class="err-card">
+  <div class="err-emoji">{% if key in ('bad_link', 'not_found') %}🔗{% elif key == 'closed' %}✅{% else %}🔒{% endif %}</div>
+  <h1>{{ title }}</h1>
+  <p class="muted">{{ hint }}</p>
+  <div class="err-actions">
+    <a class="btn btn-primary" href="https://t.me/{{ bot_username }}" target="_blank" rel="noopener">🤖 Открыть бота</a>
+    <a class="btn" href="/tests">📝 К тестам</a>
+  </div>
+</section>
+{% endblock %}
