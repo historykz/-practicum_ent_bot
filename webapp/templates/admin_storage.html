@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Память и место — Smart ENT{% endblock %}
+{% block page_title %}Память и место{% endblock %}
+{% block content %}
+<nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><span class="crumb-current">💾 Память и место</span></nav>
+<h1>💾 Память и место</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<style>
+  .st-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 10px 0 18px; }
+  .st-card { border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; }
+  .st-card b { display: block; font-size: 1.35rem; margin-top: 2px; }
+  .st-card small { color: var(--muted); display: block; margin-top: 4px; line-height: 1.35; }
+  .st-table { width: 100%; border-collapse: collapse; margin: 6px 0 16px; }
+  .st-table td { padding: 7px 4px; border-bottom: 1px solid var(--border); }
+  .st-table td:last-child { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .st-actions form { display: inline-block; margin: 0 8px 8px 0; }
+  .st-warn { color: #d97706; }
+</style>
+
+<h2>Память (за неё Railway берёт $10 за 1 ГБ в месяц)</h2>
+<div class="st-grid">
+  <div class="st-card">Программа бота и сайта
+    <b>{% if r.memory.rss %}{{ h(r.memory.rss) }}{% else %}—{% endif %}</b>
+    <small>Сколько памяти держит сам бот сейчас{% if r.memory.peak %}. Наибольшее с запуска: {{ h(r.memory.peak) }}{% endif %}.</small></div>
+  {% if r.memory.container %}
+  <div class="st-card">Весь контейнер
+    <b>{{ h(r.memory.container) }}</b>
+    <small>Это число видит Railway.{% if r.memory.file_cache is not none %} Из него файловый кэш: {{ h(r.memory.file_cache) }}
+      (недавно записанные и прочитанные файлы){% endif %}{% if r.memory.limit %}. Предел: {{ h(r.memory.limit) }}{% endif %}.</small></div>
+  {% endif %}
+</div>
+
+<h2>Место на диске (Railway: $0,15 за 1 ГБ в месяц)</h2>
+<div class="st-grid">
+  <div class="st-card">База данных<b>{{ h(r.db_size) }}</b><small>Ученики, тесты, результаты, доступы, настройки.</small></div>
+  <div class="st-card">Загруженные файлы<b>{{ h(r.uploads_total) }}</b><small>Видео, картинки, задания и видео-уроки кодом.</small></div>
+  <div class="st-card">Корзина<b>{{ h(r.trash_size) }}</b><small>Удалённое за 48 часов, потом стирается само.</small></div>
+  <div class="st-card">Временные файлы бэкапов<b{% if r.temp.bytes > 50*1024*1024 %} class="st-warn"{% endif %}>{{ h(r.temp.bytes) }}</b>
+    <small>Должно быть почти 0: бот удаляет их сразу после отправки.</small></div>
+  {% if r.disk %}<div class="st-card">Диск всего<b>{{ h(r.disk.used) }} из {{ h(r.disk.total) }}</b><small>Свободно {{ h(r.disk.free) }}.</small></div>{% endif %}
+</div>
+
+{% if r.uploads %}
+<h3>Из чего состоят файлы</h3>
+<table class="st-table">
+  {% for p in r.uploads %}<tr><td>{{ p.name }}</td><td>{{ h(p.size) }}</td></tr>{% endfor %}
+</table>
+{% endif %}
+
+<h2>Уборка</h2>
+<p class="muted">Удаляется только мусор. Ученики, тесты, результаты и опубликованные материалы не трогаются.</p>
+<table class="st-table">
+  <tr><td>Временные файлы бэкапов</td><td>{{ h(r.temp.bytes) }}</td></tr>
+  <tr><td>Прошлые версии заданий и видео старше {{ 7 }} дней (для отката): {{ r.prev|length }}</td><td>{{ h(r.prev_size) }}</td></tr>
+  <tr><td>Папки заданий, которых больше нет: {{ r.orphans|length }}</td><td>{{ h(r.orphans_size) }}</td></tr>
+</table>
+{% if owner %}
+<div class="st-actions">
+  <form method="post" action="/admin/storage/clean"><input type="hidden" name="what" value="temp">
+    <button class="btn btn-small" type="submit">🧹 Удалить временные файлы</button></form>
+  <form method="post" action="/admin/storage/clean" onsubmit="return confirm('Удалить прошлые версии старше 7 дней? Откатиться к ним будет нельзя.');">
+    <input type="hidden" name="what" value="versions">
+    <button class="btn btn-small" type="submit">🗂 Удалить старые версии</button></form>
+</div>
+{% else %}<p class="muted">Убирать может только владелец.</p>{% endif %}
+
+<h2>Автобэкап</h2>
+<p>Приходит раз в сутки после {{ '%02d' % r.backup_hour }}:00 (Алматы). Перезапуск бота второй бэкап за день не шлёт.
+  {% if r.backup_last %}Последний: <b>{{ r.backup_last }}</b>.{% else %}Ещё не отправлялся с этой версии.{% endif %}</p>
+
+<h2>Самые большие таблицы базы</h2>
+<table class="st-table">
+  {% for t in r.tables %}<tr><td>{{ t.name }}</td><td>{% if t.size is not none %}{{ h(t.size) }}{% else %}{{ t.rows }} строк{% endif %}</td></tr>{% endfor %}
+</table>
+{% endblock %}
