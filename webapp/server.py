@@ -30,6 +30,7 @@ from webapp import diag_web
 from webapp import favorites as favorites_web
 from webapp import test_web, builder_web, interactive_web, lesson_blocks_web
 from webapp import trash_web, owner_web, admin_hub, announce_web, lesson_materials_web
+from webapp import storage_web
 from services import diag
 
 log = logging.getLogger(__name__)
@@ -584,6 +585,7 @@ def create_app() -> web.Application:
     admin_hub.register_routes(app)
     announce_web.register_routes(app)
     lesson_materials_web.register_routes(app)
+    storage_web.register_routes(app)
     app.on_startup.append(trash_web.start_purge_loop)
 
     return app
