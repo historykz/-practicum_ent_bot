@@ -9,7 +9,7 @@ import json
 import time
 import zipfile
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import database as db
@@ -749,16 +749,142 @@ async def _send_site_backup(bot, admin_id, today):
         pass
 
 
+# Автобэкап раз в сутки в 03:00 по Алматы. Раньше он запускался через минуту после
+# КАЖДОГО запуска бота (каждая загрузка на GitHub = новый бэкап на 19 частей) и не
+# удалял за собой архив и части: на сервере копилось по ~700 МБ за раз.
+DAILY_BACKUP_HOUR = 3
+DAILY_BACKUP_KEY = "daily_backup_last"
+DAILY_BACKUP_TRIES = 3
+_ALMATY = timezone(timedelta(hours=5))
+
+
+def _backup_last() -> str:
+    try:
+        row = db.fetchone("SELECT value FROM settings WHERE key=?", (DAILY_BACKUP_KEY,))
+        return (row["value"] if row else "") or ""
+    except Exception:
+        return ""
+
+
+def _backup_mark(day: str) -> None:
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (DAILY_BACKUP_KEY, day))
+
+
+def daily_backup_due(now: Optional[datetime] = None) -> Optional[str]:
+    """День (ГГГГ-ММ-ДД), за который пора отправить автобэкап, или None."""
+    now = now or datetime.now(_ALMATY)
+    day = now.strftime("%Y-%m-%d")
+    if now.hour < DAILY_BACKUP_HOUR or _backup_last() == day:
+        return None
+    return day
+
+
+def temp_files_size() -> dict:
+    """Сколько места занимают временные файлы бэкапов: {'bytes': N, 'items': K}."""
+    total, items = 0, 0
+    for path in _temp_backup_paths():
+        items += 1
+        if os.path.isdir(path):
+            for root, _dirs, files in os.walk(path):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+        else:
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                pass
+    return {"bytes": total, "items": items}
+
+
+def _temp_backup_paths() -> list:
+    import glob
+    import tempfile
+    out = glob.glob(os.path.join(tempfile.gettempdir(), "site_backup_*"))
+    try:
+        out += [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR)]
+    except OSError:
+        pass
+    return out
+
+
+def cleanup_temp(max_age_sec: int = 600) -> int:
+    """Удалить забытые временные файлы бэкапов старше max_age_sec. Возвращает байты."""
+    import shutil
+    freed = 0
+    now = time.time()
+    before = temp_files_size()["bytes"]
+    for path in _temp_backup_paths():
+        try:
+            if now - os.path.getmtime(path) < max_age_sec:
+                continue
+        except OSError:
+            continue
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    freed = max(0, before - temp_files_size()["bytes"])
+    if freed:
+        log.info("backup temp cleanup: freed %d bytes", freed)
+    return freed
+
+
+async def send_daily_backup(bot, admin_id, now: Optional[datetime] = None) -> bool:
+    """Собрать полную копию, отправить частями и сразу удалить временные файлы."""
+    import asyncio as _aio
+    from aiogram.types import FSInputFile
+    from webapp import learning as _lg
+    from services import restore_service as _rs
+    now = now or datetime.now(_ALMATY)
+
+    def _build():
+        zip_path = _lg._build_backup_zip_sync()
+        return zip_path, _rs.split_backup(zip_path)
+
+    zip_path = None
+    try:
+        zip_path, parts = await _aio.to_thread(_build)
+        today = now.strftime("%d.%m.%Y")
+        n = len(parts)
+        for i, path in enumerate(parts, 1):
+            size = _rs.human_size(os.path.getsize(path))
+            if n == 1:
+                cap = (f"🗓 <b>Авто-бэкап за {today}</b> ({size})\n\n"
+                       "Полная копия платформы: предметы, уроки, конспекты, "
+                       "тесты, пользователи, доступы, подписки, платежи, "
+                       "настройки — и сайта, и бота.")
+            else:
+                cap = (f"🗓 <b>Авто-бэкап за {today} — часть {i} из {n}</b> "
+                       f"({size})\n\n"
+                       f"⚠️ Сохраните ВСЕ {n} частей — для восстановления нужны все.")
+            await bot.send_document(admin_id, FSInputFile(path), caption=cap, parse_mode="HTML",
+                                    disable_notification=i > 1)
+        log.info("daily_backup (%d частей) отправлен админу %s", n, admin_id)
+        return True
+    except Exception as e:
+        log.warning("daily_backup ошибка: %s", e)
+        return False
+    finally:
+        if zip_path:
+            try:
+                await _aio.to_thread(_lg.drop_backup_tmp, zip_path)
+            except Exception as e:
+                log.warning("daily_backup cleanup: %s", e)
+
+
 async def daily_backup_loop(bot):
-    """
-    Каждый день отправляет лёгкий бэкап главному админу в личку.
-    Главный админ — первый в config._HARDCODED_ADMIN_IDS.
-    """
+    """Раз в сутки (после 03:00 по Алматы) отправляет полную копию главному админу.
+    Какой день уже отправлен, хранится в настройках: перезапуск бота второй бэкап
+    за тот же день не шлёт. Неудачу повторяет до трёх раз за день."""
     import asyncio
     import config
-    from aiogram.types import FSInputFile
 
-    # Главный админ
     admin_id = None
     try:
         if config._HARDCODED_ADMIN_IDS:
@@ -769,41 +895,22 @@ async def daily_backup_loop(bot):
         log.warning("daily_backup: главный админ не найден, автобэкап выключен")
         return
 
-    # Ждём минуту после старта, потом раз в 24 часа
     await asyncio.sleep(60)
+    try:
+        await asyncio.to_thread(cleanup_temp, 600)     # мусор от прошлых запусков
+    except Exception as e:
+        log.warning("backup temp cleanup: %s", e)
+    fails = {}
     while True:
         try:
-            # Одна общая копия платформы (база сайта и бота + файлы),
-            # нарезанная на части ≤19 МБ. Отдельного бэкапа сайта больше нет —
-            # раньше приходили два разных архива и их путали при восстановлении.
-            import asyncio as _aio
-            from webapp import learning as _lg
-            from services import restore_service as _rs
-
-            def _build():
-                zip_path = _lg._build_backup_zip_sync()
-                return zip_path, _rs.split_backup(zip_path)
-
-            zip_path, parts = await _aio.to_thread(_build)
-            import os as _os
-            from datetime import datetime as _dt
-            today = _dt.now().strftime("%d.%m.%Y")
-            n = len(parts)
-            for i, path in enumerate(parts, 1):
-                size = _rs.human_size(_os.path.getsize(path))
-                if n == 1:
-                    cap = (f"🗓 <b>Авто-бэкап за {today}</b> ({size})\n\n"
-                           "Полная копия платформы: предметы, уроки, конспекты, "
-                           "тесты, пользователи, доступы, подписки, платежи, "
-                           "настройки — и сайта, и бота.")
+            day = await asyncio.to_thread(daily_backup_due)
+            if day and fails.get(day, 0) < DAILY_BACKUP_TRIES:
+                if await send_daily_backup(bot, admin_id):
+                    await asyncio.to_thread(_backup_mark, day)
                 else:
-                    cap = (f"🗓 <b>Авто-бэкап за {today} — часть {i} из {n}</b> "
-                           f"({size})\n\n"
-                           f"⚠️ Сохраните ВСЕ {n} частей — для восстановления нужны все.")
-                await bot.send_document(admin_id, FSInputFile(path),
-                                         caption=cap, parse_mode="HTML")
-            log.info("daily_backup (%d частей) отправлен админу %s", n, admin_id)
+                    fails[day] = fails.get(day, 0) + 1
+            await asyncio.to_thread(cleanup_temp, 3 * 3600)
         except Exception as e:
-            log.warning("daily_backup ошибка: %s", e)
-        # Следующий бэкап через 24 часа
-        await asyncio.sleep(24 * 3600)
+            log.warning("daily_backup loop: %s", e)
+        await asyncio.sleep(600)
+
