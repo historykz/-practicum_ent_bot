@@ -226,6 +226,8 @@ async def main() -> None:
     from handlers import announce_admin as _announce_admin, accounts_admin as _accounts_admin
     dp.include_router(_announce_admin.router)   # анонсы, шаблоны, реклама после тестов
     dp.include_router(_accounts_admin.router)   # учебные аккаунты учеников
+    from handlers import menu_admin as _menu_admin
+    dp.include_router(_menu_admin.router)       # главное меню бота: кнопки и тексты
     dp.include_router(notes_admin.router)  # конспекты и ДЗ прямо в боте
     dp.include_router(backup.router)
     dp.include_router(restore.router)

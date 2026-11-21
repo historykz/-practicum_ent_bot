@@ -2274,6 +2274,37 @@ def init_db() -> None:
                 cur.execute(_sql)
             except Exception:
                 pass
+        # v100: главное меню бота под управлением владельца и свои тексты разделов
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS menu_buttons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                builtin_key TEXT UNIQUE,
+                kind TEXT NOT NULL,
+                label_ru TEXT,
+                label_kz TEXT,
+                url TEXT,
+                body_ru TEXT,
+                body_kz TEXT,
+                photo_file_id TEXT,
+                links TEXT,
+                action TEXT,
+                full_row INTEGER DEFAULT 1,
+                enabled INTEGER DEFAULT 1,
+                sort_order INTEGER DEFAULT 0,
+                show_from TEXT,
+                show_until TEXT,
+                created_at TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_texts (
+                key TEXT NOT NULL,
+                lang TEXT NOT NULL,
+                value TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (key, lang)
+            )
+        """)
         # v98: предмет без кнопки «Начать обучение» (обучение начинается само)
         try:
             cur.execute("ALTER TABLE subjects ADD COLUMN start_auto INTEGER DEFAULT 0")
@@ -2317,6 +2348,18 @@ def init_db() -> None:
                 done_at TEXT
             )
         """)
+        # --- v101: пароль от админа (зашифрованная копия для Excel), настройки приглашений ---
+        for _sql in (
+            "ALTER TABLE users ADD COLUMN study_pw_enc TEXT",
+            "ALTER TABLE study_invites ADD COLUMN term TEXT",
+            "ALTER TABLE study_invites ADD COLUMN device_limit TEXT",
+            "ALTER TABLE study_invites ADD COLUMN pw_mode TEXT",
+            "ALTER TABLE study_invites ADD COLUMN pw_enc TEXT",
+        ):
+            try:
+                cur.execute(_sql)
+            except Exception:
+                pass
         # --- v93: кому открыто приватное интерактивное задание ---
         cur.execute("""
             CREATE TABLE IF NOT EXISTS interactive_access (

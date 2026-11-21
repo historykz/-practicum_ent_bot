@@ -110,6 +110,8 @@ def _user_sync(tg_id: int) -> dict:
             "all_subjects": [dict(r) for r in db.fetchall("SELECT id, title FROM subjects ORDER BY sort_order, id")],
             "is_owner_row": utils.is_owner(tg_id), "wm_modes": _sa().WM_MODES,
             "premium_choices": _sa().PREMIUM_CHOICES, "my_classes": _sa().my_classes(tg_id),
+            "study": _sa().card(u) if u.get("study_account") else None, "pw_modes": _sa().PW_MODES,
+            "device_choices": _sa().DEVICE_CHOICES, "local_date": _sa().local_date,
             "dev_sessions": _dev().sessions(tg_id), "dev_journal": _dev().journal(tg_id),
             "dev_limit": _dev().user_limit(tg_id), "dev_cfg": _dev().settings(),
             "act": _act().summary(tg_id), "act_timeline": _act().timeline(tg_id, 80)}
@@ -215,10 +217,80 @@ def _user_action_sync(actor: int, tg_id: int, post, notify: list = None) -> str:
         note = f"задание {tid}"
         msg = "Приватный интерактив снят."
     elif action == "study_create":
-        info = _sa().create(u, [_int(x) for x in post.getall("subjects", []) if str(x).isdigit()],
-                            post.get("premium") or "none", post.get("wm") or "on", actor, "site")
+        sa = _sa()
+        premium = post.get("premium") or "none"
+        if str(post.get("premium_text") or "").strip():
+            premium = sa.parse_term(str(post.get("premium_text")))
+            if not premium:
+                return "!Не понял срок Premium. Примеры: 45, 3 месяца, до 01.09.2027, бессрочно, нет."
+        term = None
+        if str(post.get("term") or "").strip():
+            term = sa.parse_term(str(post.get("term")), allow_none=False)
+            if not term:
+                return "!Не понял срок доступа к предметам. Примеры: 45, 3 месяца, до 01.09.2027, бессрочно."
+            term = None if term == "0" else term
+        devices = str(post.get("devices") or "").strip()
+        if devices and sa.parse_device_limit(devices) is None:
+            return "!Лимит устройств: число от 1 до 50, «без лимита» или пусто."
+        pw_mode = post.get("pw_mode") if post.get("pw_mode") in sa.PW_MODES else "auto"
+        password = str(post.get("password") or "")
+        if pw_mode == "manual":
+            problem = sa.password_problem(password)
+            if problem:
+                return "!" + problem
+        info = sa.create(u, [_int(x) for x in post.getall("subjects", []) if str(x).isdigit()],
+                         premium, post.get("wm") or "on", actor, "site", term=term,
+                         devices=sa.parse_device_limit(devices) if devices else None, pw_mode=pw_mode, password=password)
         notify.append((u["tg_id"], info))
-        return f"Учебный аккаунт готов. Логин: {info['login']}. Ученику отправлено сообщение с кнопкой для пароля."
+        return (f"Учебный аккаунт готов. Логин: {info['login']}. "
+                + ("Пароль показан ниже и есть в Excel; ученику отправлено сообщение с логином и паролем."
+                   if info.get("password") else "Ученику отправлено сообщение с кнопкой для пароля."))
+    elif action == "study_pw_new":
+        if not u.get("study_account"):
+            return "!Сначала создайте учебный аккаунт."
+        _sa().set_admin_password(u, "", actor, "site")
+        return "Новый пароль создан: он показан ниже в «Учебный аккаунт» и есть в Excel. Прежний больше не действует."
+    elif action == "study_pw_set":
+        if not u.get("study_account"):
+            return "!Сначала создайте учебный аккаунт."
+        password = str(post.get("password") or "")
+        problem = _sa().password_problem(password)
+        if problem:
+            return "!" + problem
+        _sa().set_admin_password(u, password, actor, "site")
+        return "Пароль изменён. Прежний пароль и входы на сайте больше не действуют."
+    elif action == "study_pw_send":
+        pw = _sa().admin_password(u)
+        if not pw:
+            return "!Пароль, выданный админом, уже сменил ученик. Создайте новый."
+        notify.append((u["tg_id"], {"login": u.get("study_login") or "", "password": pw, "token": None,
+                                    "subjects": [c["title"] for c in _sa().my_classes(u["tg_id"])]}))
+        _sa()._audit(actor, "site", "settings", u, "пароль отправлен ученику")
+        return "Логин и пароль отправлены ученику в бота."
+    elif action == "study_term":
+        term = _sa().parse_term(str(post.get("term") or ""), allow_none=False)
+        if not term:
+            return "!Не понял срок. Примеры: 45, 3 месяца, 1 год, до 01.09.2027, бессрочно."
+        n = _sa().set_term(u, term, actor, "site")
+        return f"Срок доступа к предметам ({n}): {_sa().term_label(term)}."
+    elif action == "premium_term":
+        term = _sa().parse_term(str(post.get("term") or ""))
+        if not term:
+            return "!Не понял срок Premium. Примеры: 45, 3 месяца, до 01.09.2027, бессрочно, нет."
+        if term == "none":
+            if not utils.get_premium_info(u["id"]):
+                return "Premium и так нет."
+            tr.trash_premium(u["id"], actor, "site")
+            return tr.MOVED_MSG
+        label = _sa().apply_premium(u, term, actor)
+        note = label
+        msg = f"Premium: {label}."
+    elif action == "study_delete":
+        if not u.get("study_account"):
+            return "!Учебного аккаунта уже нет."
+        item = _sa().delete_account(u, actor, "site", post.get("with_premium") == "1")
+        return ("Учебный аккаунт удалён в корзину: логин, пароль и предметы. Пользователь, баллы и прогресс остались. "
+                "Вернуть можно в «Корзине».") if item else "!Нечего удалять."
     elif action == "study_subjects":
         _sa().set_subjects(u, [_int(x) for x in post.getall("subjects", []) if str(x).isdigit()], actor, "site")
         return "Предметы в «Моих классах» обновлены."
@@ -489,7 +561,44 @@ async def bot_settings_save(request: web.Request) -> web.Response:
 
 def _broadcast_sync() -> dict:
     from services import broadcast_service as bs
-    return {"aud": bs.audience(), "recent": bs.recent(15), "active": bs.active()}
+    return {"aud": bs.audience(), "recent": bs.recent(15), "active": bs.active(), "ex": bs.exclude_view()}
+
+
+def _broadcast_exclude_sync(actor: int, post) -> str:
+    from services import broadcast_service as bs
+    what = post.get("what")
+    if what == "premium":
+        on = post.get("on") == "1"
+        bs.set_skip_premium(on)
+        details = "Premium: " + ("не отправлять" if on else "отправлять")
+        msg = "Premium-пользователям рассылка не придёт." if on else "Premium-пользователи снова получают рассылку."
+    elif what == "add":
+        added, had, bad = bs.add_excludes(str(post.get("idents") or ""))
+        if not added and not had:
+            return "!Не нашёл ни одного @username или ID. Пример: @ivan, 123456789"
+        details = "добавлены: " + ", ".join(added)
+        msg = f"Добавлено: {len(added)}" + (f", уже были: {len(had)}" if had else "") + (f". Не понял: {', '.join(bad)}" if bad else "") + "."
+    elif what == "remove":
+        removed = bs.remove_excludes(str(post.get("idents") or ""))
+        details = "убраны: " + ", ".join(removed)
+        msg = f"Убрано из списка: {len(removed)}."
+    elif what == "clear":
+        n = bs.clear_excludes()
+        details = f"список очищен ({n})"
+        msg = f"Список очищен: {n}."
+    else:
+        raise web.HTTPBadRequest(text="Неизвестное действие")
+    tr.audit(actor, "", "site", "settings", "", "Рассылка: кому не отправлять", None, details[:300])
+    return msg
+
+
+async def broadcast_exclude(request: web.Request) -> web.Response:
+    actor = await learning._require_owner(request)
+    post = await request.post()
+    msg = await asyncio.to_thread(_broadcast_exclude_sync, actor, post)
+    if msg.startswith("!"):
+        raise _go("/admin/broadcast", error=msg[1:])
+    raise _go("/admin/broadcast", message=msg)
 
 
 async def broadcast_page(request: web.Request) -> web.Response:
@@ -562,6 +671,18 @@ def _csv(head: list, rows) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
+async def export_accounts(request: web.Request) -> web.Response:
+    """Excel со всеми учебными аккаунтами: логины и пароли, выданные админом."""
+    actor = await learning._require_owner(request)
+    sa = _sa()
+    data = await asyncio.to_thread(sa.export_xlsx)
+    await asyncio.to_thread(tr.audit, actor, "", "site", "export", "", "Excel со списком аккаунтов")
+    return web.Response(body=data, headers={
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": f'attachment; filename="{sa.export_name()}"',
+        "Cache-Control": "no-store"})
+
+
 async def export_file(request: web.Request) -> web.Response:
     actor = await learning._require_owner(request)
     what = request.match_info["what"]
@@ -592,3 +713,5 @@ def register_routes(app: web.Application) -> None:
     r.add_get("/admin/broadcast", broadcast_page)
     r.add_post("/admin/broadcast/send", broadcast_send)
     r.add_get("/admin/export/{what}.csv", export_file)
+    r.add_get("/admin/export/accounts.xlsx", export_accounts)
+    r.add_post("/admin/broadcast/exclude", broadcast_exclude)

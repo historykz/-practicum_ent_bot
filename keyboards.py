@@ -21,7 +21,19 @@ def language_kb() -> InlineKeyboardMarkup:
 
 
 def main_menu_kb(lang: str, is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню пользователя."""
+    """Главное меню пользователя. Кнопки настраивает владелец (services/main_menu.py);
+    если настройки недоступны, меню собирается по-старому."""
+    try:
+        from services import main_menu as _mm
+        return _mm.keyboard(lang, is_admin)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("главное меню из настроек: %s", e)
+    return _default_main_menu_kb(lang, is_admin)
+
+
+def _default_main_menu_kb(lang: str, is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Прежнее меню — запасной вариант."""
     kb = InlineKeyboardBuilder()
     # 🔥 Заметные кнопки — каждая на всю ширину, вверху
     kb.row(InlineKeyboardButton(
@@ -415,6 +427,7 @@ def admin_menu_kb(lang: str, tg_id: int = None) -> InlineKeyboardMarkup:
         kb.button(text="🗑 Корзина", callback_data="adm:trash")
         kb.button(text="📢 Анонсы и автотесты", callback_data="ann:menu")
         kb.button(text="👤 Аккаунты", callback_data="acc:menu")
+        kb.button(text="🏠 Главное меню бота", callback_data="mmadm:menu")
 
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(2)

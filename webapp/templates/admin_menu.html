@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block title %}Главное меню бота — Smart ENT{% endblock %}
+{% block page_title %}Главное меню бота{% endblock %}
+{% block content %}
+<nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><span class="crumb-current">🏠 Главное меню бота</span></nav>
+<h1>🏠 Главное меню бота</h1>
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<p class="muted">Кнопки, которые ученик видит в боте после /start. Добавляйте свои («Купить курсы ЕНТ», канал, менеджер),
+  переименовывайте, выключайте, меняйте порядок и показывайте на время. Изменения сразу видны в боте.
+  То же самое есть в боте: «Админка» → «🏠 Главное меню бота». Кнопка «🛠 Admin» всегда последняя и видна только админам.</p>
+<style>
+  .mm-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
+  @media (max-width: 860px) { .mm-wrap { grid-template-columns: minmax(0, 1fr); } .mm-phone { order: -1; position: static; } }
+  .mm-phone { position: sticky; top: 12px; border: 1px solid var(--border); border-radius: 18px; padding: 12px; background: var(--card, transparent); }
+  .mm-phone h3 { margin: 0 0 8px; font-size: 1rem; }
+  .mm-msg { border-radius: 12px; padding: 10px 12px; background: rgba(127,127,127,.12); font-size: .9rem; white-space: pre-wrap; margin-bottom: 6px; max-height: 220px; overflow: auto; }
+  .mm-row { display: flex; gap: 4px; margin-top: 4px; }
+  .mm-key { flex: 1 1 0; min-width: 0; text-align: center; padding: 8px 6px; border-radius: 8px; background: rgba(127,127,127,.18);
+            font-size: .82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mm-key.url::after { content: " ↗"; opacity: .6; }
+  .mm-item { border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; margin-bottom: 8px; }
+  .mm-item.off { opacity: .62; }
+  .mm-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .mm-head b { font-size: 1rem; overflow-wrap: anywhere; }
+  .mm-tag { font-size: .78rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; }
+  .mm-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .mm-actions form { margin: 0; }
+  .mm-item details { margin-top: 8px; }
+  .mm-item summary { cursor: pointer; font-weight: 600; }
+  .mm-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  @media (max-width: 560px) { .mm-grid2 { grid-template-columns: 1fr; } }
+  .mm-form textarea { min-height: 110px; }
+  .mm-hint { font-size: .82rem; color: var(--muted); margin: 2px 0 8px; }
+  .mm-kind-only { display: none; }
+</style>
+
+<div class="mm-wrap">
+<div>
+<h2>Кнопки</h2>
+{% for b in buttons %}
+<div class="mm-item{% if not b.live %} off{% endif %}" id="b{{ b.id }}">
+  <div class="mm-head">
+    <b>{{ b.title }}</b>
+    <span class="mm-tag">{{ b.kind_text }}</span>
+    <span class="mm-tag">{{ b.status_text }}</span>
+    <span class="mm-tag">{% if b.full_row %}на всю ширину{% else %}пополам{% endif %}</span>
+  </div>
+  <div class="mm-actions">
+    <form method="post" action="/admin/menu/{{ b.id }}/action"><button class="btn btn-small" name="what" value="up" title="Выше" {% if loop.first %}disabled{% endif %}>⬆️ Выше</button></form>
+    <form method="post" action="/admin/menu/{{ b.id }}/action"><button class="btn btn-small" name="what" value="down" title="Ниже" {% if loop.last %}disabled{% endif %}>⬇️ Ниже</button></form>
+    <form method="post" action="/admin/menu/{{ b.id }}/action"><button class="btn btn-small" name="what" value="toggle">{% if b.enabled %}⏸ Выключить{% else %}▶️ Включить{% endif %}</button></form>
+    {% if b.kind != 'builtin' %}
+    <form method="post" action="/admin/menu/{{ b.id }}/action" onsubmit="return confirm('Переместить кнопку в корзину? Вернуть можно в течение 48 часов.');">
+      <button class="btn btn-small btn-danger" name="what" value="delete">🗑 Удалить</button></form>
+    {% endif %}
+  </div>
+  <details>
+    <summary>✏️ Изменить</summary>
+    <form method="post" action="/admin/menu/{{ b.id }}" class="admin-form mm-form">
+      <div class="mm-grid2">
+        <div><label>Надпись на кнопке</label>
+          <input type="text" name="label_ru" maxlength="64" value="{{ b.label_ru or b.builtin_title }}" {% if b.kind != 'builtin' %}required{% endif %}></div>
+        <div><label>По-казахски (пусто — как по-русски)</label>
+          <input type="text" name="label_kz" maxlength="64" value="{{ b.label_kz or '' }}"></div>
+      </div>
+      {% if b.kind == 'builtin' %}<p class="mm-hint">Встроенная кнопка: открывает «{{ actions.get(b.action, b.action) }}». Её можно выключить, но не удалить.</p>{% endif %}
+      {% if b.kind in ('link', 'webapp') %}
+        <label>{% if b.kind == 'link' %}Ссылка (https://… или @имя){% else %}Страница мини-приложения (/learn/5 или https://…){% endif %}</label>
+        <input type="text" name="url" value="{{ b.url or '' }}" required>
+      {% endif %}
+      {% if b.kind == 'action' %}
+        <label>Какой раздел бота открывает</label>
+        <select name="action">{% for k, v in actions.items() %}<option value="{{ k }}"{% if k == b.action %} selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+      {% endif %}
+      {% if b.kind == 'text' %}
+        <label>Текст раздела</label>
+        <textarea name="body_ru" maxlength="4000">{{ b.body_ru or '' }}</textarea>
+        <p class="mm-hint">Можно &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;a href="https://…"&gt;ссылка&lt;/a&gt;. Premium-эмодзи проще прислать в боте.</p>
+        <label>Текст по-казахски (пусто — как по-русски)</label>
+        <textarea name="body_kz" maxlength="4000">{{ b.body_kz or '' }}</textarea>
+        <label>Кнопки под текстом, каждая с новой строки</label>
+        <textarea name="links" maxlength="2000" placeholder="Купить курс | https://t.me/manager&#10;Наш канал | @smart_ent" style="min-height:70px">{{ b.links or '' }}</textarea>
+        <label>Картинка сверху (ссылка https://… на картинку; или пришлите картинку в боте)</label>
+        <input type="text" name="photo_url" value="{% if b.photo_is_url %}{{ b.photo_file_id }}{% endif %}" placeholder="{% if b.photo_file_id and not b.photo_is_url %}Картинка загружена в боте{% else %}https://…/banner.jpg{% endif %}">
+        {% if b.photo_file_id %}<label class="admin-checkbox"><input type="checkbox" name="photo_clear" value="1"> Убрать картинку</label>{% endif %}
+      {% endif %}
+      <div class="mm-grid2">
+        <div><label>Показывать с (время Астаны)</label><input type="datetime-local" name="show_from" value="{{ b.from_input }}"></div>
+        <div><label>Показывать до (пусто — бессрочно)</label><input type="datetime-local" name="show_until" value="{{ b.until_input }}"></div>
+      </div>
+      <label class="admin-checkbox"><input type="checkbox" name="full_row" value="1" {% if b.full_row %}checked{% endif %}> На всю ширину (иначе по две в ряд)</label>
+      <label class="admin-checkbox"><input type="checkbox" name="enabled" value="1" {% if b.enabled %}checked{% endif %}> Включена</label>
+      <button class="btn btn-primary" type="submit">Сохранить</button>
+    </form>
+  </details>
+</div>
+{% endfor %}
+
+<h2 id="new">➕ Добавить кнопку</h2>
+<section class="admin-card">
+  <form method="post" action="/admin/menu/new" class="admin-form mm-form" id="mm-new">
+    <label>Что делает кнопка</label>
+    <select name="kind" id="mm-kind">
+      <option value="text">📝 Открывает раздел со своим текстом</option>
+      <option value="link">🔗 Открывает ссылку (канал, менеджер, сайт)</option>
+      <option value="webapp">📱 Открывает страницу мини-приложения</option>
+      <option value="action">🔀 Открывает готовый раздел бота</option>
+    </select>
+    <div class="mm-grid2">
+      <div><label>Надпись на кнопке</label><input type="text" name="label_ru" maxlength="64" required placeholder="🎓 Купить курсы ЕНТ"></div>
+      <div><label>По-казахски (необязательно)</label><input type="text" name="label_kz" maxlength="64" placeholder="🎓 ҰБТ курстарын сатып алу"></div>
+    </div>
+    <div class="mm-kind-only" data-kinds="link webapp">
+      <label>Ссылка</label><input type="text" name="url" placeholder="https://t.me/manager, @manager или /learn/5">
+    </div>
+    <div class="mm-kind-only" data-kinds="action">
+      <label>Раздел бота</label>
+      <select name="action">{% for k, v in actions.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+    </div>
+    <div class="mm-kind-only" data-kinds="text">
+      <label>Текст раздела</label>
+      <textarea name="body_ru" maxlength="4000" placeholder="&lt;b&gt;Курсы ЕНТ&lt;/b&gt;&#10;Что входит, цена, как оплатить…"></textarea>
+      <label>Кнопки под текстом, каждая с новой строки</label>
+      <textarea name="links" maxlength="2000" style="min-height:70px" placeholder="Купить курс | https://t.me/manager"></textarea>
+      <label>Картинка сверху (ссылка https://…, необязательно)</label><input type="text" name="photo_url" placeholder="https://…/banner.jpg">
+    </div>
+    <div class="mm-grid2">
+      <div><label>Показывать с (пусто — сразу)</label><input type="datetime-local" name="show_from"></div>
+      <div><label>Показывать до (пусто — бессрочно)</label><input type="datetime-local" name="show_until"></div>
+    </div>
+    <label class="admin-checkbox"><input type="checkbox" name="full_row" value="1" checked> На всю ширину</label>
+    <button class="btn btn-primary" type="submit">➕ Добавить</button>
+  </form>
+</section>
+
+<h2 id="texts">📝 Тексты меню и разделов</h2>
+<p class="muted">Пусто или как было — вернётся прежний текст. Тексты «Конспекты ЕНТ» правятся в «Тексты и автонапоминания» в боте, текст Премиума — в «Премиум».</p>
+{% for tx in texts %}
+<section class="admin-card">
+  <h3 style="margin-top:0;">{{ tx.title }} <span class="muted">· {% if tx.ru %}свой текст{% else %}как было{% endif %}</span></h3>
+  <form method="post" action="/admin/menu/texts" class="admin-form mm-form">
+    <input type="hidden" name="key" value="{{ tx.key }}">
+    <label>По-русски</label>
+    <textarea name="ru" maxlength="{{ 1000 if tx.key == 'support_text' else 4000 }}">{{ tx.ru or tx.def_ru }}</textarea>
+    {% if tx.kz is not none %}
+    <label>По-казахски</label>
+    <textarea name="kz" maxlength="4000">{{ tx.kz or tx.def_kz }}</textarea>
+    {% else %}<p class="mm-hint">Текст техподдержки один для обоих языков.</p>{% endif %}
+    {% if tx.key != 'main_menu' %}<p class="mm-hint">{manager} подставит ник менеджера.</p>{% endif %}
+    <button class="btn btn-primary" type="submit">Сохранить</button>
+  </form>
+</section>
+{% endfor %}
+
+<section class="admin-card">
+  <h3 style="margin-top:0;">↩️ Вернуть встроенные кнопки как было</h3>
+  <p class="muted">Надписи, порядок и видимость восьми встроенных кнопок станут прежними. Ваши кнопки и тексты останутся.</p>
+  <form method="post" action="/admin/menu/reset" onsubmit="return confirm('Вернуть встроенные кнопки как было?');">
+    <button class="btn" type="submit">↩️ Вернуть</button></form>
+</section>
+</div>
+
+<aside class="mm-phone">
+  <h3>👁 Так видят ученики сейчас</h3>
+  <div class="mm-msg">{{ menu_preview_text }}</div>
+  {% for row in preview %}
+  <div class="mm-row">{% for k in row %}<div class="mm-key {{ k.kind }}" title="{{ k.text }}">{{ k.text }}</div>{% endfor %}</div>
+  {% endfor %}
+  <p class="mm-hint" style="margin-top:8px;">Выключенные и кнопки вне дат показа здесь не видны. Админам ниже ещё «🛠 Admin».</p>
+</aside>
+</div>
+
+<script>
+(function () {
+  var sel = document.getElementById('mm-kind');
+  if (!sel) return;
+  function sync() {
+    document.querySelectorAll('#mm-new .mm-kind-only').forEach(function (el) {
+      el.style.display = (' ' + el.dataset.kinds + ' ').indexOf(' ' + sel.value + ' ') >= 0 ? 'block' : 'none';
+    });
+  }
+  sel.addEventListener('change', sync); sync();
+})();
+</script>
+{% endblock %}

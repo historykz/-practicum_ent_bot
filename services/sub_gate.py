@@ -53,7 +53,14 @@ DEFAULTS = {
     # пройденным. Раньше такой канал молча пропускался — и писать мог любой.
     "gate_strict": 1,
     "gate_debug_log": 1,             # журнал решения по каждому сообщению
+    # Кого бот не проверяет. Админы бота (в том числе оба аккаунта владельца) и админы
+    # группы пишут без подписки — так было с v81. Владелец может включить проверку и для них.
+    "gate_check_bot_admins": 0,
+    "gate_check_group_admins": 0,
+    # «🧪 Проверить на себе»: до этого момента (секунды Unix) админов бота проверяем как всех
+    "gate_selftest_until": 0,
 }
+SELFTEST_MIN = 30
 SETTING_TITLES = {
     "gate_ok_ttl_sec": ("Переспрашивать Telegram о подписке не реже чем раз в", "с"),
     "gate_notice_ttl_min": ("Уведомление висит в группе", "мин"),
@@ -62,6 +69,8 @@ SETTING_TITLES = {
     "gate_recheck_min": ("Перепроверять ограниченных каждые", "мин"),
     "gate_strict": ("Если канал нельзя проверить", ""),
     "gate_debug_log": ("Журнал проверки каждого сообщения", ""),
+    "gate_check_bot_admins": ("Админов бота (и ваши аккаунты)", ""),
+    "gate_check_group_admins": ("Админов группы", ""),
 }
 SETTING_CHOICES = {
     "gate_ok_ttl_sec": [15, 30, 60, 120, 300],
@@ -71,10 +80,14 @@ SETTING_CHOICES = {
     "gate_recheck_min": [5, 10, 30, 60],
     "gate_strict": [1, 0],
     "gate_debug_log": [1, 0],
+    "gate_check_bot_admins": [0, 1],
+    "gate_check_group_admins": [0, 1],
 }
 BOOL_LABELS = {
     "gate_strict": {1: "⛔ не пускать (строго)", 0: "⚠️ пропускать"},
     "gate_debug_log": {1: "вести", 0: "не вести"},
+    "gate_check_bot_admins": {0: "не проверять", 1: "проверять как всех"},
+    "gate_check_group_admins": {0: "не проверять", 1: "проверять как всех"},
 }
 _settings_cache = {"at": 0.0, "values": {}}
 
@@ -108,6 +121,20 @@ def set_setting(key: str, value: int) -> None:
     db.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(int(value))))
     _settings_cache["at"] = 0.0
+
+
+def selftest_left() -> int:
+    """Сколько секунд ещё идёт «🧪 Проверить на себе» (0 — выключено)."""
+    return max(0, int(setting("gate_selftest_until")) - int(time.time()))
+
+
+def set_selftest(on: bool) -> None:
+    set_setting("gate_selftest_until", int(time.time()) + SELFTEST_MIN * 60 if on else 0)
+    invalidate()
+
+
+def bot_admins_checked() -> bool:
+    return bool(setting("gate_check_bot_admins")) or selftest_left() > 0
 
 
 # ───────────────────────── время ─────────────────────────
@@ -884,7 +911,11 @@ async def exempt_reason(bot, snap: dict, chat_id: int, user) -> str:
     if uid in snap["exempt"]:
         return "в исключениях"
     if uid in snap["admins"]:
+        if bot_admins_checked():
+            return ""          # «проверить на себе» или настройка: проверяем как всех, даже админа группы
         return "админ бота"
+    if setting("gate_check_group_admins"):
+        return ""
     admins = await group_admins(bot, chat_id)
     if admins is None:
         # Список админов не получили — спрашиваем про этого человека напрямую
@@ -1361,6 +1392,11 @@ async def recheck_restricted(bot, limit: int = 40) -> int:
     opened = 0
     for r in rows:
         u = _U(r["tg_id"], r["username"], r["full_name"])
+        if await is_exempt(bot, snap, r["chat_id"], u):
+            # Стал исключением (закончилась «проверка на себе», добавили в исключения) — открыть
+            await grant(bot, r["chat_id"], r["tg_id"])
+            opened += 1
+            continue
         verdict = await evaluate(bot, r["chat_id"], u, force=True)
         if verdict["ok"]:
             await grant(bot, r["chat_id"], r["tg_id"])
@@ -1445,6 +1481,7 @@ async def diagnose(bot, probe_user_id: int = None) -> str:
     lines.append("Режим: " + ("⛔ строгий — если канал нельзя проверить, сообщения участников удаляются"
                                if strict else "⚠️ «пропускать» — канал, который нельзя проверить, писать не мешает"))
     lines.append(f"Подписку переспрашиваем у Telegram не реже чем раз в {setting('gate_ok_ttl_sec')} с.")
+    lines.append(not_checked_text())
     try:
         me = await _call(bot.get_me())
         lines.append(f"Бот: @{_h(me.username or '')}")
@@ -1519,6 +1556,23 @@ async def diagnose(bot, probe_user_id: int = None) -> str:
     return "\n".join(lines)[:4000]
 
 
+def not_checked_text() -> str:
+    """Кого бот не проверяет — чтобы проверка со своего аккаунта не вводила в заблуждение."""
+    left = selftest_left()
+    if left:
+        return (f"🧪 Идёт «Проверить на себе»: ещё {left // 60 + 1} мин админов бота, в том числе ваши аккаунты, "
+                "бот проверяет как обычных участников.")
+    who = []
+    if not setting("gate_check_bot_admins"):
+        who.append("админов бота (в том числе ваши аккаунты)")
+    if not setting("gate_check_group_admins"):
+        who.append("админов группы")
+    if not who:
+        return "Админов бота и группы бот проверяет как всех."
+    return ("ℹ️ Бот не проверяет " + " и ".join(who) + ". Проверка со своего аккаунта ничего не покажет: "
+            "нажмите «🧪 Проверить на себе» или проверяйте с аккаунта обычного ученика.")
+
+
 async def periodic_health(bot) -> None:
     """Раз в полчаса: права бота в группах и в каналах. Сломалось — админ узнаёт сразу."""
     snap = await asnapshot()
@@ -1564,6 +1618,7 @@ async def loop(bot) -> None:
     last_release = 0.0
     last_health = time.monotonic() - 1800 + 60          # первая проверка прав — через минуту после запуска
     last_trim = 0.0
+    selftest_was = False
     try:
         await asyncio.to_thread(_resolve_moved_groups)
     except Exception as e:
@@ -1573,6 +1628,10 @@ async def loop(bot) -> None:
         try:
             await cleanup_notices(bot)
             now = time.monotonic()
+            st_now = selftest_left() > 0
+            if selftest_was and not st_now:
+                await recheck_restricted(bot, 200)     # «проверка на себе» кончилась: открыть админов
+            selftest_was = st_now
             if now - last_release >= 60:
                 last_release = now
                 await release_disabled(bot)

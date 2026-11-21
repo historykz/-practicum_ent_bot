@@ -785,6 +785,9 @@ TEXTS: dict[str, dict[str, str]] = {
 }
 
 
+_EDITABLE = ("main_menu", "help_text")
+
+
 def t(key: str, lang: str = DEFAULT_LANG, **kwargs: Any) -> str:
     """
     Получить локализованный текст по ключу.
@@ -797,10 +800,17 @@ def t(key: str, lang: str = DEFAULT_LANG, **kwargs: Any) -> str:
     if not entry:
         return f"[{key}]"
     text = entry.get(lang) or entry.get(DEFAULT_LANG) or f"[{key}]"
+    if key in _EDITABLE:
+        # Текст, который владелец поменял в «Главном меню бота» (services/main_menu.py)
+        try:
+            from services import main_menu as _mm
+            text = _mm.text_override(key, lang) or text
+        except Exception:
+            pass
     if kwargs:
         try:
             text = text.format(**kwargs)
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, ValueError):
             pass
     return text
 

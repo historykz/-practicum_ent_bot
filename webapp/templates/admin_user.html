@@ -29,18 +29,31 @@
   <h2>🎓 Учебный аккаунт</h2>
   {% if u.study_account %}
   <p>Логин: <b>{{ u.study_login }}</b> · {{ '✅ активен' if (u.study_status or 'active') == 'active' else '⛔ отключён' }}</p>
-  <p class="muted">«Мои классы»: {% for c in my_classes %}{{ c.title }}{% if not loop.last %}, {% endif %}{% else %}нет{% endfor %}</p>
+  <p>🔑 Пароль: {% if study and study.admin_pw %}<details style="display:inline-block;"><summary>показать (выдал админ)</summary><code id="study-pw">{{ study.admin_pw }}</code></details>{% else %}<span class="muted">{{ study.pw_state if study else '' }}</span>{% endif %}</p>
+  <p class="muted">«Мои классы»: {% for c in my_classes %}{{ c.title }} ({{ 'бессрочно' if not c.expires_at else 'до ' ~ local_date(c.expires_at) }}){% if not loop.last %}, {% endif %}{% else %}нет{% endfor %}</p>
   {% call act('study_subjects') %}<div class="perm-grid">{% for s in all_subjects %}<label class="admin-checkbox"><input type="checkbox" name="subjects" value="{{ s.id }}"{% for c in my_classes %}{% if c.id == s.id %} checked{% endif %}{% endfor %}> {{ s.title }}</label>{% endfor %}</div><button class="btn" type="submit">Сохранить предметы</button>{% endcall %}
-  {% call act('study_link') %}<button class="btn" type="submit">🔑 Выслать новую ссылку для пароля</button>{% endcall %}
+  {% call act('study_term') %}<label for="st-term">Срок доступа ко всем предметам</label><input id="st-term" type="text" name="term" placeholder="45, 3 месяца, до 01.09.2027, бессрочно" required style="width:260px;"><button class="btn btn-small" type="submit">Сохранить срок</button>{% endcall %}
+  <div style="margin:6px 0;">
+  {% call act('study_pw_new') %}<button class="btn" type="submit" onclick="return confirm('Создать новый пароль? Прежний перестанет работать.');">🎲 Новый пароль</button>{% endcall %}
+  {% call act('study_pw_set') %}<input type="text" name="password" placeholder="пароль вручную" autocomplete="off" minlength="8" maxlength="64" required aria-label="Новый пароль вручную" style="width:180px;"><button class="btn" type="submit">✍️ Задать пароль</button>{% endcall %}
+  {% if study and study.admin_pw %}{% call act('study_pw_send') %}<button class="btn" type="submit">✉️ Отправить логин и пароль ученику</button>{% endcall %}{% endif %}
+  {% call act('study_link') %}<button class="btn" type="submit">🔗 Ссылка ученику (задаст пароль сам)</button>{% endcall %}
+  </div>
   {% call act('study_status') %}<input type="hidden" name="on" value="{{ '0' if (u.study_status or 'active') == 'active' else '1' }}"><button class="btn {{ 'btn-danger' if (u.study_status or 'active') == 'active' else '' }}" type="submit">{{ '⛔ Отключить аккаунт' if (u.study_status or 'active') == 'active' else '✅ Включить аккаунт' }}</button>{% endcall %}
+  {% call act('study_delete') %}{% if premium %}<label class="admin-checkbox"><input type="checkbox" name="with_premium" value="1"> вместе с Premium</label>{% endif %}<button class="btn btn-danger" type="submit" onclick="return confirm('Удалить учебный аккаунт в корзину? Уйдут логин, пароль и предметы. Баллы и прогресс останутся. Вернуть можно из корзины.');">🗑 Удалить аккаунт</button>{% endcall %}
   {% else %}
-  <p class="muted">Сейчас это обычный пользователь бота: логина и пароля для сайта у него нет. После создания ему придёт личное сообщение с логином и кнопкой для пароля.</p>
+  <p class="muted">Сейчас это обычный пользователь бота: логина и пароля для сайта у него нет. После создания ему придёт личное сообщение с логином и паролем.</p>
   <form method="post" action="/admin/users/{{ u.tg_id }}/action" class="admin-form">
     <input type="hidden" name="action" value="study_create">
     <label>Предметы для «Моих классов»</label>
     <div class="perm-grid">{% for s in all_subjects %}<label class="admin-checkbox"><input type="checkbox" name="subjects" value="{{ s.id }}"> {{ s.title }}</label>{% endfor %}</div>
+    <label for="sc-term">Срок доступа к предметам (пусто — бессрочно)</label><input id="sc-term" type="text" name="term" placeholder="45, 3 месяца, до 01.09.2027, бессрочно">
     <label>Premium</label><select name="premium">{% for k, v in premium_choices.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+    <input type="text" name="premium_text" placeholder="или срок Premium вручную: 45, до 01.09.2027, бессрочно" aria-label="Срок Premium вручную">
     <label>Водяные знаки</label><select name="wm">{% for k, v in wm_modes.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+    <label for="sc-dev">Лимит устройств (пусто — как у всех, 0 — без ограничения)</label><input id="sc-dev" type="text" name="devices" placeholder="2" style="width:90px;">
+    <label>Пароль</label><select name="pw_mode">{% for k, v in pw_modes.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+    <input type="text" name="password" placeholder="если «Написать вручную»: пароль от 8 символов" autocomplete="off" maxlength="64" aria-label="Пароль вручную">
     <button class="btn btn-primary" type="submit">➕ Создать учебный аккаунт</button>
   </form>
   {% endif %}
@@ -54,6 +67,7 @@
   <h2>💎 Premium</h2>
   <p>{% if premium %}Активен{% if premium.expires_at %} до {{ premium.expires_at[:10] }}{% else %}, бессрочно{% endif %}.{% else %}Нет.{% endif %}</p>
   {% call act('premium') %}<input type="number" name="days" min="0" max="3650" value="30" aria-label="Дней" style="width:90px;"><button class="btn" type="submit">{{ 'Продлить' if premium else 'Выдать' }} (0 = навсегда)</button>{% endcall %}
+  {% call act('premium_term') %}<input type="text" name="term" placeholder="или срок словами: 45, до 01.09.2027, бессрочно, нет" required aria-label="Срок Premium словами" style="width:300px;"><button class="btn" type="submit">Сохранить срок</button>{% endcall %}
   {% if premium %}{% call act('premium_revoke') %}<button class="btn btn-danger" type="submit" onclick="return confirm('Переместить Premium в корзину? Вы сможете восстановить его в течение 48 часов.');">Отозвать</button>{% endcall %}{% endif %}
   {% if grants %}<div class="table-scroll"><table><thead><tr><th>Когда</th><th>Источник</th><th>Дней</th><th>Сумма</th></tr></thead><tbody>{% for g in grants %}<tr><td>{{ (g.created_at or '')[:16] }}</td><td>{{ g.source }}</td><td>{{ g.days }}</td><td>{{ g.amount or '' }} {{ g.currency or '' }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
 </section>
