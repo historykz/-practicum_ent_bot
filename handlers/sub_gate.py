@@ -155,6 +155,7 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
              f"📢 Каналов для подписки: <b>{len(d['chans'])}</b> (активных {len(active)})",
              f"🙋 Исключений: <b>{d['exempt']}</b>"]
     lines.append("Режим: " + ("⛔ строгий" if sg.setting("gate_strict") else "⚠️ «пропускать» непроверяемые каналы"))
+    lines.append(sg.not_checked_text())
     if d["chans"]:
         lines.append("\n<b>Каналы</b>")
         for c in d["chans"]:
@@ -172,8 +173,11 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
     kb.button(text="🧾 Журнал проверок", callback_data="sg:log:0")
     kb.button(text="📊 Статистика", callback_data="sg:st:ov:7d:0")
     kb.button(text="⚙️ Настройки", callback_data="sg:set")
+    left = sg.selftest_left()
+    kb.button(text=(f"⏹ Закончить проверку на себе (ещё {left // 60 + 1} мин)" if left
+                    else f"🧪 Проверить на себе ({sg.SELFTEST_MIN} мин)"), callback_data="sg:self")
     kb.button(text="⬅️ Назад", callback_data="m:admin")
-    kb.adjust(1, 1, 1, 2, 2, 1)
+    kb.adjust(1, 1, 1, 2, 2, 1, 1)
     await _show(call, "\n".join(lines), kb)
     await _answer(call)
 
@@ -716,7 +720,8 @@ async def cb_exempt_del(call: CallbackQuery, state: FSMContext):
 # ───────────────────────── настройки ─────────────────────────
 
 SHORT = {"st": "gate_strict", "ok": "gate_ok_ttl_sec", "nt": "gate_notice_ttl_min", "cd": "gate_notice_cooldown_sec",
-         "sd": "gate_success_delete_sec", "rc": "gate_recheck_min", "dl": "gate_debug_log"}
+         "sd": "gate_success_delete_sec", "rc": "gate_recheck_min", "dl": "gate_debug_log",
+         "ba": "gate_check_bot_admins", "ga": "gate_check_group_admins"}
 
 
 @router.callback_query(F.data == "sg:set", IsOwner())
@@ -736,7 +741,9 @@ async def cb_settings(call: CallbackQuery):
         sizes.append(len(sg.SETTING_CHOICES[key]))
     lines.append("\n<i>Ряды кнопок — в том же порядке, что и настройки. Строгий режим: если бот не может проверить "
                  "канал (нет прав, канал удалён), сообщения участников удаляются, а не пропускаются. Подписку бот "
-                 "переспрашивает у Telegram не реже указанного; отписку от канала видит сразу, если он администратор канала.</i>")
+                 "переспрашивает у Telegram не реже указанного; отписку от канала видит сразу, если он администратор канала. "
+                 "Админов бота и админов группы по умолчанию бот не проверяет: им можно писать без подписки. "
+                 "Для проверки на себе есть кнопка «🧪 Проверить на себе» в меню подписки.</i>")
     kb.button(text="⬅️ Назад", callback_data="sg:menu")
     kb.adjust(*sizes, 1)
     await _show(call, "\n".join(lines), kb)
@@ -744,13 +751,31 @@ async def cb_settings(call: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("sg:sv:"), IsOwner())
-async def cb_setting_value(call: CallbackQuery):
+async def cb_setting_value(call: CallbackQuery, bot: Bot):
     _, _, short, value = call.data.split(":")
     key = SHORT.get(short)
     if key and int(value) in sg.SETTING_CHOICES[key]:
         await asyncio.to_thread(sg.set_setting, key, int(value))
         sg.invalidate()
+        if key in ("gate_check_bot_admins", "gate_check_group_admins") and not int(value):
+            asyncio.create_task(sg.recheck_restricted(bot, 200))   # админов снова не проверяем — открыть
     await cb_settings(call)
+
+
+@router.callback_query(F.data == "sg:self", IsOwner())
+async def cb_selftest(call: CallbackQuery, state: FSMContext, bot: Bot):
+    """«🧪 Проверить на себе»: полчаса бот проверяет админов бота (и ваши аккаунты) как обычных участников."""
+    on = sg.selftest_left() == 0
+    await asyncio.to_thread(sg.set_selftest, on)
+    if on:
+        await _answer(call, f"🧪 {sg.SELFTEST_MIN} минут бот проверяет ваши аккаунты как обычных участников. "
+                            "Отпишитесь от канала и напишите в группу: сообщение удалится, бот попросит подписаться. "
+                            "Потом всё вернётся само.", alert=True)
+    else:
+        asyncio.create_task(sg.recheck_restricted(bot, 200))         # снять ограничения с админов
+        await _answer(call, "Проверка на себе закончена: админов бота снова не проверяем, ограничения снимаются.",
+                      alert=True)
+    await cb_menu(call, state)
 
 
 # ───────────────────────── диагностика и журнал ─────────────────────────

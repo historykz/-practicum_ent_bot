@@ -607,7 +607,7 @@ async def cmd_menu(message: Message, state: FSMContext, user: dict):
 @router.message(Command("help"), F.chat.type == "private")
 async def cmd_help(message: Message, user: dict):
     lang = _resolve_lang(user)
-    await message.answer(t("help_text", lang), reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)))
+    await message.answer(t("help_text", lang, manager="@" + utils.manager_username()), reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)))
 
 
 @router.callback_query(F.data == "m:help")

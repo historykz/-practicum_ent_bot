@@ -7,7 +7,7 @@
 {% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <section class="admin-card">
-  <p>Получат сейчас: <b>{{ aud.targets }}</b> из {{ aud.all }}. Заблокированных админом: {{ aud.banned }}.</p>
+  <p>Получат сейчас: <b>{{ aud.targets }}</b> из {{ aud.all }}. Заблокированных админом: {{ aud.banned }}.{% if aud.excluded %} Не получат по настройке «Кому не отправлять»: <b>{{ aud.excluded }}</b> (<a href="#exclude">изменить</a>).{% endif %}</p>
   {% if active %}<div class="alert">Сейчас идёт рассылка №{{ active.id }}. Новую можно начать после её окончания.</div>{% else %}
   <form method="post" action="/admin/broadcast/send" class="admin-form">
     <label>Текст сообщения. Фото и кнопки пока отправляются только из бота.</label>
@@ -15,6 +15,32 @@
     <label class="admin-checkbox"><input type="checkbox" name="confirm" value="1" required> Отправить всем {{ aud.targets }} ученикам</label>
     <button class="btn btn-primary" type="submit" onclick="return confirm('Отправить сообщение всем ученикам? Это нельзя отозвать с сайта.');">Отправить</button>
   </form>{% endif %}
+</section>
+<section class="admin-card" id="exclude">
+  <h2>🔕 Кому не отправлять</h2>
+  <p class="muted">Касается только «Рассылки всем». Личные сообщения бота (коды входа, аккаунт, ответы) эти люди получают как обычно.</p>
+  <form method="post" action="/admin/broadcast/exclude" class="admin-inline" style="margin:6px 0;">
+    <input type="hidden" name="what" value="premium"><input type="hidden" name="on" value="{{ '0' if ex.premium else '1' }}">
+    <span>👑 Premium-пользователям: <b>{{ 'не отправлять' if ex.premium else 'отправлять' }}</b> (сейчас с Premium: {{ ex.premium_count }})</span>
+    <button class="btn btn-small" type="submit">{{ 'Включить отправку' if ex.premium else '🔕 Не отправлять Premium' }}</button>
+  </form>
+  <form method="post" action="/admin/broadcast/exclude" class="admin-form">
+    <input type="hidden" name="what" value="add">
+    <label for="ex-idents">Добавить в список: один или несколько @username или Telegram ID через запятую</label>
+    <textarea id="ex-idents" name="idents" rows="2" placeholder="@ivan, @aru_99, 123456789" required></textarea>
+    <button class="btn" type="submit">➕ Добавить</button>
+  </form>
+  {% if ex.items %}
+  <p><b>Список ({{ ex['items']|length }}):</b></p>
+  <div style="display:flex;flex-wrap:wrap;gap:6px;">{% for it in ex['items'] %}
+    <form method="post" action="/admin/broadcast/exclude" class="admin-inline" style="display:inline-flex;gap:4px;align-items:center;border:1px solid var(--border, #ddd);border-radius:8px;padding:2px 6px;">
+      <input type="hidden" name="what" value="remove"><input type="hidden" name="idents" value="{{ it.v }}">
+      <span>{{ it.label }}{% if not it.known %} <span class="muted">(бот пока не знает)</span>{% endif %}</span>
+      <button class="btn btn-small" type="submit" aria-label="Убрать {{ it.label }} из списка" title="Убрать из списка">✕</button>
+    </form>{% endfor %}</div>
+  <form method="post" action="/admin/broadcast/exclude" style="margin-top:8px;"><input type="hidden" name="what" value="clear">
+    <button class="btn btn-small btn-danger" type="submit" onclick="return confirm('Очистить весь список? Эти люди снова будут получать рассылку.');">🧹 Очистить список</button></form>
+  {% else %}<p class="muted">Список пуст.</p>{% endif %}
 </section>
 <section class="admin-card">
   <h2>Последние рассылки</h2>

@@ -359,6 +359,133 @@ def record_click(bid: int, idx: int, tg_id: int) -> None:
         "clicks=clicks+1, last_at=CURRENT_TIMESTAMP", (bid, idx, tg_id))
 
 
+# ───────────────────────── кому не отправлять (v101) ─────────────────────────
+# Хранится в settings: bc_skip_premium = "1" — не слать тем, у кого Premium;
+# bc_exclude — JSON-список: Telegram ID цифрами и username без @ в нижнем регистре.
+# Касается только «Рассылки всем»; личные сообщения бота (коды входа, аккаунт,
+# ответы) эти люди получают как обычно.
+
+_USERNAME_OK = re.compile(r"^[a-z0-9_]{3,32}$")
+
+
+def _setting(key: str, default: str = "") -> str:
+    r = db.fetchone("SELECT value FROM settings WHERE key=?", (key,))
+    return r["value"] if r and r["value"] is not None else default
+
+
+def _put_setting(key: str, value: str) -> None:
+    db.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def skip_premium() -> bool:
+    return _setting("bc_skip_premium", "0") == "1"
+
+
+def set_skip_premium(on: bool) -> None:
+    _put_setting("bc_skip_premium", "1" if on else "0")
+
+
+def exclude_list() -> list:
+    try:
+        items = json.loads(_setting("bc_exclude", "[]") or "[]")
+    except ValueError:
+        items = []
+    return [str(x) for x in items if str(x)]
+
+
+def _save_exclude(items: list) -> None:
+    _put_setting("bc_exclude", json.dumps(items, ensure_ascii=False))
+
+
+def parse_idents(text: str) -> tuple:
+    """«@ivan, 12345, t.me/petr» → (["ivan", "12345", "petr"], [непонятные куски])."""
+    good, bad = [], []
+    for part in re.split(r"[,;\s]+", text or ""):
+        raw = part.strip()
+        if not raw:
+            continue
+        x = raw.lower()
+        for pre in ("https://t.me/", "http://t.me/", "t.me/"):
+            if x.startswith(pre):
+                x = x[len(pre):]
+        x = x.lstrip("@").strip("/")
+        if x.isdigit() and int(x) > 0:
+            x = str(int(x))
+        elif not _USERNAME_OK.match(x):
+            bad.append(raw)
+            continue
+        if x not in good:
+            good.append(x)
+    return good, bad
+
+
+def add_excludes(text: str) -> tuple:
+    """Добавить в список «не отправлять». (добавлено, уже были, непонятные)."""
+    good, bad = parse_idents(text)
+    items = exclude_list()
+    added = [x for x in good if x not in items]
+    _save_exclude(items + added)
+    return added, [x for x in good if x not in added], bad
+
+
+def remove_excludes(text: str) -> list:
+    good, _ = parse_idents(text)
+    items = exclude_list()
+    removed = [x for x in items if x in good]
+    _save_exclude([x for x in items if x not in good])
+    return removed
+
+
+def clear_excludes() -> int:
+    n = len(exclude_list())
+    _save_exclude([])
+    return n
+
+
+def _premium_tg_ids() -> set:
+    rows = db.fetchall("SELECT u.tg_id, p.expires_at FROM premium_users p JOIN users u ON u.id=p.user_id "
+                       "WHERE u.tg_id > 0")
+    return {int(r["tg_id"]) for r in rows if utils.deadline_active(r["expires_at"])}
+
+
+def _list_tg_ids() -> set:
+    items = exclude_list()
+    ids = {int(x) for x in items if x.isdigit()}
+    names = [x for x in items if not x.isdigit()]
+    for i in range(0, len(names), 500):
+        part = names[i:i + 500]
+        for r in db.fetchall(f"SELECT tg_id FROM users WHERE tg_id > 0 AND LOWER(username) IN "
+                             f"({','.join('?' * len(part))})", part):
+            ids.add(int(r["tg_id"]))
+    return ids
+
+
+def excluded_tg_ids() -> set:
+    """Кому «Рассылку всем» не отправляем: Premium (если включено) и список."""
+    out = _list_tg_ids()
+    if skip_premium():
+        out |= _premium_tg_ids()
+    return out
+
+
+def exclude_view() -> dict:
+    """Для экранов бота и сайта: что включено и кого из списка бот знает."""
+    items = exclude_list()
+    known = set()
+    names = [x for x in items if not x.isdigit()]
+    for i in range(0, len(names), 500):
+        part = names[i:i + 500]
+        known |= {(r["u"] or "") for r in db.fetchall(
+            f"SELECT LOWER(username) AS u FROM users WHERE tg_id > 0 AND LOWER(username) IN "
+            f"({','.join('?' * len(part))})", part)}
+    for x in items:
+        if x.isdigit() and db.fetchone("SELECT 1 FROM users WHERE tg_id=?", (int(x),)):
+            known.add(x)
+    return {"premium": skip_premium(), "premium_count": len(_premium_tg_ids()),
+            "items": [{"v": x, "label": x if x.isdigit() else "@" + x, "known": x in known} for x in items]}
+
+
 def audience() -> dict:
     """Кто получит рассылку прямо сейчас."""
     ensure_schema()
@@ -367,7 +494,16 @@ def audience() -> dict:
     banned = c("SELECT COUNT(*) AS c FROM users WHERE tg_id > 0 AND COALESCE(is_blocked,0)=1")
     blocked = c("SELECT COUNT(*) AS c FROM users WHERE tg_id > 0 AND COALESCE(is_blocked,0)=0 "
                 "AND COALESCE(bot_blocked,0)=1")
-    return {"all": total, "banned": banned, "known_blocked": blocked, "targets": total - banned}
+    skip = excluded_tg_ids()
+    excluded = 0
+    if skip:
+        ids = sorted(skip)
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            excluded += (db.fetchone(f"SELECT COUNT(*) AS c FROM users WHERE tg_id > 0 AND COALESCE(is_blocked,0)=0 "
+                                     f"AND tg_id IN ({','.join('?' * len(part))})", part) or {"c": 0})["c"]
+    return {"all": total, "banned": banned, "known_blocked": blocked, "excluded": excluded,
+            "targets": total - banned - excluded}
 
 
 def active() -> Optional[dict]:
@@ -416,6 +552,12 @@ def start(bid: int) -> int:
         "INSERT OR IGNORE INTO broadcast_recipients (broadcast_id, tg_id) "
         "SELECT ?, tg_id FROM users WHERE tg_id IS NOT NULL AND tg_id > 0 "
         "AND COALESCE(is_blocked,0)=0", (bid,))
+    # v101: «кому не отправлять» — Premium (если включено) и список username/ID
+    skip = sorted(excluded_tg_ids())
+    for i in range(0, len(skip), 500):
+        part = skip[i:i + 500]
+        db.execute(f"DELETE FROM broadcast_recipients WHERE broadcast_id=? AND tg_id IN ({','.join('?' * len(part))})",
+                   [bid] + part)
     total = db.fetchone("SELECT COUNT(*) AS c FROM broadcast_recipients WHERE broadcast_id=?",
                         (bid,))["c"]
     db.execute("UPDATE broadcasts SET total=? WHERE id=?", (total, bid))

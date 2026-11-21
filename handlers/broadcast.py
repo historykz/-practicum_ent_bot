@@ -26,6 +26,8 @@ log = logging.getLogger(__name__)
 class BcStates(StatesGroup):
     waiting_message = State()
     waiting_buttons = State()
+    waiting_excl_add = State()      # v101: кому не отправлять — добавить
+    waiting_excl_del = State()      # v101: кому не отправлять — убрать
 
 
 BUTTONS_HELP = (
@@ -82,16 +84,127 @@ async def cb_home(call: CallbackQuery, state: FSMContext):
                      f"им тоже отправим: вдруг разблокировали")
     if aud["banned"]:
         lines.append(f"🚷 Забанены админом: {bs._n(aud['banned'])} — им не отправляем")
+    ex = await asyncio.to_thread(bs.exclude_view)
+    if aud.get("excluded") or ex["premium"] or ex["items"]:
+        parts = (["Premium"] if ex["premium"] else []) + ([f"список: {len(ex['items'])}"] if ex["items"] else [])
+        lines.append(f"🔕 Не получат по вашей настройке: {bs._n(aud.get('excluded') or 0)}"
+                     + (f" ({', '.join(parts)})" if parts else ""))
     lines.append("\nЛюбое сообщение: текст, фото, видео, файл, голосовое, кружок, GIF, "
                  "опрос — с форматированием и кнопками. Можно переслать пост из канала. "
                  "После отправки — статистика и удаление у всех (в течение 48 часов).")
-    buttons = [("✉️ Новая рассылка", "bc:new"), ("📜 История рассылок", "bc:list")]
+    buttons = [("✉️ Новая рассылка", "bc:new"), ("📜 История рассылок", "bc:list"),
+               ("🔕 Кому не отправлять", "bc:ex")]
     if act:
         lines.append(f"\n⏳ Сейчас идёт рассылка №{act['id']}.")
         buttons.insert(0, (f"📊 Рассылка №{act['id']} — прогресс", f"bc:st:{act['id']}"))
     buttons.append(("↩️ В админку", "m:admin"))
     await _show(call, "\n".join(lines), _kb(*buttons))
     await call.answer()
+
+
+# ───────────────────────── кому не отправлять (v101) ─────────────────────────
+
+def _excl_screen(ex: dict, aud: dict) -> tuple:
+    lines = ["🔕 <b>Кому не отправлять «Рассылку всем»</b>\n",
+             f"👑 Premium-пользователям: <b>{'не отправлять' if ex['premium'] else 'отправлять'}</b> "
+             f"(сейчас с Premium: {bs._n(ex['premium_count'])})"]
+    if ex["items"]:
+        lines.append(f"\n📋 Список ({len(ex['items'])}):")
+        for it in ex["items"][:60]:
+            lines.append("   • " + utils.escape_html(it["label"]) + ("" if it["known"] else " — бот его пока не знает"))
+        if len(ex["items"]) > 60:
+            lines.append(f"   … и ещё {len(ex['items']) - 60}")
+    else:
+        lines.append("\n📋 Список пуст.")
+    lines.append(f"\n📨 Сейчас рассылку получат: <b>{bs._n(aud['targets'])}</b>, не получат по настройке: "
+                 f"{bs._n(aud.get('excluded') or 0)}.")
+    lines.append("Личные сообщения бота (коды входа, аккаунт, ответы) они получают как обычно.")
+    kb = _kb((("✅ Premium: не отправлять — включить отправку" if ex["premium"]
+               else "🔕 Не отправлять Premium-пользователям"), "bc:ex:prem"),
+             ("➕ Добавить username или ID", "bc:ex:add"),
+             *((("➖ Убрать из списка", "bc:ex:del"), ("🧹 Очистить список", "bc:ex:clr")) if ex["items"] else ()),
+             ("↩️ К рассылке", "bc:home"))
+    return "\n".join(lines), kb
+
+
+async def _excl_show(target, state: FSMContext = None) -> None:
+    if state:
+        await state.clear()
+    ex = await asyncio.to_thread(bs.exclude_view)
+    aud = await asyncio.to_thread(bs.audience)
+    text, kb = _excl_screen(ex, aud)
+    if isinstance(target, CallbackQuery):
+        await _show(target, text, kb)
+    else:
+        await target.answer(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.startswith("bc:ex"), IsOwner())
+async def cb_exclude(call: CallbackQuery, state: FSMContext):
+    arg = call.data.split(":")[2] if call.data.count(":") >= 2 else ""
+    if arg == "prem":
+        on = not await asyncio.to_thread(bs.skip_premium)
+        await asyncio.to_thread(bs.set_skip_premium, on)
+        await asyncio.to_thread(_audit_excl, call.from_user.id, "Premium: " + ("не отправлять" if on else "отправлять"))
+        await call.answer("Premium-пользователям рассылка не придёт" if on else "Premium-пользователи снова получают рассылку")
+    elif arg in ("add", "del"):
+        await state.set_state(BcStates.waiting_excl_add if arg == "add" else BcStates.waiting_excl_del)
+        await call.answer()
+        await _show(call, ("➕ <b>Кого не включать в «Рассылку всем»</b>\n\n" if arg == "add"
+                           else "➖ <b>Кого снова включить в рассылку</b>\n\n")
+                    + "Пришлите один или сразу несколько <b>@username</b> или <b>Telegram ID</b> "
+                      "через запятую, пробел или с новой строки:\n"
+                      "<code>@ivan, @aru_99, 123456789</code>",
+                    _kb(("❌ Отмена", "bc:ex")))
+        return
+    elif arg == "clr":
+        await call.answer()
+        await _show(call, "🧹 Очистить весь список «Кому не отправлять»? Эти люди снова будут получать рассылку.",
+                    _kb(("🧹 Да, очистить", "bc:ex:clr2"), ("↩️ Назад", "bc:ex")))
+        return
+    elif arg == "clr2":
+        n = await asyncio.to_thread(bs.clear_excludes)
+        await asyncio.to_thread(_audit_excl, call.from_user.id, f"список очищен ({n})")
+        await call.answer(f"Список очищен: {n}")
+    else:
+        await call.answer()
+    await _excl_show(call, state)
+
+
+def _audit_excl(actor: int, details: str) -> None:
+    try:
+        from services import trash
+        trash.audit(actor, "", "bot", "settings", "", "Рассылка: кому не отправлять", None, details)
+    except Exception:
+        pass
+
+
+@router.message(BcStates.waiting_excl_add, IsOwner())
+@router.message(BcStates.waiting_excl_del, IsOwner())
+async def msg_exclude(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if not text or text.startswith("/"):
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=_kb(("🔕 Кому не отправлять", "bc:ex")))
+        return
+    adding = (await state.get_state()) == BcStates.waiting_excl_add.state
+    if adding:
+        added, had, bad = await asyncio.to_thread(bs.add_excludes, text)
+        if not added and not had:
+            await message.answer("Не нашёл ни одного @username или ID. Пример: <code>@ivan, 123456789</code>",
+                                 parse_mode="HTML")
+            return
+        note = [f"✅ Добавлено: {len(added)}"] + ([f"уже были: {len(had)}"] if had else [])
+        await asyncio.to_thread(_audit_excl, message.from_user.id, "добавлены: " + ", ".join(added)[:250])
+    else:
+        removed = await asyncio.to_thread(bs.remove_excludes, text)
+        bad = []
+        note = [f"✅ Убрано из списка: {len(removed)}"]
+        await asyncio.to_thread(_audit_excl, message.from_user.id, "убраны: " + ", ".join(removed)[:250])
+    if bad:
+        note.append("не понял: " + utils.escape_html(", ".join(bad))[:300])
+    await message.answer(" · ".join(note), parse_mode="HTML")
+    await _excl_show(message, state)
 
 
 @router.callback_query(F.data == "bc:new", IsOwner())
@@ -229,7 +342,9 @@ async def cb_send(call: CallbackQuery):
     aud = await asyncio.to_thread(bs.audience)
     await _show(call,
                 f"⚠️ <b>Отправить сообщение {bs._n(aud['targets'])} пользователям?</b>\n\n"
-                f"Остановить можно в любой момент. Удалить у всех — в течение 48 часов.",
+                + (f"🔕 Не получат по настройке «Кому не отправлять»: {bs._n(aud['excluded'])}\n\n"
+                   if aud.get("excluded") else "")
+                + f"Остановить можно в любой момент. Удалить у всех — в течение 48 часов.",
                 _kb((f"✅ Да, отправить — {bs._n(aud['targets'])}", f"bc:go:{bid}"),
                     ("↩️ Назад", f"bc:prev:{bid}")))
     await call.answer()

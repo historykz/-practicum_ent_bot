@@ -134,6 +134,12 @@ def set_password(user_id: int, password: str) -> None:
                (hash_password(password), _now(), user_id))
     db.execute("UPDATE login_codes SET used_at=? WHERE user_id=? AND used_at IS NULL",
                (_now(), user_id))
+    # v101: копия пароля, выданного админом, живёт только пока пароль не сменили.
+    # study_accounts.set_admin_password записывает новую копию сразу после этого вызова.
+    try:
+        db.execute("UPDATE users SET study_pw_enc=NULL WHERE id=?", (user_id,))
+    except Exception as e:                      # база ещё без колонки (миграция не прошла)
+        log.debug("study_pw_enc: %s", e)
     log_event(user_id, None, "password_changed")
 
 

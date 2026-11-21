@@ -5,6 +5,7 @@
 <nav class="admin-crumbs"><a href="/admin">⚙️ Админ-панель</a><span>›</span><span class="crumb-current">👥 Пользователи</span></nav>
 <h1>👥 Пользователи <span class="muted">({{ total }})</span></h1>
 <form method="get" class="admin-card admin-inline"><input type="search" name="q" value="{{ q }}" placeholder="Telegram ID, @username, имя, телефон">{% if suspicious %}<input type="hidden" name="filter" value="suspicious">{% endif %}<button class="btn" type="submit">Найти</button></form>
+<p><a class="btn btn-small" href="/admin/export/accounts.xlsx">📊 Учебные аккаунты: Excel с логинами и паролями</a></p>
 <p>{% if suspicious %}<b>⚠️ Подозрительные</b> · <a href="/admin/users">все пользователи</a>{% else %}<a href="/admin/users?filter=suspicious">⚠️ Только подозрительные</a>{% endif %}</p>
 <div class="table-scroll"><table>
   <thead><tr><th>Кто</th><th>Telegram ID</th><th>Premium</th><th>Статус</th><th>Активность</th></tr></thead>

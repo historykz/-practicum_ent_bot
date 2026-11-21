@@ -55,6 +55,8 @@ KINDS = {
     "premium": "Premium ученика",
     "results": "Результаты тестов",
     "ad": "Реклама после тестов",
+    "account": "Учебный аккаунт",
+    "menu_button": "Кнопка главного меню",
 }
 
 # Одинаковые слова на сайте и в боте
@@ -358,6 +360,11 @@ def _changed() -> None:
     try:
         from webapp import learning as _l
         _l.invalidate_catalog_cache()
+    except Exception:
+        pass
+    try:
+        from services import main_menu as _mm
+        _mm.invalidate()                   # вернули кнопку меню из корзины — меню сразу с ней
     except Exception:
         pass
 
