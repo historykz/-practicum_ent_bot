@@ -377,7 +377,7 @@ async def cb_channel_delete2(call: CallbackQuery, bot: Bot):
 
 
 @router.callback_query(F.data.startswith("sg:chgr:"), IsOwner())
-async def cb_channel_groups(call: CallbackQuery):
+async def cb_channel_groups(call: CallbackQuery, note: str = ""):
     ch_id = int(call.data.split(":")[2])
     ch = await asyncio.to_thread(sg.get_channel, ch_id)
     if not ch:
@@ -388,16 +388,25 @@ async def cb_channel_groups(call: CallbackQuery):
     kb = InlineKeyboardBuilder()
     kb.button(text=("✅" if ch.get("all_groups") else "⬜") + " Во всех группах с проверкой",
               callback_data=f"sg:chall:{ch_id}")
-    lines = [f"👥 <b>Где требуется подписка на «{sg._h(ch['title'] or _ref(ch))}»</b>\n",
-             "Отметьте группы. «Во всех группах» — канал сразу действует и в группах, где проверку включат позже.\n"]
+    lines = ([note + "\n"] if note else []) + [
+        f"👥 <b>Где требуется подписка на «{sg._h(ch['title'] or _ref(ch))}»</b>\n",
+        "Нажмите на группу: галочка сразу включает в ней проверку подписки. Нажмите ещё раз, чтобы убрать канал "
+        "из группы. «Во всех группах» — канал действует во всех группах, где проверка включена.\n"]
     for g in groups:
         applies = any(int(c["chat_id"]) == int(ch["chat_id"])
                       for c in sg.channels_for({"channels": [ch], "links": snap["links"]}, g["chat_id"]))
-        mark = "✅" if applies else "⬜"
-        state_txt = "проверка включена" if g.get("enabled") else "проверка выключена"
-        lines.append(f"{mark} {sg._h(g.get('title') or g['chat_id'])} — {state_txt}")
-        kb.button(text=f"{mark} {(g.get('title') or str(g['chat_id']))[:40]}",
-                  callback_data=f"sg:chg:{ch_id}:{g['chat_id']}")
+        title = g.get("title") or str(g["chat_id"])
+        if applies and g.get("enabled"):
+            lines.append(f"✅ {sg._h(title)} — проверка работает")
+            kb.button(text=f"✅ {title[:40]}", callback_data=f"sg:chg:{ch_id}:{g['chat_id']}")
+        elif applies:
+            # Канал отмечен, а проверка в самой группе выключена: писать может любой
+            lines.append(f"⚠️ {sg._h(title)} — канал отмечен, но проверка в группе ВЫКЛЮЧЕНА, писать может любой")
+            kb.button(text=f"⚠️ Включить проверку: {title[:30]}", callback_data=f"sg:chgon:{ch_id}:{g['chat_id']}")
+        else:
+            lines.append(f"⬜ {sg._h(title)} — " + ("проверка включена, этот канал не требуется" if g.get("enabled")
+                                                    else "проверка выключена"))
+            kb.button(text=f"⬜ {title[:40]}", callback_data=f"sg:chg:{ch_id}:{g['chat_id']}")
     kb.button(text="⬅️ К каналу", callback_data=f"sg:ch:{ch_id}")
     kb.adjust(1)
     await _show(call, "\n".join(lines), kb)
@@ -433,8 +442,21 @@ async def cb_channel_group_toggle(call: CallbackQuery, bot: Bot):
     applies = any(int(c["chat_id"]) == int(ch["chat_id"])
                   for c in sg.channels_for({"channels": [ch], "links": snap["links"]}, int(chat_id)))
     await asyncio.to_thread(sg.set_link, int(chat_id), int(ch["chat_id"]), not applies)
+    note = ""
+    if not applies:
+        g = await asyncio.to_thread(sg.get_group, int(chat_id))
+        if not g.get("enabled"):
+            note = await _enable_group(bot, int(chat_id))      # галочка = проверка в группе работает
     asyncio.create_task(sg.recheck_restricted(bot, 200))
-    await cb_channel_groups(call)
+    await cb_channel_groups(call, note)
+
+
+@router.callback_query(F.data.startswith("sg:chgon:"), IsOwner())
+async def cb_channel_group_enable(call: CallbackQuery, bot: Bot):
+    """Канал у группы отмечен, а проверка в группе выключена — включить."""
+    _, _, ch_id, chat_id = call.data.split(":")
+    note = await _enable_group(bot, int(chat_id))
+    await cb_channel_groups(call, note)          # call.data «sg:chgon:<канал>:<группа>» — номер канала тот же
 
 
 # ── добавление канала ──
@@ -538,6 +560,9 @@ def _group_card(chat_id: int) -> tuple:
     lines = [f"👥 <b>{sg._h(g.get('title') or chat_id)}</b>  <code>{chat_id}</code>\n",
              f"Проверка подписки: {'🟢 включена' if g.get('enabled') else '⚪ выключена'}",
              f"Права бота: {rights}"]
+    if not g.get("enabled") and applied:
+        lines.append("\n🔴 <b>Каналы отмечены, но проверка в группе ВЫКЛЮЧЕНА — писать может любой.</b> "
+                     "Нажмите «🟢 Включить проверку».")
     if g.get("enabled"):
         if problems:
             lines.append("\n🔴 <b>Защита не полная:</b>\n" + "\n".join(f"• {p}" for p in problems))
@@ -581,6 +606,24 @@ async def cb_group(call: CallbackQuery, state: FSMContext):
     await _answer(call)
 
 
+async def _enable_group(bot: Bot, chat_id: int) -> str:
+    """Включить проверку подписки в группе и сразу проверить права бота. Возвращает пояснение."""
+    res = await sg.check_group_rights(bot, chat_id)
+    await asyncio.to_thread(sg.set_group_enabled, chat_id, True)
+    title = sg._h(res.get("title") or (await asyncio.to_thread(sg.get_group, chat_id)).get("title") or chat_id)
+    if res["ok"]:
+        note = f"🟢 Проверка в группе «{title}» включена."
+    else:
+        need = "\n".join(f"• {x}" for x in res["missing"]) or sg._h(res["error"])
+        note = (f"🟢 Проверка в группе «{title}» включена, но бот не сможет удалять сообщения и ограничивать "
+                f"участников, пока не получит права администратора:\n{need}")
+    if not res.get("supergroup", True):
+        note += ("\n\n⚠️ Это обычная группа: Telegram не даёт ограничивать в ней участников. Бот будет только "
+                 "удалять сообщения. Чтобы ограничения работали, сделайте её супергруппой (например, "
+                 "включите видимость истории для новых участников).")
+    return note
+
+
 @router.callback_query(F.data.startswith("sg:grtog:"), IsOwner())
 async def cb_group_toggle(call: CallbackQuery, bot: Bot):
     chat_id = int(call.data.split(":")[2])
@@ -588,18 +631,7 @@ async def cb_group_toggle(call: CallbackQuery, bot: Bot):
     on = not bool(g.get("enabled"))
     note = ""
     if on:
-        res = await sg.check_group_rights(bot, chat_id)
-        await asyncio.to_thread(sg.set_group_enabled, chat_id, True)
-        if res["ok"]:
-            note = "🟢 Проверка включена."
-        else:
-            need = "\n".join(f"• {x}" for x in res["missing"]) or sg._h(res["error"])
-            note = ("🟢 Проверка включена, но бот не сможет удалять сообщения и ограничивать участников, пока "
-                    f"не получит права администратора:\n{need}")
-        if not res.get("supergroup", True):
-            note += ("\n\n⚠️ Это обычная группа: Telegram не даёт ограничивать в ней участников. Бот будет только "
-                     "удалять сообщения. Чтобы ограничения работали, сделайте её супергруппой (например, "
-                     "включите видимость истории для новых участников).")
+        note = await _enable_group(bot, chat_id)
     else:
         await asyncio.to_thread(sg.set_group_enabled, chat_id, False)
         asyncio.create_task(sg.release_disabled(bot, 500))
@@ -632,9 +664,14 @@ async def cb_group_channel(call: CallbackQuery, bot: Bot):
     applies = any(int(c["chat_id"]) == int(ch["chat_id"])
                   for c in sg.channels_for({"channels": [ch], "links": snap["links"]}, int(chat_id)))
     await asyncio.to_thread(sg.set_link, int(chat_id), int(ch["chat_id"]), not applies)
+    note = ""
+    if not applies:
+        g = await asyncio.to_thread(sg.get_group, int(chat_id))
+        if not g.get("enabled"):
+            note = await _enable_group(bot, int(chat_id))      # галочка = проверка в группе работает
     asyncio.create_task(sg.recheck_restricted(bot, 200))
     await _answer(call, "Канал для группы выключен" if applies else "Канал для группы включён")
-    await _open_group(call, int(chat_id))
+    await _open_group(call, int(chat_id), note)
 
 
 # ───────────────────────── исключения ─────────────────────────

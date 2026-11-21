@@ -1470,7 +1470,18 @@ def system_problems() -> list:
     for c in list_channels():
         if not c.get("is_active") and (c.get("disabled_reason") or "") == "check":
             out.append(f"🔴 Канал «{_h(c.get('title') or c['chat_id'])}» выключен: бот не может его проверять.")
+    for g in half_set_groups():
+        out.append(f"🔴 {_h(g.get('title') or g['chat_id'])}: канал отмечен, но проверка в группе ВЫКЛЮЧЕНА — "
+                   "писать может любой. Откройте «👥 Основные группы» и включите проверку.")
     return out
+
+
+def half_set_groups() -> list:
+    """Группы, где у канала стоит галочка, а сама проверка в группе выключена."""
+    linked = {int(r["group_chat_id"]) for r in db.fetchall(
+        "SELECT l.group_chat_id FROM gate_links l JOIN gate_channels c ON c.chat_id=l.channel_chat_id "
+        "WHERE l.applies=1 AND COALESCE(c.is_deleted,0)=0")}
+    return [g for g in known_groups() if not g.get("enabled") and int(g["chat_id"]) in linked]
 
 
 async def diagnose(bot, probe_user_id: int = None) -> str:
@@ -1547,6 +1558,10 @@ async def diagnose(bot, probe_user_id: int = None) -> str:
         else:
             lines.append("⚪ с запуска бота сообщений из этой группы не было (если участники пишут, а "
                          "здесь пусто — бот не получает сообщения: проверьте, что он администратор)")
+    for g in await asyncio.to_thread(half_set_groups):
+        problems += 1
+        lines.append(f"\n🔴 <b>{_h(g.get('title') or g['chat_id'])}</b>: канал отмечен, но проверка в группе "
+                     "ВЫКЛЮЧЕНА — писать может любой.")
     off = [g for g in groups if not g.get("enabled")]
     if off:
         lines.append("\n⚪ Без проверки: " + ", ".join(_h(g.get("title") or g["chat_id"]) for g in off[:15]))
